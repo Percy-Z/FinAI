@@ -1,0 +1,26 @@
+# 编译产物
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+a.out
+*.gch
+*.pch
+
+# 构建目录
+build/
+cmake-build-*/
+Debug/
+Release/
+
+# macOS
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
