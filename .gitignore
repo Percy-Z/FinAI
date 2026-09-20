@@ -10,6 +10,13 @@ a.out
 *.gch
 *.pch
 
+# 编译输出的无扩展名可执行文件（只匹配仓库根目录）
+# 注意：以后若创建存放测试代码的 test/ 目录，请删掉这一行并改用 build/ 输出
+/test
+
+# macOS 调试符号目录
+*.dSYM/
+
 # 构建目录
 build/
 cmake-build-*/
