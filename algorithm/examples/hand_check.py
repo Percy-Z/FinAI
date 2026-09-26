@@ -9,10 +9,10 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from finai.dcf import value_dcf  # noqa: E402
-from finai.types import ForecastAssumptions, MarketData  # noqa: E402
+from algorithm.finai.dcf import value_dcf  # noqa: E402
+from algorithm.finai.types import ForecastAssumptions, MarketData  # noqa: E402
 
 ASSUMPTIONS = ForecastAssumptions(
     revenue_base=100.0,

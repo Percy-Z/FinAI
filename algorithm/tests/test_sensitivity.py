@@ -6,8 +6,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from finai.dcf import enterprise_value, value_dcf
-from finai.sensitivity import (
+from algorithm.finai.dcf import enterprise_value, value_dcf
+from algorithm.finai.sensitivity import (
     Variable,
     apply_variable,
     attribute,
@@ -16,7 +16,7 @@ from finai.sensitivity import (
     write_grid_csv,
     write_tornado_csv,
 )
-from finai.types import ForecastAssumptions, MarketData
+from algorithm.finai.types import ForecastAssumptions, MarketData
 
 
 def flat_assumptions(**overrides) -> ForecastAssumptions:

@@ -1,0 +1,133 @@
+{
+  "fiscal_year": 2025,
+  "source": "示例公司_2025_annual.pdf",
+  "summary": {
+    "pass": 5,
+    "warning": 4,
+    "fail": 1,
+    "skipped": 0,
+    "total": 10
+  },
+  "checks": [
+    {
+      "check_id": "BS-01",
+      "category": "balance_sheet",
+      "description": "资产总计 = 负债合计 + 所有者权益合计",
+      "status": "pass",
+      "expected": 1000.0,
+      "actual": 1000.0,
+      "difference": 0.0,
+      "metric": null,
+      "tolerance": 1.0,
+      "note": ""
+    },
+    {
+      "check_id": "BS-02",
+      "category": "balance_sheet",
+      "description": "所有者权益 = 归母权益 + 少数股东权益",
+      "status": "pass",
+      "expected": 600.0,
+      "actual": 600.0,
+      "difference": 0.0,
+      "metric": null,
+      "tolerance": 1.0,
+      "note": ""
+    },
+    {
+      "check_id": "BS-03",
+      "category": "balance_sheet",
+      "description": "期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利",
+      "status": "fail",
+      "expected": 130.0,
+      "actual": 145.0,
+      "difference": 15.0,
+      "metric": null,
+      "tolerance": 1.0,
+      "note": ""
+    },
+    {
+      "check_id": "BS-04",
+      "category": "balance_sheet",
+      "description": "货币资金、应收账款、存货均不应超过资产总计",
+      "status": "pass",
+      "expected": null,
+      "actual": null,
+      "difference": null,
+      "metric": null,
+      "tolerance": null,
+      "note": ""
+    },
+    {
+      "check_id": "CF-01",
+      "category": "cash_flow",
+      "description": "期末现金 = 期初现金 + 经营 + 投资 + 筹资 + 汇率影响",
+      "status": "pass",
+      "expected": 150.0,
+      "actual": 150.0,
+      "difference": 0.0,
+      "metric": null,
+      "tolerance": 1.0,
+      "note": ""
+    },
+    {
+      "check_id": "CF-02",
+      "category": "cash_flow",
+      "description": "现金流量表期末现金 与 资产负债表货币资金 的口径差异",
+      "status": "warning",
+      "expected": 143.0,
+      "actual": 150.0,
+      "difference": 7.0,
+      "metric": null,
+      "tolerance": 1.0,
+      "note": "差异占货币资金 4.9%。货币资金包含受限资金、保证金等不属于现金及现金等价物的部分，差异需在报告中说明；占比过大则说明口径或数据有误"
+    },
+    {
+      "check_id": "X-01",
+      "category": "signal",
+      "description": "应收账款增速不应显著快于营业收入增速",
+      "status": "warning",
+      "expected": 0.11111111111111116,
+      "actual": 0.46153846153846145,
+      "difference": null,
+      "metric": 0.3504273504273503,
+      "tolerance": 0.2,
+      "note": "营业收入增速 +11.1%，应收账款增速 +46.2%，相差 +35.0%。可能的原因：放宽信用政策、渠道压货、收入确认偏激进，也可能是并表范围变化，需要结合现金流与账期一起看"
+    },
+    {
+      "check_id": "X-02",
+      "category": "signal",
+      "description": "经营活动现金流 与 净利润 的转化关系",
+      "status": "warning",
+      "expected": 60.0,
+      "actual": 25.0,
+      "difference": null,
+      "metric": 0.4166666666666667,
+      "tolerance": 0.5,
+      "note": "经营现金流 25，净利润 60，比率 0.42。利润含金量偏低，可能是应收或存货占用了资金，也可能存在不产生现金的收入"
+    },
+    {
+      "check_id": "X-03",
+      "category": "signal",
+      "description": "非经常性损益占归母净利润的比重不应过高",
+      "status": "warning",
+      "expected": 55.0,
+      "actual": 20.0,
+      "difference": null,
+      "metric": 0.36363636363636365,
+      "tolerance": 0.3,
+      "note": "非经常性损益 20，占比 36.4%。当期利润有较大比例不来自主营业务，估值时不应把这块外推"
+    },
+    {
+      "check_id": "X-04",
+      "category": "signal",
+      "description": "营业收入与资产总计的量级关系应落在合理区间",
+      "status": "pass",
+      "expected": 500.0,
+      "actual": 1000.0,
+      "difference": null,
+      "metric": 0.5,
+      "tolerance": null,
+      "note": "营业收入 / 资产总计 = 0.5000"
+    }
+  ]
+}

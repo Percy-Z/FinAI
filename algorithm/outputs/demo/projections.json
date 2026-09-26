@@ -1,0 +1,249 @@
+{
+  "source": "forecast_demo",
+  "drivers": {
+    "revenue_base": 400.0,
+    "base_year": 2025,
+    "years": 5,
+    "revenue_growth": [
+      0.1,
+      0.09,
+      0.08,
+      0.07,
+      0.06
+    ],
+    "tax_rate": 0.25,
+    "dividend_payout_ratio": 0.3
+  },
+  "years": [
+    {
+      "year": 2026,
+      "income": {
+        "revenue": 440.00000000000006,
+        "cost_of_sales": 264.0,
+        "gross_profit": 176.00000000000003,
+        "operating_expenses": 66.0,
+        "da": 22.000000000000004,
+        "ebitda": 110.00000000000003,
+        "ebit": 88.00000000000003,
+        "interest_expense": 5.0,
+        "pretax_profit": 83.00000000000003,
+        "income_tax": 20.750000000000007,
+        "net_profit": 62.25000000000002,
+        "net_profit_attributable": 62.25000000000002
+      },
+      "balance": {
+        "cash": 88.17500000000001,
+        "accounts_receivable": 66.0,
+        "inventory": 44.00000000000001,
+        "fixed_assets": 204.4,
+        "other_non_current_assets": 30.0,
+        "accounts_payable": 44.00000000000001,
+        "interest_bearing_debt": 100.0,
+        "other_non_current_liabilities": 25.0,
+        "share_capital": 100.0,
+        "retained_earnings": 163.57500000000002,
+        "minority_equity": 0.0,
+        "total_assets": 432.57500000000005,
+        "total_liabilities": 169.0,
+        "total_equity": 263.57500000000005,
+        "balance_gap": 0.0
+      },
+      "cashflow": {
+        "operating": 78.25000000000003,
+        "investing": -26.400000000000002,
+        "financing": -18.675000000000004,
+        "net_change": 33.17500000000002,
+        "cash_begin": 55.0,
+        "cash_end": 88.17500000000001,
+        "capex": 26.400000000000002,
+        "dividends": 18.675000000000004,
+        "delta_nwc": 6.0
+      },
+      "fcff": 55.60000000000002
+    },
+    {
+      "year": 2027,
+      "income": {
+        "revenue": 479.6000000000001,
+        "cost_of_sales": 287.76000000000005,
+        "gross_profit": 191.84000000000003,
+        "operating_expenses": 71.94000000000001,
+        "da": 23.980000000000004,
+        "ebitda": 119.90000000000002,
+        "ebit": 95.92000000000002,
+        "interest_expense": 5.0,
+        "pretax_profit": 90.92000000000002,
+        "income_tax": 22.730000000000004,
+        "net_profit": 68.19000000000001,
+        "net_profit_attributable": 68.19000000000001
+      },
+      "balance": {
+        "cash": 125.17200000000003,
+        "accounts_receivable": 71.94000000000001,
+        "inventory": 47.96000000000001,
+        "fixed_assets": 209.19600000000003,
+        "other_non_current_assets": 30.0,
+        "accounts_payable": 47.96000000000001,
+        "interest_bearing_debt": 100.0,
+        "other_non_current_liabilities": 25.0,
+        "share_capital": 100.0,
+        "retained_earnings": 211.30800000000005,
+        "minority_equity": 0.0,
+        "total_assets": 484.26800000000003,
+        "total_liabilities": 172.96,
+        "total_equity": 311.30800000000005,
+        "balance_gap": -5.684341886080802e-14
+      },
+      "cashflow": {
+        "operating": 86.23000000000002,
+        "investing": -28.776000000000003,
+        "financing": -20.457000000000004,
+        "net_change": 36.997000000000014,
+        "cash_begin": 88.17500000000001,
+        "cash_end": 125.17200000000003,
+        "capex": 28.776000000000003,
+        "dividends": 20.457000000000004,
+        "delta_nwc": 5.940000000000012
+      },
+      "fcff": 61.20399999999999
+    },
+    {
+      "year": 2028,
+      "income": {
+        "revenue": 517.9680000000001,
+        "cost_of_sales": 310.7808,
+        "gross_profit": 207.18720000000005,
+        "operating_expenses": 77.69520000000001,
+        "da": 25.898400000000006,
+        "ebitda": 129.49200000000002,
+        "ebit": 103.59360000000001,
+        "interest_expense": 5.0,
+        "pretax_profit": 98.59360000000001,
+        "income_tax": 24.648400000000002,
+        "net_profit": 73.9452,
+        "net_profit_attributable": 73.9452
+      },
+      "balance": {
+        "cash": 165.99876000000003,
+        "accounts_receivable": 77.69520000000001,
+        "inventory": 51.79680000000001,
+        "fixed_assets": 214.37568000000002,
+        "other_non_current_assets": 30.0,
+        "accounts_payable": 51.79680000000001,
+        "interest_bearing_debt": 100.0,
+        "other_non_current_liabilities": 25.0,
+        "share_capital": 100.0,
+        "retained_earnings": 263.06964000000005,
+        "minority_equity": 0.0,
+        "total_assets": 539.8664400000001,
+        "total_liabilities": 176.79680000000002,
+        "total_equity": 363.06964000000005,
+        "balance_gap": 5.684341886080802e-14
+      },
+      "cashflow": {
+        "operating": 94.08840000000001,
+        "investing": -31.078080000000003,
+        "financing": -22.18356,
+        "net_change": 40.82676000000001,
+        "cash_begin": 125.17200000000003,
+        "cash_end": 165.99876000000003,
+        "capex": 31.078080000000003,
+        "dividends": 22.18356,
+        "delta_nwc": 5.755200000000002
+      },
+      "fcff": 66.76032000000001
+    },
+    {
+      "year": 2029,
+      "income": {
+        "revenue": 554.2257600000002,
+        "cost_of_sales": 332.53545600000007,
+        "gross_profit": 221.69030400000008,
+        "operating_expenses": 83.13386400000002,
+        "da": 27.71128800000001,
+        "ebitda": 138.55644000000007,
+        "ebit": 110.84515200000006,
+        "interest_expense": 5.0,
+        "pretax_profit": 105.84515200000006,
+        "income_tax": 26.461288000000014,
+        "net_profit": 79.38386400000005,
+        "net_profit_attributable": 79.38386400000005
+      },
+      "balance": {
+        "cash": 210.58654320000005,
+        "accounts_receivable": 83.13386400000002,
+        "inventory": 55.42257600000002,
+        "fixed_assets": 219.91793760000002,
+        "other_non_current_assets": 30.0,
+        "accounts_payable": 55.42257600000002,
+        "interest_bearing_debt": 100.0,
+        "other_non_current_liabilities": 25.0,
+        "share_capital": 100.0,
+        "retained_earnings": 318.6383448,
+        "minority_equity": 0.0,
+        "total_assets": 599.0609208000001,
+        "total_liabilities": 180.42257600000002,
+        "total_equity": 418.6383448,
+        "balance_gap": 0.0
+      },
+      "cashflow": {
+        "operating": 101.65648800000005,
+        "investing": -33.25354560000001,
+        "financing": -23.815159200000014,
+        "net_change": 44.58778320000003,
+        "cash_begin": 165.99876000000003,
+        "cash_end": 210.58654320000005,
+        "capex": 33.25354560000001,
+        "dividends": 23.815159200000014,
+        "delta_nwc": 5.438664000000003
+      },
+      "fcff": 72.15294240000004
+    },
+    {
+      "year": 2030,
+      "income": {
+        "revenue": 587.4793056000002,
+        "cost_of_sales": 352.48758336000014,
+        "gross_profit": 234.9917222400001,
+        "operating_expenses": 88.12189584000002,
+        "da": 29.37396528000001,
+        "ebitda": 146.86982640000008,
+        "ebit": 117.49586112000007,
+        "interest_expense": 5.0,
+        "pretax_profit": 112.49586112000007,
+        "income_tax": 28.123965280000018,
+        "net_profit": 84.37189584000005,
+        "net_profit_attributable": 84.37189584000005
+      },
+      "balance": {
+        "cash": 258.78404539200005,
+        "accounts_receivable": 88.12189584000002,
+        "inventory": 58.74793056000002,
+        "fixed_assets": 225.792730656,
+        "other_non_current_assets": 30.0,
+        "accounts_payable": 58.74793056000002,
+        "interest_bearing_debt": 100.0,
+        "other_non_current_liabilities": 25.0,
+        "share_capital": 100.0,
+        "retained_earnings": 377.69867188800004,
+        "minority_equity": 0.0,
+        "total_assets": 661.4466024480001,
+        "total_liabilities": 183.74793056000001,
+        "total_equity": 477.69867188800004,
+        "balance_gap": 1.1368683772161603e-13
+      },
+      "cashflow": {
+        "operating": 108.75782928000004,
+        "investing": -35.24875833600001,
+        "financing": -25.311568752000014,
+        "net_change": 48.197502192000016,
+        "cash_begin": 210.58654320000005,
+        "cash_end": 258.78404539200005,
+        "capex": 35.24875833600001,
+        "dividends": 25.311568752000014,
+        "delta_nwc": 4.988031840000005
+      },
+      "fcff": 77.25907094400004
+    }
+  ]
+}

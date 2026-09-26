@@ -9,11 +9,11 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from finai.dcf import value_dcf  # noqa: E402
-from finai.reverse_dcf import reverse_solve_many  # noqa: E402
-from finai.sensitivity import (  # noqa: E402
+from algorithm.finai.dcf import value_dcf  # noqa: E402
+from algorithm.finai.reverse_dcf import reverse_solve_many  # noqa: E402
+from algorithm.finai.sensitivity import (  # noqa: E402
     Variable,
     attribute,
     tornado,
@@ -21,7 +21,7 @@ from finai.sensitivity import (  # noqa: E402
     write_grid_csv,
     write_tornado_csv,
 )
-from finai.types import ForecastAssumptions, MarketData  # noqa: E402
+from algorithm.finai.types import ForecastAssumptions, MarketData  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "demo"
 

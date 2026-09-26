@@ -13,7 +13,7 @@
 import unittest
 from dataclasses import replace
 
-from finai.dcf import (
+from algorithm.finai.dcf import (
     discount_factors,
     enterprise_value,
     project,
@@ -21,7 +21,7 @@ from finai.dcf import (
     terminal_value_perpetuity,
     value_dcf,
 )
-from finai.types import ForecastAssumptions, MarketData
+from algorithm.finai.types import ForecastAssumptions, MarketData
 
 
 def flat_assumptions(**overrides) -> ForecastAssumptions:

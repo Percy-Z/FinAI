@@ -2,8 +2,8 @@
 
 import unittest
 
-from finai.types import WaccInputs
-from finai.wacc import (
+from algorithm.finai.types import WaccInputs
+from algorithm.finai.wacc import (
     after_tax_cost_of_debt,
     check_wacc_sanity,
     compute_wacc,

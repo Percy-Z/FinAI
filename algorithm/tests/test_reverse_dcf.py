@@ -7,15 +7,15 @@
 import unittest
 from dataclasses import replace
 
-from finai.dcf import value_dcf
-from finai.reverse_dcf import (
+from algorithm.finai.dcf import value_dcf
+from algorithm.finai.reverse_dcf import (
     DEFAULT_BOUNDS,
     effective_bounds,
     reverse_solve,
     reverse_solve_many,
 )
-from finai.sensitivity import Variable
-from finai.types import ForecastAssumptions, MarketData
+from algorithm.finai.sensitivity import Variable
+from algorithm.finai.types import ForecastAssumptions, MarketData
 
 
 def flat_assumptions(**overrides) -> ForecastAssumptions:
