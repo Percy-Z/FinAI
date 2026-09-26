@@ -8,6 +8,24 @@
 """
 
 from .dcf import Projection, enterprise_value, project, value_dcf
+from .reverse_dcf import (
+    ReverseResult,
+    effective_bounds,
+    reverse_solve,
+    reverse_solve_many,
+)
+from .sensitivity import (
+    AttributionRow,
+    GridResult,
+    TornadoRow,
+    Variable,
+    apply_variable,
+    attribute,
+    tornado,
+    two_way_grid,
+    write_grid_csv,
+    write_tornado_csv,
+)
 from .types import DCFResult, ForecastAssumptions, MarketData, WaccInputs
 from .wacc import (
     after_tax_cost_of_debt,
@@ -19,18 +37,32 @@ from .wacc import (
 )
 
 __all__ = [
+    "AttributionRow",
     "DCFResult",
     "ForecastAssumptions",
+    "GridResult",
     "MarketData",
     "Projection",
+    "ReverseResult",
+    "TornadoRow",
+    "Variable",
     "WaccInputs",
     "after_tax_cost_of_debt",
+    "apply_variable",
+    "attribute",
     "check_wacc_sanity",
     "compute_wacc",
     "cost_of_equity",
+    "effective_bounds",
     "enterprise_value",
     "project",
+    "reverse_solve",
+    "reverse_solve_many",
+    "tornado",
+    "two_way_grid",
     "value_dcf",
     "wacc_from_market",
     "weights_from_market",
+    "write_grid_csv",
+    "write_tornado_csv",
 ]
