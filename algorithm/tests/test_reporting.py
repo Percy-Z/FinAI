@@ -240,7 +240,9 @@ class TestExportRun(unittest.TestCase):
         """数据文件 01 到 10、图表 11 到 16，编号全局唯一且按顺序。"""
         names = sorted(path.name for path in self.artifacts.files.values())
         numbers = [name[:2] for name in names if name[:2].isdigit()]
-        self.assertEqual(numbers, [f"{index:02d}" for index in range(1, 17)])
+        # 没装 matplotlib 时图表本来就不会生成，这时只要求数据文件 01 到 10 齐全
+        last = 17 if HAS_MATPLOTLIB else 11
+        self.assertEqual(numbers, [f"{index:02d}" for index in range(1, last)])
 
     def test_charts_go_into_subdirectory(self):
         for name, path in self.artifacts.files.items():

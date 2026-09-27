@@ -5,6 +5,7 @@
 
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 from algorithm.finai.comps import (
@@ -13,16 +14,21 @@ from algorithm.finai.comps import (
     FootballFieldBand,
     comps_valuation,
 )
-from algorithm.finai.sensitivity import Variable, tornado, two_way_grid
+from algorithm.finai.sensitivity import GridResult, Variable, tornado, two_way_grid
 from algorithm.finai.types import ForecastAssumptions, MarketData
 from algorithm.output import charts
-from algorithm.output.charts.base import spread_end_labels
 from algorithm.tests.test_reporting import sample_outputs
 
 from algorithm.tests._helpers import assert_close  # noqa: E402
 
 
 HAS_MATPLOTLIB = charts.HAS_MATPLOTLIB
+
+# base.py 顶上是「import matplotlib」，没装 matplotlib 时连导入都会失败。
+# 放在条件里，是为了让没装 matplotlib 的机器也能跑这个模块——该跳过的跳过，
+# 而不是整份 import 失败、一条测试都跑不了。
+if HAS_MATPLOTLIB:
+    from algorithm.output.charts.base import spread_end_labels
 
 
 class TestChartNumbering(unittest.TestCase):
@@ -48,6 +54,7 @@ class TestChartNumbering(unittest.TestCase):
         self.assertEqual(len(modules), len(charts.CHART_FILES))
 
 
+@unittest.skipUnless(HAS_MATPLOTLIB, "没有安装 matplotlib")
 class TestSpreadEndLabels(unittest.TestCase):
     def test_far_apart_values_are_untouched(self):
         values = [100.0, 200.0, 300.0]
@@ -194,6 +201,46 @@ class TestIndividualCharts(unittest.TestCase):
         )
         path = charts.render_sensitivity_heatmap(grid, self.root / "h.png")
         self.assertGreater(path.stat().st_size, 2000)
+
+    def test_sensitivity_heatmap_with_single_row_or_column(self):
+        """等值线要 2×2 才画得出来，单行单列的网格不能把 contour 画崩。"""
+        single_row = GridResult(
+            row_name="g", col_name="WACC", row_field="terminal_growth",
+            col_field="wacc", row_values=[0.02], col_values=[0.09, 0.10, 0.11],
+            cells=[[9.64, 8.33, 7.32]], price=8.5,
+        )
+        single_column = GridResult(
+            row_name="g", col_name="WACC", row_field="terminal_growth",
+            col_field="wacc", row_values=[0.01, 0.02, 0.03], col_values=[0.10],
+            cells=[[9.64], [10.98], [12.87]], price=11.0,
+        )
+        for name, grid in (("row", single_row), ("column", single_column)):
+            path = charts.render_sensitivity_heatmap(grid, self.root / f"{name}.png")
+            self.assertGreater(path.stat().st_size, 2000, name)
+
+    def test_sensitivity_heatmap_with_empty_grid_raises(self):
+        grid = GridResult(
+            row_name="g", col_name="WACC", row_field="terminal_growth",
+            col_field="wacc", row_values=[], col_values=[], cells=[], price=10.0,
+        )
+        with self.assertRaises(ValueError):
+            charts.render_sensitivity_heatmap(grid, self.root / "empty.png")
+
+    def test_sensitivity_heatmap_with_flat_cells_does_not_divide_by_zero(self):
+        """所有格子数值一样时 spread 为 0，色阶不能除零。"""
+        grid = GridResult(
+            row_name="g", col_name="WACC", row_field="terminal_growth",
+            col_field="wacc", row_values=[0.01, 0.02, 0.03],
+            col_values=[0.09, 0.10, 0.11],
+            cells=[[10.0, 10.0, 10.0] for _ in range(3)], price=10.0,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            path = charts.render_sensitivity_heatmap(grid, self.root / "flat.png")
+        self.assertGreater(path.stat().st_size, 2000)
+        runtime = [str(item.message) for item in caught
+                   if issubclass(item.category, RuntimeWarning)]
+        self.assertEqual(runtime, [])
 
 
 if __name__ == "__main__":
