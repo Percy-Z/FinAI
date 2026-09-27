@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .types import DCFResult, ForecastAssumptions, MarketData
@@ -149,6 +150,7 @@ def value_dcf(
         implied_return=implied_return,
         implied_multiple=implied_multiple,
         equity_value=equity_value,
+        terminal_value=terminal,
         terminal_method=assumptions.terminal_method,
     )
 
@@ -201,12 +203,17 @@ def _diagnose(
     implied_return: float,
     implied_multiple: float,
     equity_value: float,
+    terminal_value: float,
     terminal_method: str,
 ) -> list[str]:
     """把估值结果的可疑之处写下来，交给报告和答辩使用。"""
     notes: list[str] = []
 
-    if terminal_share > TERMINAL_SHARE_TOO_HIGH:
+    if not math.isfinite(terminal_share):
+        notes.append(
+            "企业价值为零，终值占比无法计算；先检查预测期现金流是不是全为零"
+        )
+    elif terminal_share > TERMINAL_SHARE_TOO_HIGH:
         notes.append(
             f"终值占企业价值的 {terminal_share:.1%}，超过 "
             f"{TERMINAL_SHARE_TOO_HIGH:.0%}：显式预测期可能过短，"
@@ -221,15 +228,31 @@ def _diagnose(
     if equity_value < 0:
         notes.append("权益价值为负：净债务超过企业价值，检查债务口径与预测假设")
 
+    if math.isfinite(terminal_value) and terminal_value < 0:
+        notes.append(
+            f"终值为负（{terminal_value:,.0f}）：末年现金流或 EBITDA 为负时，"
+            "永续增长法和退出倍数法都不适用，换回正常盈利年份或改用清算价值"
+        )
+
     if abs(implied_return) < 0.05:
         notes.append(
             f"隐含回报仅 {implied_return:+.1%}，与当前股价的差距不足 5%，安全边际有限"
         )
 
-    if terminal_method == "perpetuity":
+    # 末年 EBITDA 为零或负数时这个倍数没有意义，不能印出「nanx」这种字样
+    if (
+        terminal_method == "perpetuity"
+        and math.isfinite(implied_multiple)
+        and implied_multiple > 0
+    ):
         notes.append(
             f"隐含退出倍数为 {implied_multiple:.1f}x，"
             "应与公司自身历史估值和可比公司对照后再下结论"
+        )
+    elif terminal_method == "perpetuity":
+        notes.append(
+            "末年 EBITDA 为零或为负，无法反算隐含退出倍数；"
+            "永续增长法在这种情形下不适用"
         )
 
     return notes

@@ -345,7 +345,7 @@ class TestValidationLoop(unittest.TestCase):
         """预测里没有非经常性损益这项，检查应该报 skipped 而不是 pass。"""
         report = run_checks(self.snapshots[0])
         self.assertEqual(report.by_id("X-03").status, "skipped")
-        self.assertEqual(report.summary["pass"], 9)
+        self.assertEqual(report.summary["pass"], 10)
         self.assertEqual(report.summary["skipped"], 1)
 
     def test_receivable_check_runs_with_prior_year_data(self):

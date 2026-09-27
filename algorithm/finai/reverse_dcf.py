@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from .dcf import value_dcf
 from .sensitivity import Variable, apply_variable
@@ -64,6 +64,14 @@ class ReverseResult:
             f"{self.name}：市场隐含 {self.implied_value:.4f}，"
             f"基准 {self.base_value:.4f}，差 {gap:+.4f}"
         )
+
+    def to_dict(self) -> dict:
+        """供 reverse_dcf.json 使用。"""
+        data = asdict(self)
+        data["direction"] = self.direction
+        data["residual"] = self.residual
+        data["description"] = self.describe()
+        return data
 
 
 def effective_bounds(

@@ -119,6 +119,10 @@ class GridResult:
     price: float
 
     def cell(self, row_value: float, col_value: float) -> float:
+        if row_value not in self.row_values:
+            raise KeyError(f"行参数没有取值 {row_value}，可选：{self.row_values}")
+        if col_value not in self.col_values:
+            raise KeyError(f"列参数没有取值 {col_value}，可选：{self.col_values}")
         i = self.row_values.index(row_value)
         j = self.col_values.index(col_value)
         return self.cells[i][j]

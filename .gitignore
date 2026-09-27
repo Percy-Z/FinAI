@@ -39,3 +39,8 @@ __pycache__/
 venv/
 .pytest_cache/
 *.egg-info/
+
+# 运行产物：时间戳目录不入库（每次跑 pipeline_demo 都会新建一个），
+# demo/ 保留在库里，作为输出格式的示例
+algorithm/outputs/*
+!algorithm/outputs/demo/

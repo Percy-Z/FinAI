@@ -41,6 +41,7 @@ from .statements import (
     IncomeStatement,
     ReportSnapshot,
 )
+from .types import require_finite, require_positive
 
 
 def _as_tuple(value: Sequence[float] | float, years: int, name: str) -> tuple[float, ...]:
@@ -68,6 +69,24 @@ class BalanceSheetState:
     share_capital: float
     retained_earnings: float
     minority_equity: float = 0.0
+
+    def __post_init__(self) -> None:
+        # 基期数据是外部传进来的，NaN 会让 balance_gap 变成 NaN，
+        # 而 abs(nan) > 容差 是 False，平衡检查就形同虚设
+        for name in (
+            "cash",
+            "accounts_receivable",
+            "inventory",
+            "fixed_assets",
+            "other_non_current_assets",
+            "accounts_payable",
+            "interest_bearing_debt",
+            "other_non_current_liabilities",
+            "share_capital",
+            "retained_earnings",
+            "minority_equity",
+        ):
+            require_finite(getattr(self, name), f"资产负债表科目 {name}")
 
     @property
     def current_assets(self) -> float:
@@ -176,8 +195,11 @@ class ForecastDrivers:
     def __post_init__(self) -> None:
         if self.years < 1:
             raise ValueError("预测期至少 1 年")
-        if self.revenue_base <= 0:
-            raise ValueError("revenue_base 必须为正数")
+        require_positive(self.revenue_base, "revenue_base")
+        require_finite(self.tax_rate, "tax_rate")
+        require_finite(self.dividend_payout_ratio, "dividend_payout_ratio")
+        require_finite(self.minority_share_of_profit, "minority_share_of_profit")
+        require_finite(self.interest_rate_on_debt, "interest_rate_on_debt")
         if not 0.0 <= self.tax_rate <= 0.6:
             raise ValueError(f"tax_rate={self.tax_rate} 超出合理区间")
         if not 0.0 <= self.dividend_payout_ratio <= 1.0:
@@ -232,6 +254,7 @@ class ThreeStatementForecast:
     drivers: ForecastDrivers
     years: list[ForecastYear] = field(default_factory=list)
     source: str = ""
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def balance_gaps(self) -> list[float]:
@@ -380,6 +403,28 @@ def build_forecast(
             previous_balance.interest_bearing_debt
             - drivers.net_debt_repayment[index]
         )
+        # 下面这些不是错误，但结果会失真，必须记下来交给报告说明
+        if drivers.net_debt_repayment[index] > 0:
+            share = drivers.net_debt_repayment[index] / (
+                previous_balance.interest_bearing_debt
+                if previous_balance.interest_bearing_debt > 0
+                else 1.0
+            )
+            if share > 0.10:
+                forecast.warnings.append(
+                    f"{year_number} 年还款额占期初有息负债的 {share:.0%}，"
+                    "而利息是按期初债务口径算的，这一年的利息费用会偏高"
+                )
+        if interest_bearing_debt < 0:
+            forecast.warnings.append(
+                f"{year_number} 年有息负债为 {interest_bearing_debt:,.0f}（负数），"
+                "说明还款计划超过了债务本身，检查 net_debt_repayment"
+            )
+        if pretax_profit < 0:
+            forecast.warnings.append(
+                f"{year_number} 年税前利润为负，本模型按税率给出税收抵减，"
+                "没有考虑亏损结转年限，亏损年份的净利润会偏乐观"
+            )
         dividends = net_profit_attributable * drivers.dividend_payout_ratio
         retained_earnings = (
             previous_balance.retained_earnings
@@ -387,6 +432,14 @@ def build_forecast(
             - dividends
         )
         minority_equity = previous_balance.minority_equity + minority_profit
+        if (
+            previous_balance.share_capital + retained_earnings + minority_equity
+            < 0
+        ):
+            forecast.warnings.append(
+                f"{year_number} 年所有者权益为负，公司已经资不抵债，"
+                "估值结论要谨慎使用"
+            )
 
         # 现金流量表（间接法）
         delta_receivable = accounts_receivable - previous_balance.accounts_receivable

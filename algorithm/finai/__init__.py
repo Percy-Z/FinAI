@@ -1,10 +1,17 @@
 """FinAI 估值引擎。
 
-目前包含：
-    finai.wacc  资本成本（CAPM、债务成本、WACC）
-    finai.dcf   现金流折现（FCFF 预测、终值、估值桥）
+模块清单：
+    types       估值引擎的输入输出契约
+    statements  财务报表数据结构
+    wacc        资本成本：CAPM、债务成本、WACC
+    dcf         现金流折现：FCFF、终值、估值桥
+    forecast    三表联动预测
+    sensitivity 敏感性分析：龙卷风图、双因素网格、区间归因
+    reverse_dcf 反向求解：给定股价反解隐含假设
+    comps       相对估值：可比公司倍数、隐含价值、足球场图
+    validate    勾稽校验：十一项检查
 
-后续模块：敏感性分析、反向求解、勾稽校验、文档抽取。
+输出层不在本包里：它写在 algorithm/output/ 下，只依赖本包，不反向依赖。
 """
 
 from .comps import (
@@ -63,7 +70,15 @@ from .statements import (
     IncomeStatement,
     ReportSnapshot,
 )
-from .types import DCFResult, ForecastAssumptions, MarketData, WaccInputs
+from .types import (
+    DCFResult,
+    ForecastAssumptions,
+    MarketData,
+    WaccInputs,
+    require_finite,
+    require_optional_finite,
+    require_positive,
+)
 from .validate import (
     CheckResult,
     Tolerance,
@@ -72,6 +87,7 @@ from .validate import (
     check_balance_sheet_tie,
     check_cash_definition,
     check_cash_rollforward,
+    check_data_presence,
     check_equity_composition,
     check_non_recurring_share,
     check_profit_cash_conversion,
@@ -152,6 +168,9 @@ __all__ = [
     "run_checks",
     "reverse_solve",
     "reverse_solve_many",
+    "require_finite",
+    "require_optional_finite",
+    "require_positive",
     "tornado",
     "to_snapshots",
     "to_summary_balance",

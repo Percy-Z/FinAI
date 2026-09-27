@@ -2,8 +2,8 @@
 
 2026 年北京市大学生金融人工智能竞赛「自动化估值建模」方向的实现仓库。
 
-当前进度：估值引擎、敏感性分析、反向求解、勾稽校验、相对估值、三表联动预测
-六个模块已完成，共 244 个单元测试覆盖。每个算法的输入输出见
+当前进度：估值引擎、敏感性分析、反向求解、勾稽校验、相对估值、三表联动预测、
+输出层七个模块已完成，共 271 个单元测试覆盖。每个算法的输入输出见
 [`algorithm/shuoming.md`](algorithm/shuoming.md)。
 
 ## 快速开始
@@ -13,15 +13,25 @@
 
 ```bash
 python3 -m unittest discover -s algorithm/tests -v
-python3 algorithm/examples/hand_check.py
+python3 algorithm/examples/dcf_demo.py
 python3 algorithm/examples/sensitivity_demo.py
 python3 algorithm/examples/validate_demo.py
 python3 algorithm/examples/comps_demo.py
 python3 algorithm/examples/forecast_demo.py
+python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件出
 ```
 
 注意 `discover` 必须指定 `-s algorithm/tests`：`algorithm` 是命名空间包，
 不带参数直接跑 `python3 -m unittest discover` 会找不到测试。
+
+## 系统架构
+
+![系统架构与数据流](docs/architecture.png)
+
+![三表联动机制](docs/three-statement.png)
+
+两张图的源码在 [`docs/`](docs/) 下，是可编辑的 Mermaid 文件，改完按
+[`docs/README.md`](docs/README.md) 里的命令重新渲染即可。
 
 ## 目录结构
 
@@ -37,10 +47,52 @@ algorithm/
     validate.py     勾稽校验：恒等式、现金口径、信号类检查
     comps.py        相对估值：可比公司倍数、隐含价值、足球场图
     forecast.py     三表联动预测：从假设推出完整三张表
+  output/           输出层（只依赖 finai，不反向依赖）
+    reporting.py    把结果写进 outputs/<run_id>/
+    charts/         一个文件一张图，11 到 16 号
   tests/            单元测试，用手算数字做断言
   examples/         可直接运行的示例脚本
-  outputs/          示例脚本产出的 csv 与 json
+  outputs/          运行产物。代码是 output，产物是 outputs，差一个 s
 ```
+
+## 端到端跑一遍
+
+`pipeline_demo.py` 把八个算法模块串起来，一次跑完并落盘：
+
+```text
+资本成本 → 三表联动预测 → 勾稽校验 → DCF 估值
+→ 敏感性分析 → 反向求解 → 相对估值 → 足球场图 → 写文件
+```
+
+每次运行新建一个带时间戳的目录，不覆盖上一次。**文件名前面的编号是固定的**，
+数据文件 01 到 10、图表 11 到 16，全目录编号唯一，按文件名字典序排出来就是流水线顺序：
+
+```text
+outputs/20260927T165932/
+  01_projections.json        三表联动预测
+  02_validation_report.json  勾稽校验报告（可能含多年）
+  03_valuation.json          DCF 估值结果
+  04_tornado.csv             单因素敏感性排序
+  05_sensitivity.csv         双因素敏感性网格
+  06_reverse_dcf.json        反向求解出的市场隐含假设
+  07_comps.csv               每家公司一行的倍数表
+  08_comps_implied.csv       每种倍数的隐含每股价值
+  09_football_field.json     估值区间的数据
+  10_run_manifest.json       运行清单，含每个产物的 sha256
+  charts/
+    11_football_field.png      估值区间
+    12_tornado.png             单因素敏感性
+    13_sensitivity_heatmap.png 双因素敏感性
+    14_peer_multiples.png      可比公司倍数
+    15_forecast_trend.png      三表预测趋势
+    16_validation_summary.png  勾稽校验总览
+```
+
+图表层的组织方式和完整对应表见 [`algorithm/output/README.md`](algorithm/output/README.md)。
+
+`run_manifest.json` 是可复现性的凭证：记录每个输出文件的 sha256、字节数，
+以及调用方传入的输入说明。两次运行结果不一样时，用它就能判断是输入变了、
+代码变了还是假设变了。
 
 ## 相对估值的两条路径
 
@@ -65,10 +117,13 @@ algorithm/
 | fail | 该平的没平，属于数据错误，必须查 |
 | skipped | 输入缺失，无法检查（不等同于通过） |
 
-当前共十项检查：BS-01 资产负债配平、BS-02 权益构成、BS-03 未分配利润滚动、
-BS-04 明细不超总额、CF-01 现金滚动、CF-02 现金口径、X-01 收入与应收背离、
-X-02 利润现金转化、X-03 非经常性损益占比、X-04 量级合理性。
+当前共十一项检查：DQ-01 数据完整性、BS-01 资产负债配平、BS-02 权益构成、
+BS-03 未分配利润滚动、BS-04 明细不超总额、CF-01 现金滚动、CF-02 现金口径、
+X-01 收入与应收背离、X-02 利润现金转化、X-03 非经常性损益占比、X-04 量级合理性。
 另有 X-05 跨期一致性需要两份年报，用 `check_restatement` 单独调用。
+
+DQ-01 排在最前面，专门拦"数据其实没抽到"这种情况：资产、收入、净利润、
+经营现金流全为零时，恒等式 0 = 0 + 0 恒成立，会报出一条假通过。
 
 ## 单位约定
 
@@ -93,6 +148,7 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 
 按依赖顺序，接下来要做的是：
 
-1. 数据层：YAML 假设读取、JSON 结果落盘、日志
+1. 数据层：读 YAML 假设文件、写运行日志（`trace.jsonl`）
 2. 把 `forecast.py` 算出的 FCFF 序列接进 `dcf.py` 的估值函数
 3. 文档抽取：年报 PDF 到结构化财报
+4. 报告生成：从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx）

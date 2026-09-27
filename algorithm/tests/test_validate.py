@@ -113,8 +113,8 @@ class TestCleanFixture(unittest.TestCase):
         self.assertEqual(report.summary["fail"], 0)
         self.assertEqual(report.summary["warning"], 0)
         self.assertEqual(report.summary["skipped"], 0)
-        self.assertEqual(report.summary["pass"], 10)
-        self.assertEqual(report.summary["total"], 10)
+        self.assertEqual(report.summary["pass"], 11)
+        self.assertEqual(report.summary["total"], 11)
 
     def test_report_carries_source_and_year(self):
         report = run_checks(BASE_SNAPSHOT)
@@ -414,12 +414,12 @@ class TestReport(unittest.TestCase):
         )
         report = run_checks(snapshot)
         summary = report.summary
-        self.assertEqual(summary["total"], 10)
+        self.assertEqual(summary["total"], 11)
         self.assertEqual(summary["skipped"], 1)
         self.assertEqual(summary["fail"], 1)
         self.assertEqual(
             summary["pass"] + summary["warning"] + summary["fail"] + summary["skipped"],
-            10,
+            11,
         )
 
     def test_failures_and_warnings_accessors(self):
@@ -442,9 +442,10 @@ class TestReport(unittest.TestCase):
         payload = json.dumps(report.to_dict(), ensure_ascii=False)
         restored = json.loads(payload)
         self.assertEqual(restored["fiscal_year"], 2025)
-        self.assertEqual(restored["summary"]["total"], 10)
-        self.assertEqual(len(restored["checks"]), 10)
-        self.assertEqual(restored["checks"][0]["check_id"], "BS-01")
+        self.assertEqual(restored["summary"]["total"], 11)
+        self.assertEqual(len(restored["checks"]), 11)
+        # 第一条是数据完整性检查，它必须排在最前面，否则全零数据会先报出假通过
+        self.assertEqual(restored["checks"][0]["check_id"], "DQ-01")
 
     def test_thresholds_are_configurable_from_run_checks(self):
         report = run_checks(BASE_SNAPSHOT, ar_divergence_threshold=0.10)
