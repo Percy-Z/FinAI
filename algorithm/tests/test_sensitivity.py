@@ -19,6 +19,9 @@ from algorithm.finai.sensitivity import (
 )
 from algorithm.finai.types import ForecastAssumptions, MarketData
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
+
+
 
 def flat_assumptions(**overrides) -> ForecastAssumptions:
     params: dict[str, Any] = dict(
@@ -50,17 +53,17 @@ def flat_market(**overrides) -> MarketData:
 class TestVariable(unittest.TestCase):
     def test_absolute_constructor(self):
         var = Variable.absolute("永续增长率", "terminal_growth", base=0.02, delta=0.01)
-        self.assertAlmostEqual(var.low, 0.01)
-        self.assertAlmostEqual(var.high, 0.03)
+        assert_close(self, var.low, 0.01)
+        assert_close(self, var.high, 0.03)
 
     def test_relative_constructor(self):
         var = Variable.relative("收入增速", "revenue_growth", base=0.10, percent=0.5)
-        self.assertAlmostEqual(var.low, 0.05)
-        self.assertAlmostEqual(var.high, 0.15)
+        assert_close(self, var.low, 0.05)
+        assert_close(self, var.high, 0.15)
 
     def test_bounds_constructor_defaults_base_to_midpoint(self):
         var = Variable.bounds("WACC", "wacc", low=0.08, high=0.12)
-        self.assertAlmostEqual(var.base, 0.10)
+        assert_close(self, var.base, 0.10)
 
     def test_base_outside_bounds_rejected(self):
         with self.assertRaises(ValueError):
@@ -72,8 +75,8 @@ class TestApplyVariable(unittest.TestCase):
         modified, new_wacc = apply_variable(
             flat_assumptions(), 0.10, Variable.bounds("W", "wacc", 0.08, 0.12), 0.12
         )
-        self.assertAlmostEqual(new_wacc, 0.12)
-        self.assertAlmostEqual(modified.terminal_growth, 0.0)
+        assert_close(self, new_wacc, 0.12)
+        assert_close(self, modified.terminal_growth, 0.0)
 
     def test_vector_field_broadcasts_to_every_year(self):
         modified, _ = apply_variable(
@@ -92,7 +95,7 @@ class TestApplyVariable(unittest.TestCase):
             Variable.absolute("税率", "tax_rate", base=0.25, delta=0.05),
             0.15,
         )
-        self.assertAlmostEqual(modified.tax_rate, 0.15)
+        assert_close(self, modified.tax_rate, 0.15)
 
     def test_original_object_is_not_mutated(self):
         original = flat_assumptions()
@@ -102,7 +105,7 @@ class TestApplyVariable(unittest.TestCase):
             Variable.absolute("税率", "tax_rate", base=0.25, delta=0.05),
             0.15,
         )
-        self.assertAlmostEqual(original.tax_rate, 0.25)
+        assert_close(self, original.tax_rate, 0.25)
 
     def test_unknown_field_rejected(self):
         with self.assertRaises(ValueError):
@@ -136,7 +139,7 @@ class TestTornado(unittest.TestCase):
             [Variable.absolute("税率", "tax_rate", base=0.25, delta=0.05)],
         )
         expected = value_dcf(assumptions, market, 0.10).per_share
-        self.assertAlmostEqual(rows[0].per_share_base, expected, places=10)
+        assert_close(self, rows[0].per_share_base, expected, places=10)
 
     def test_swing_matches_manual_computation(self):
         assumptions, market = flat_assumptions(), flat_market()
@@ -152,9 +155,9 @@ class TestTornado(unittest.TestCase):
             replace(assumptions, terminal_growth=0.02), market, 0.10
         ).per_share
 
-        self.assertAlmostEqual(rows[0].per_share_at_low, low_value, places=8)
-        self.assertAlmostEqual(rows[0].per_share_at_high, high_value, places=8)
-        self.assertAlmostEqual(rows[0].swing, abs(high_value - low_value), places=8)
+        assert_close(self, rows[0].per_share_at_low, low_value, places=8)
+        assert_close(self, rows[0].per_share_at_high, high_value, places=8)
+        assert_close(self, rows[0].swing, abs(high_value - low_value), places=8)
 
     def test_rows_sorted_by_swing_descending(self):
         rows = tornado(
@@ -232,7 +235,7 @@ class TestAttribution(unittest.TestCase):
             ],
         )
         shares = [row.share for row in attribute(rows)]
-        self.assertAlmostEqual(sum(shares), 1.0, places=10)
+        assert_close(self, sum(shares), 1.0, places=10)
 
     def test_share_proportional_to_swing(self):
         rows = tornado(
@@ -247,7 +250,7 @@ class TestAttribution(unittest.TestCase):
         attributed = attribute(rows)
         total = sum(row.swing for row in rows)
         for row, attr in zip(rows, attributed):
-            self.assertAlmostEqual(attr.share, row.swing / total, places=12)
+            assert_close(self, attr.share, row.swing / total, places=12)
 
 
 class TestTwoWayGrid(unittest.TestCase):
@@ -274,10 +277,10 @@ class TestTwoWayGrid(unittest.TestCase):
             Variable.absolute("WACC", "wacc", base=0.10, delta=0.02),
             points=3,
         )
-        self.assertAlmostEqual(grid.row_values[0], -0.02, places=10)
-        self.assertAlmostEqual(grid.row_values[-1], 0.02, places=10)
-        self.assertAlmostEqual(grid.col_values[0], 0.08, places=10)
-        self.assertAlmostEqual(grid.col_values[-1], 0.12, places=10)
+        assert_close(self, grid.row_values[0], -0.02, places=10)
+        assert_close(self, grid.row_values[-1], 0.02, places=10)
+        assert_close(self, grid.col_values[0], 0.08, places=10)
+        assert_close(self, grid.col_values[-1], 0.12, places=10)
 
     def test_value_decreases_across_wacc_columns(self):
         grid = two_way_grid(
@@ -317,7 +320,7 @@ class TestTwoWayGrid(unittest.TestCase):
             points=5,
         )
         expected = value_dcf(assumptions, market, 0.10).per_share
-        self.assertAlmostEqual(grid.cell(0.0, 0.10), expected, places=8)
+        assert_close(self, grid.cell(0.0, 0.10), expected, places=8)
 
     def test_same_field_on_both_axes_rejected(self):
         with self.assertRaises(ValueError):
@@ -397,7 +400,7 @@ class TestEngineReuse(unittest.TestCase):
                 modified, _ = apply_variable(assumptions, 0.10, row_var, row_value)
                 ev = enterprise_value(modified, col_value)
                 expected = (ev - market.net_debt) / market.diluted_shares
-                self.assertAlmostEqual(grid.cells[i][j], expected, places=8)
+                assert_close(self, grid.cells[i][j], expected, places=8)
 
 
 if __name__ == "__main__":

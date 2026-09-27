@@ -11,5 +11,3 @@
     examples 演示脚本
     tests    单元测试
 """
-
-__all__ = ["finai", "output"]

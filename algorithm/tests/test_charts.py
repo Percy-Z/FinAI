@@ -19,6 +19,9 @@ from algorithm.output import charts
 from algorithm.output.charts.base import spread_end_labels
 from algorithm.tests.test_reporting import sample_outputs
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
+
+
 HAS_MATPLOTLIB = charts.HAS_MATPLOTLIB
 
 
@@ -56,7 +59,7 @@ class TestSpreadEndLabels(unittest.TestCase):
         self.assertGreater(abs(adjusted[0] - adjusted[1]), 600.0 * 0.05 - 1e-9)
         # 原来 84 > 77，推开后仍要保持这个相对顺序；整体重心不变
         self.assertGreater(adjusted[0], adjusted[1])
-        self.assertAlmostEqual(sum(adjusted), sum(values), places=9)
+        assert_close(self, sum(adjusted), sum(values), places=9)
 
     def test_empty_input(self):
         self.assertEqual(spread_end_labels([], span=1.0), [])

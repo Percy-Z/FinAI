@@ -90,6 +90,19 @@ def new_figure(width: float, height: float, panels: int = 1):
     return figure, axes
 
 
+def new_figure_row(width: float, height: float, panels: int):
+    """新建一行并排的子图，返回 (figure, 坐标轴列表)。
+
+    单独写一个函数是为了让返回类型明确：new_figure 在单图和多图之间返回
+    Axes 或数组，调用方 unpack 或 zip 的时候类型检查器会说不清楚。
+    """
+    if panels < 1:
+        raise ValueError("panels 至少为 1")
+    setup_font()
+    figure, axes = plt.subplots(1, panels, figsize=(width, height))
+    return figure, list(axes) if panels > 1 else [axes]
+
+
 def style_axes(axes, grid_axis: str | None = "x") -> None:
     """统一坐标轴样式：去掉上右边框，加浅网格，文字用墨色。"""
     for side in ("top", "right"):

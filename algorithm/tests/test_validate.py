@@ -38,6 +38,8 @@ from algorithm.finai.validate import (
     run_checks,
 )
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
+
 BASE_BALANCE = BalanceSheet(
     total_assets=1000.0,
     total_liabilities=400.0,
@@ -128,7 +130,7 @@ class TestBalanceSheetTie(unittest.TestCase):
             clean_snapshot(balance=balance(total_equity=590.0)), Tolerance()
         )
         self.assertEqual(result.status, "fail")
-        self.assertAlmostEqual(result.difference, 10.0)
+        assert_close(self, result.difference, 10.0)
 
     def test_difference_within_tolerance_passes(self):
         result = check_balance_sheet_tie(
@@ -138,8 +140,8 @@ class TestBalanceSheetTie(unittest.TestCase):
 
     def test_expected_value_is_liabilities_plus_equity(self):
         result = check_balance_sheet_tie(BASE_SNAPSHOT, Tolerance())
-        self.assertAlmostEqual(result.expected, 1000.0)
-        self.assertAlmostEqual(result.actual, 1000.0)
+        assert_close(self, result.expected, 1000.0)
+        assert_close(self, result.actual, 1000.0)
 
 
 class TestEquityComposition(unittest.TestCase):
@@ -156,14 +158,14 @@ class TestEquityComposition(unittest.TestCase):
         )
         self.assertEqual(result.status, "fail")
         # 期望 580 + 30 = 610，实际权益 600，差 -10
-        self.assertAlmostEqual(result.difference, -10.0)
+        assert_close(self, result.difference, -10.0)
 
 
 class TestRetainedEarningsRollforward(unittest.TestCase):
     def test_manual_calculation(self):
         result = check_retained_earnings_rollforward(BASE_SNAPSHOT, Tolerance())
         # 100 + 55 - 5 - 20 = 130
-        self.assertAlmostEqual(result.expected, 130.0)
+        assert_close(self, result.expected, 130.0)
         self.assertEqual(result.status, "pass")
 
     def test_incomplete_inputs_cap_at_warning(self):
@@ -210,7 +212,7 @@ class TestCashRollforward(unittest.TestCase):
     def test_clean_fixture_passes(self):
         result = check_cash_rollforward(BASE_SNAPSHOT, Tolerance())
         # 120 + 70 - 30 - 10 = 150
-        self.assertAlmostEqual(result.expected, 150.0)
+        assert_close(self, result.expected, 150.0)
         self.assertEqual(result.status, "pass")
 
     def test_fx_effect_is_included(self):
@@ -218,7 +220,7 @@ class TestCashRollforward(unittest.TestCase):
             cashflow=cashflow(cash_end=155.0, fx_effect=5.0)
         )
         result = check_cash_rollforward(snapshot, Tolerance())
-        self.assertAlmostEqual(result.expected, 155.0)
+        assert_close(self, result.expected, 155.0)
         self.assertEqual(result.status, "pass")
 
     def test_wrong_cash_end_fails(self):
@@ -226,7 +228,7 @@ class TestCashRollforward(unittest.TestCase):
             clean_snapshot(cashflow=cashflow(cash_end=140.0)), Tolerance()
         )
         self.assertEqual(result.status, "fail")
-        self.assertAlmostEqual(result.difference, -10.0)
+        assert_close(self, result.difference, -10.0)
 
     def test_missing_begin_is_skipped(self):
         result = check_cash_rollforward(
@@ -254,7 +256,7 @@ class TestCashDefinition(unittest.TestCase):
         snapshot = clean_snapshot(balance=balance(cash_and_equivalents=100.0))
         result = check_cash_definition(snapshot, Tolerance())
         self.assertEqual(result.status, "fail")
-        self.assertAlmostEqual(result.difference, 50.0)
+        assert_close(self, result.difference, 50.0)
 
     def test_missing_values_are_skipped(self):
         snapshot = clean_snapshot(balance=balance(cash_and_equivalents=None))
@@ -265,7 +267,7 @@ class TestRevenueReceivableDivergence(unittest.TestCase):
     def test_clean_fixture_passes(self):
         result = check_revenue_receivable_divergence(BASE_SNAPSHOT)
         # 收入 500/450-1 = 11.1%，应收 80/65-1 = 23.1%，差 12.0 个百分点
-        self.assertAlmostEqual(result.metric, 0.119658, places=6)
+        assert_close(self, result.metric, 0.119658, places=6)
         self.assertIsNone(result.difference)
         self.assertEqual(result.status, "pass")
 
@@ -275,7 +277,7 @@ class TestRevenueReceivableDivergence(unittest.TestCase):
         )
         result = check_revenue_receivable_divergence(snapshot)
         # 应收 80/55-1 = 45.5%，与收入增速相差 34.3 个百分点
-        self.assertAlmostEqual(result.metric, 0.343434, places=6)
+        assert_close(self, result.metric, 0.343434, places=6)
         self.assertEqual(result.status, "warning")
         self.assertIn("收入确认", result.note)
 
@@ -306,14 +308,14 @@ class TestProfitCashConversion(unittest.TestCase):
     def test_clean_fixture_passes(self):
         result = check_profit_cash_conversion(BASE_SNAPSHOT)
         # 70 / 60 = 1.1667
-        self.assertAlmostEqual(result.metric, 1.166667, places=6)
+        assert_close(self, result.metric, 1.166667, places=6)
         self.assertIsNone(result.difference)
         self.assertEqual(result.status, "pass")
 
     def test_low_conversion_triggers_warning(self):
         snapshot = clean_snapshot(cashflow=cashflow(operating=20.0))
         result = check_profit_cash_conversion(snapshot)
-        self.assertAlmostEqual(result.metric, 1 / 3, places=6)
+        assert_close(self, result.metric, 1 / 3, places=6)
         self.assertEqual(result.status, "warning")
         self.assertIn("含金量", result.note)
 
@@ -328,13 +330,13 @@ class TestNonRecurringShare(unittest.TestCase):
     def test_clean_fixture_passes(self):
         result = check_non_recurring_share(BASE_SNAPSHOT)
         # 10 / 55 = 18.2%
-        self.assertAlmostEqual(result.metric, 10 / 55, places=6)
+        assert_close(self, result.metric, 10 / 55, places=6)
         self.assertEqual(result.status, "pass")
 
     def test_high_share_triggers_warning(self):
         snapshot = clean_snapshot(income=income(non_recurring_gains=25.0))
         result = check_non_recurring_share(snapshot)
-        self.assertAlmostEqual(result.metric, 25 / 55, places=6)
+        assert_close(self, result.metric, 25 / 55, places=6)
         self.assertEqual(result.status, "warning")
         self.assertIn("不应把这块外推", result.note)
 
@@ -352,7 +354,7 @@ class TestNonRecurringShare(unittest.TestCase):
 class TestScaleSanity(unittest.TestCase):
     def test_clean_fixture_passes(self):
         result = check_scale_sanity(BASE_SNAPSHOT)
-        self.assertAlmostEqual(result.metric, 0.5, places=10)
+        assert_close(self, result.metric, 0.5, places=10)
         self.assertEqual(result.status, "pass")
 
     def test_unit_mix_up_is_caught(self):
@@ -379,7 +381,7 @@ class TestRestatement(unittest.TestCase):
     def test_inconsistent_values_fail(self):
         result = check_restatement("营业收入", 440.0, 450.0, 2025, Tolerance())
         self.assertEqual(result.status, "fail")
-        self.assertAlmostEqual(result.difference, -10.0)
+        assert_close(self, result.difference, -10.0)
         self.assertIn("追溯调整", result.note)
 
     def test_check_id_and_category(self):
@@ -390,10 +392,10 @@ class TestRestatement(unittest.TestCase):
 
 class TestTolerance(unittest.TestCase):
     def test_absolute_dominates_for_small_scale(self):
-        self.assertAlmostEqual(Tolerance(absolute=1.0, relative=1e-6).limit_for(100.0), 1.0)
+        assert_close(self, Tolerance(absolute=1.0, relative=1e-6).limit_for(100.0), 1.0)
 
     def test_relative_dominates_for_large_scale(self):
-        self.assertAlmostEqual(
+        assert_close(self, 
             Tolerance(absolute=1.0, relative=1e-6).limit_for(10_000_000.0), 10.0
         )
 

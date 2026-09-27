@@ -320,7 +320,9 @@ class TestCompsEdgeCases(unittest.TestCase):
         item = implied_from_multiple(
             target(interest_bearing_debt=5000.0), "ev_ebitda", 5.0
         )
-        self.assertLess(item.implied_equity_value, 0)
+        implied_equity = item.implied_equity_value
+        self.assertIsNotNone(implied_equity)
+        self.assertLess(implied_equity or 0.0, 0)
         self.assertIn("隐含权益价值为负", item.note)
 
     def test_missing_pair_is_skipped_with_warning(self):

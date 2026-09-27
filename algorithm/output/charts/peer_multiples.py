@@ -10,7 +10,7 @@ from pathlib import Path
 
 from algorithm.finai.comps import MULTIPLE_LABELS, CompsResult, compute_multiples
 
-from .base import COLORS, new_figure, save, style_axes
+from .base import COLORS, new_figure_row, save, style_axes
 
 # 按这个顺序出图，没有数据的倍数自动跳过
 PREFERRED_ORDER = ("pe", "pb", "ev_ebitda", "ev_ebit", "ps")
@@ -36,11 +36,9 @@ def render(
         comps.peer_multiples[peer.code] for peer in comps.peers
     ]
 
-    figure, axes_list = new_figure(
+    figure, axes_list = new_figure_row(
         4.1 * len(names) + 0.6, 0.52 * len(labels) + 2.6, panels=len(names)
     )
-    if len(names) == 1:
-        axes_list = [axes_list]
 
     for axes, name in zip(axes_list, names):
         entry = comps.stats[name]

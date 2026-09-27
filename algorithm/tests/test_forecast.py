@@ -35,6 +35,9 @@ from algorithm.finai.forecast import (
 from algorithm.finai.types import ForecastAssumptions
 from algorithm.finai.validate import run_checks
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
+
+
 OPENING = BalanceSheetState(
     cash=55.0,
     accounts_receivable=60.0,
@@ -74,13 +77,13 @@ def build(**overrides):
 
 class TestOpeningBalance(unittest.TestCase):
     def test_opening_balances(self):
-        self.assertAlmostEqual(OPENING.total_assets, 385.0)
-        self.assertAlmostEqual(OPENING.total_liabilities, 165.0)
-        self.assertAlmostEqual(OPENING.total_equity, 220.0)
-        self.assertAlmostEqual(OPENING.balance_gap, 0.0)
+        assert_close(self, OPENING.total_assets, 385.0)
+        assert_close(self, OPENING.total_liabilities, 165.0)
+        assert_close(self, OPENING.total_equity, 220.0)
+        assert_close(self, OPENING.balance_gap, 0.0)
 
     def test_working_capital(self):
-        self.assertAlmostEqual(OPENING.working_capital, 60.0)
+        assert_close(self, OPENING.working_capital, 60.0)
 
     def test_unbalanced_opening_rejected(self):
         broken = replace(OPENING, cash=OPENING.cash + 1.0)
@@ -90,14 +93,14 @@ class TestOpeningBalance(unittest.TestCase):
 
     def test_balance_gap_detects_error(self):
         broken = replace(OPENING, cash=OPENING.cash + 5.0)
-        self.assertAlmostEqual(broken.balance_gap, 5.0)
+        assert_close(self, broken.balance_gap, 5.0)
 
 
 class TestDriversValidation(unittest.TestCase):
     def test_scalar_is_broadcast(self):
         drivers = replace(DRIVERS, revenue_growth=0.08)
         self.assertEqual(drivers.revenue_growth, (0.08,) * 5)
-        self.assertEqual(len(drivers.revenue_growth), drivers.years)
+        self.assertEqual(len(drivers.series("revenue_growth")), drivers.years)
 
     def test_sequence_length_must_match(self):
         with self.assertRaises(ValueError):
@@ -134,59 +137,59 @@ class TestFirstYear(unittest.TestCase):
 
     def test_income_statement_matches_hand_calculation(self):
         income = self.year.income
-        self.assertAlmostEqual(income.revenue, 440.0)
-        self.assertAlmostEqual(income.gross_profit, 176.0)
-        self.assertAlmostEqual(income.cost_of_sales, 264.0)
-        self.assertAlmostEqual(income.operating_expenses, 66.0)
-        self.assertAlmostEqual(income.da, 22.0)
-        self.assertAlmostEqual(income.ebitda, 110.0)
-        self.assertAlmostEqual(income.ebit, 88.0)
+        assert_close(self, income.revenue, 440.0)
+        assert_close(self, income.gross_profit, 176.0)
+        assert_close(self, income.cost_of_sales, 264.0)
+        assert_close(self, income.operating_expenses, 66.0)
+        assert_close(self, income.da, 22.0)
+        assert_close(self, income.ebitda, 110.0)
+        assert_close(self, income.ebit, 88.0)
 
     def test_interest_uses_opening_debt(self):
-        self.assertAlmostEqual(self.year.income.interest_expense, 5.0)
+        assert_close(self, self.year.income.interest_expense, 5.0)
 
     def test_tax_and_net_profit(self):
         income = self.year.income
-        self.assertAlmostEqual(income.pretax_profit, 83.0)
-        self.assertAlmostEqual(income.income_tax, 20.75)
-        self.assertAlmostEqual(income.net_profit, 62.25)
-        self.assertAlmostEqual(income.net_profit_attributable, 62.25)
+        assert_close(self, income.pretax_profit, 83.0)
+        assert_close(self, income.income_tax, 20.75)
+        assert_close(self, income.net_profit, 62.25)
+        assert_close(self, income.net_profit_attributable, 62.25)
 
     def test_balance_sheet_items(self):
         balance = self.year.balance
-        self.assertAlmostEqual(balance.accounts_receivable, 66.0)
-        self.assertAlmostEqual(balance.inventory, 44.0)
-        self.assertAlmostEqual(balance.accounts_payable, 44.0)
-        self.assertAlmostEqual(balance.fixed_assets, 200.0)
+        assert_close(self, balance.accounts_receivable, 66.0)
+        assert_close(self, balance.inventory, 44.0)
+        assert_close(self, balance.accounts_payable, 44.0)
+        assert_close(self, balance.fixed_assets, 200.0)
 
     def test_retained_earnings_rollforward(self):
         # 120 + 62.25 - 62.25 x 30% = 163.575
-        self.assertAlmostEqual(self.year.balance.retained_earnings, 163.575)
+        assert_close(self, self.year.balance.retained_earnings, 163.575)
 
     def test_cash_flow_statement(self):
         cashflow = self.year.cashflow
-        self.assertAlmostEqual(cashflow.operating, 78.25)
-        self.assertAlmostEqual(cashflow.investing, -22.0)
-        self.assertAlmostEqual(cashflow.financing, -18.675)
-        self.assertAlmostEqual(cashflow.net_change, 37.575)
-        self.assertAlmostEqual(cashflow.cash_end, 92.575)
+        assert_close(self, cashflow.operating, 78.25)
+        assert_close(self, cashflow.investing, -22.0)
+        assert_close(self, cashflow.financing, -18.675)
+        assert_close(self, cashflow.net_change, 37.575)
+        assert_close(self, cashflow.cash_end, 92.575)
 
     def test_delta_nwc(self):
         # 应收 +6、存货 +4、应付 +4 -> 营运资本增加 6
-        self.assertAlmostEqual(self.year.cashflow.delta_nwc, 6.0)
+        assert_close(self, self.year.cashflow.delta_nwc, 6.0)
 
     def test_balance_sheet_balances(self):
-        self.assertAlmostEqual(self.year.balance.total_assets, 432.575)
-        self.assertAlmostEqual(self.year.balance.balance_gap, 0.0, places=9)
+        assert_close(self, self.year.balance.total_assets, 432.575)
+        assert_close(self, self.year.balance.balance_gap, 0.0, places=9)
 
     def test_cash_from_statement_equals_cash_on_balance_sheet(self):
-        self.assertAlmostEqual(
+        assert_close(self, 
             self.year.balance.cash, self.year.cashflow.cash_end, places=9
         )
 
     def test_fcff(self):
         # 88 x 0.75 + 22 - 22 - 6 = 60
-        self.assertAlmostEqual(self.year.fcff, 60.0)
+        assert_close(self, self.year.fcff, 60.0)
 
 
 class TestWholeForecast(unittest.TestCase):
@@ -199,14 +202,14 @@ class TestWholeForecast(unittest.TestCase):
         """模型的现金由现金流量表推出，所以每一年都应该自动平。"""
         forecast = build()
         for gap in forecast.balance_gaps:
-            self.assertAlmostEqual(gap, 0.0, places=9)
+            assert_close(self, gap, 0.0, places=9)
         self.assertLess(forecast.worst_balance_gap, 1e-9)
 
     def test_revenue_compounds(self):
         forecast = build()
-        self.assertAlmostEqual(forecast.years[0].income.revenue, 440.0)
-        self.assertAlmostEqual(forecast.years[1].income.revenue, 484.0)
-        self.assertAlmostEqual(forecast.years[4].income.revenue, 400 * 1.1**5, places=6)
+        assert_close(self, forecast.years[0].income.revenue, 440.0)
+        assert_close(self, forecast.years[1].income.revenue, 484.0)
+        assert_close(self, forecast.years[4].income.revenue, 400 * 1.1**5, places=6)
 
     def test_cash_accumulates(self):
         forecast = build()
@@ -216,8 +219,8 @@ class TestWholeForecast(unittest.TestCase):
 
     def test_fcff_series(self):
         forecast = build()
-        self.assertAlmostEqual(forecast.fcff_series[0], 60.0)
-        self.assertAlmostEqual(forecast.fcff_series[1], 66.0)
+        assert_close(self, forecast.fcff_series[0], 60.0)
+        assert_close(self, forecast.fcff_series[1], 66.0)
         self.assertEqual(len(forecast.fcff_series), 5)
 
     def test_year_lookup(self):
@@ -237,31 +240,31 @@ class TestDriverEffects(unittest.TestCase):
 
     def test_debt_repayment_reduces_debt_and_interest(self):
         forecast = build(net_debt_repayment=10.0)
-        self.assertAlmostEqual(forecast.years[0].balance.interest_bearing_debt, 90.0)
-        self.assertAlmostEqual(forecast.years[1].income.interest_expense, 4.5)
+        assert_close(self, forecast.years[0].balance.interest_bearing_debt, 90.0)
+        assert_close(self, forecast.years[1].income.interest_expense, 4.5)
         # 还债是现金流出，筹资现金流更负
         self.assertLess(forecast.years[0].cashflow.financing, -18.675)
 
     def test_zero_payout_retains_all_profit(self):
         forecast = build(dividend_payout_ratio=0.0)
-        self.assertAlmostEqual(
+        assert_close(self, 
             forecast.years[0].balance.retained_earnings, 120.0 + 62.25
         )
-        self.assertAlmostEqual(forecast.years[0].cashflow.financing, 0.0)
+        assert_close(self, forecast.years[0].cashflow.financing, 0.0)
 
     def test_full_payout_keeps_retained_earnings_flat(self):
         forecast = build(dividend_payout_ratio=1.0)
-        self.assertAlmostEqual(forecast.years[0].balance.retained_earnings, 120.0)
+        assert_close(self, forecast.years[0].balance.retained_earnings, 120.0)
 
     def test_minority_share_splits_profit_and_still_balances(self):
         forecast = build(minority_share_of_profit=0.20)
         year = forecast.years[0]
-        self.assertAlmostEqual(year.income.minority_profit, 62.25 * 0.20, places=6)
-        self.assertAlmostEqual(
+        assert_close(self, year.income.minority_profit, 62.25 * 0.20, places=6)
+        assert_close(self, 
             year.income.net_profit_attributable, 62.25 * 0.80, places=6
         )
-        self.assertAlmostEqual(year.balance.minority_equity, 62.25 * 0.20, places=6)
-        self.assertAlmostEqual(year.balance.balance_gap, 0.0, places=9)
+        assert_close(self, year.balance.minority_equity, 62.25 * 0.20, places=6)
+        assert_close(self, year.balance.balance_gap, 0.0, places=9)
 
     def test_higher_capex_lowers_fcff(self):
         low = build(capex_pct_revenue=0.03)
@@ -295,7 +298,7 @@ class TestConsistencyWithDcf(unittest.TestCase):
 
         simplified = project(assumptions)
         for heavy, light in zip(forecast.fcff_series, simplified.fcff):
-            self.assertAlmostEqual(heavy, light, places=9)
+            assert_close(self, heavy, light, places=9)
 
     def test_enterprise_value_helper_is_reachable(self):
         """两条路径都能算出企业价值，这里只确认接口没断。"""
@@ -353,16 +356,18 @@ class TestValidationLoop(unittest.TestCase):
         report = run_checks(self.snapshots[1])
         result = report.by_id("X-01")
         self.assertEqual(result.status, "pass")
-        self.assertAlmostEqual(result.metric, 0.0, places=9)
+        assert_close(self, result.metric, 0.0, places=9)
 
     def test_broken_forecast_is_caught_by_validation(self):
         """故意改坏一年的留存收益，勾稽检查必须抓出来。"""
         snapshot = self.snapshots[0]
+        retained = snapshot.balance.retained_earnings
+        self.assertIsNotNone(retained)
         broken = replace(
             snapshot,
             balance=replace(
                 snapshot.balance,
-                retained_earnings=snapshot.balance.retained_earnings + 10.0,
+                retained_earnings=(retained or 0.0) + 10.0,
             ),
         )
         report = run_checks(broken)

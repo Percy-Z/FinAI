@@ -10,7 +10,14 @@ from pathlib import Path
 
 from algorithm.finai.forecast import ThreeStatementForecast
 
-from .base import COLORS, SERIES_COLORS, new_figure, save, spread_end_labels, style_axes
+from .base import (
+    COLORS,
+    SERIES_COLORS,
+    new_figure_row,
+    save,
+    spread_end_labels,
+    style_axes,
+)
 
 
 def render(
@@ -23,7 +30,7 @@ def render(
     income = [year.income for year in forecast.years]
     balance = [year.balance for year in forecast.years]
 
-    figure, (left, right) = new_figure(12.4, 4.4, panels=2)
+    figure, (left, right) = new_figure_row(12.4, 4.4, panels=2)
 
     series = [
         ("营业收入", [item.revenue for item in income], SERIES_COLORS[0]),

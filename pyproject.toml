@@ -5,3 +5,10 @@
 ignore_missing_imports = true
 # 跑法：在仓库根目录执行 python3 -m mypy algorithm
 # algorithm/ 下有 __init__.py，所以包名能正确解析成 algorithm.finai.xxx
+
+[tool.pyright]
+# 跑法：npx pyright algorithm
+# VSCode 的 Pylance 用的就是这套引擎，跑这个等于提前看到编辑器里的全部警告
+include = ["algorithm"]
+# 图表层需要 matplotlib；没装的话那些文件会报「无法解析导入」，
+# 装一下即可：python3 -m pip install matplotlib

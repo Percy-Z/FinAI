@@ -43,6 +43,9 @@ from algorithm.finai.sensitivity import Variable, tornado, two_way_grid
 from algorithm.finai.types import ForecastAssumptions, MarketData
 from algorithm.finai.validate import run_checks
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
+
+
 HAS_MATPLOTLIB = CHARTS_AVAILABLE
 
 
@@ -328,15 +331,15 @@ class TestSerialization(unittest.TestCase):
         )
         payload = field.to_dict()
         self.assertEqual(len(payload["bands"]), 2)
-        self.assertAlmostEqual(payload["bands"][0]["width"], 4.0)
-        self.assertAlmostEqual(payload["overall_low"], 8.0)
-        self.assertAlmostEqual(payload["overall_high"], 12.0)
+        assert_close(self, payload["bands"][0]["width"], 4.0)
+        assert_close(self, payload["overall_low"], 8.0)
+        assert_close(self, payload["overall_high"], 12.0)
         self.assertEqual(payload["warnings"], ["示例警告"])
         json.dumps(payload, ensure_ascii=False)
 
     def test_band_to_dict_includes_width(self):
         payload = FootballFieldBand("X", 1.0, 2.0, 3.5).to_dict()
-        self.assertAlmostEqual(payload["width"], 2.5)
+        assert_close(self, payload["width"], 2.5)
 
     def test_reverse_result_to_dict(self):
         outputs = sample_outputs()
@@ -355,7 +358,7 @@ class TestSerialization(unittest.TestCase):
     def test_implied_valuation_payload_is_complete(self):
         target = CompanyMetrics("T", "目标", 10.0, 100.0, net_profit_attributable=62.0)
         item = implied_from_multiple(target, "pe", 12.0)
-        self.assertAlmostEqual(item.implied_per_share, 7.44, places=6)
+        assert_close(self, item.implied_per_share, 7.44, places=6)
 
 
 class TestRunFileNaming(unittest.TestCase):
