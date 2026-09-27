@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import matplotlib
 
@@ -15,7 +16,9 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
+from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
 
 DPI = 180
 
@@ -103,7 +106,7 @@ def new_figure_row(width: float, height: float, panels: int):
     return figure, list(axes) if panels > 1 else [axes]
 
 
-def style_axes(axes, grid_axis: str | None = "x") -> None:
+def style_axes(axes: Axes, grid_axis: Literal["both", "x", "y"] | None = "x") -> None:
     """统一坐标轴样式：去掉上右边框，加浅网格，文字用墨色。"""
     for side in ("top", "right"):
         axes.spines[side].set_visible(False)
@@ -119,7 +122,7 @@ def style_axes(axes, grid_axis: str | None = "x") -> None:
         label.set_color(COLORS["ink"])
 
 
-def add_price_line(axes, price: float, label: str | None = None) -> None:
+def add_price_line(axes: Axes, price: float, label: str | None = None) -> None:
     """画现价参考线，全项目统一红色虚线。
 
     label 传字符串才会进图例；传 None 表示只在图上画线，由调用方自己标文字。
@@ -141,12 +144,12 @@ def sequential_cmap(name: str = "finai_green") -> LinearSegmentedColormap:
     )
 
 
-def save(figure, path: str | Path) -> Path:
+def save(figure: Figure, path: str | Path) -> Path:
     """保存并关闭。自动建目录，统一 180 dpi 与白底。"""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     # 有总标题时留出顶部空间，否则标题会被裁掉
-    if figure._suptitle is not None:
+    if figure.get_suptitle():
         figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
     else:
         figure.tight_layout()

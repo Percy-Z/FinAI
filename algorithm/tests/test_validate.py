@@ -14,6 +14,7 @@
 
 import json
 import unittest
+from typing import Any
 from dataclasses import replace
 
 from algorithm.finai.statements import (
@@ -91,19 +92,19 @@ BASE_SNAPSHOT = ReportSnapshot(
 )
 
 
-def clean_snapshot(**overrides) -> ReportSnapshot:
+def clean_snapshot(**overrides: Any) -> ReportSnapshot:
     return replace(BASE_SNAPSHOT, **overrides)
 
 
-def balance(**overrides) -> BalanceSheet:
+def balance(**overrides: Any) -> BalanceSheet:
     return replace(BASE_BALANCE, **overrides)
 
 
-def income(**overrides) -> IncomeStatement:
+def income(**overrides: Any) -> IncomeStatement:
     return replace(BASE_INCOME, **overrides)
 
 
-def cashflow(**overrides) -> CashFlowStatement:
+def cashflow(**overrides: Any) -> CashFlowStatement:
     return replace(BASE_CASHFLOW, **overrides)
 
 

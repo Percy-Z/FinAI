@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from .dcf import value_dcf
 from .sensitivity import Variable, apply_variable
@@ -65,7 +66,7 @@ class ReverseResult:
             f"基准 {self.base_value:.4f}，差 {gap:+.4f}"
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """供 reverse_dcf.json 使用。"""
         data = asdict(self)
         data["direction"] = self.direction

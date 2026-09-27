@@ -28,7 +28,7 @@ from algorithm.tests._helpers import assert_close  # noqa: E402
 
 
 
-def flat_assumptions(**overrides) -> ForecastAssumptions:
+def flat_assumptions(**overrides: Any) -> ForecastAssumptions:
     """常数现金流基准情景：FCFF 每年都是 15。"""
     params: dict[str, Any] = dict(
         revenue_base=100.0,
@@ -45,7 +45,7 @@ def flat_assumptions(**overrides) -> ForecastAssumptions:
     return ForecastAssumptions(**params)
 
 
-def flat_market(**overrides) -> MarketData:
+def flat_market(**overrides: Any) -> MarketData:
     params: dict[str, Any] = dict(
         price=10.0,
         diluted_shares=10.0,

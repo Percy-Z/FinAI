@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 from .statements import ReportSnapshot
 
@@ -86,7 +87,7 @@ class CheckResult:
     tolerance: float | None = None
     note: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -120,7 +121,7 @@ class ValidationReport:
                 return check
         raise KeyError(f"没有编号为 {check_id} 的检查")
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "fiscal_year": self.fiscal_year,
             "source": self.source,
@@ -347,10 +348,10 @@ def check_assets_floor(
     """
     balance = snapshot.balance
     offenders: list[str] = []
-    for name, value, label in (
-        ("cash_and_equivalents", balance.cash_and_equivalents, "货币资金"),
-        ("accounts_receivable", balance.accounts_receivable, "应收账款"),
-        ("inventory", balance.inventory, "存货"),
+    for value, label in (
+        (balance.cash_and_equivalents, "货币资金"),
+        (balance.accounts_receivable, "应收账款"),
+        (balance.inventory, "存货"),
     ):
         if value is None:
             continue

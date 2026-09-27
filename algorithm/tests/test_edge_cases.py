@@ -48,7 +48,7 @@ NAN = float("nan")
 INF = float("inf")
 
 
-def clean_assumptions(**overrides) -> ForecastAssumptions:
+def clean_assumptions(**overrides: Any) -> ForecastAssumptions:
     params: dict[str, Any] = dict(
         revenue_base=100.0,
         revenue_growth=(0.0,) * 5,
@@ -81,7 +81,7 @@ OPENING = BalanceSheetState(
 )
 
 
-def drivers(**overrides) -> ForecastDrivers:
+def drivers(**overrides: Any) -> ForecastDrivers:
     params: dict[str, Any] = dict(
         revenue_base=400.0,
         base_year=2025,
@@ -102,7 +102,7 @@ def drivers(**overrides) -> ForecastDrivers:
     return ForecastDrivers(**params)
 
 
-def target(**overrides) -> CompanyMetrics:
+def target(**overrides: Any) -> CompanyMetrics:
     params: dict[str, Any] = dict(
         code="T",
         name="目标公司",

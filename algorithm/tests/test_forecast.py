@@ -23,6 +23,7 @@
 """
 
 import unittest
+from typing import Any
 from dataclasses import replace
 
 from algorithm.finai.dcf import enterprise_value
@@ -70,7 +71,7 @@ DRIVERS = ForecastDrivers(
 )
 
 
-def build(**overrides):
+def build(**overrides: Any):
     drivers = replace(DRIVERS, **overrides) if overrides else DRIVERS
     return build_forecast(OPENING, drivers)
 

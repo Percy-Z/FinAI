@@ -33,7 +33,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Sequence
 
 from .statements import (
     BalanceSheet,
@@ -288,9 +288,9 @@ class ThreeStatementForecast:
                 return item
         raise KeyError(f"预测期内没有 {fiscal_year} 年")
 
-    def to_records(self) -> list[dict]:
+    def to_records(self) -> list[dict[str, Any]]:
         """展开成逐年记录，供 projections.json 使用。"""
-        records: list[dict] = []
+        records: list[dict[str, Any]] = []
         for item in self.years:
             records.append(
                 {

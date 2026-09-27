@@ -30,7 +30,7 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean as _mean
-from typing import Sequence
+from typing import Any, Sequence
 
 from .dcf import DCFResult
 from .types import (
@@ -447,7 +447,7 @@ class CompsResult:
     def implied_return(self) -> float:
         return self.central_value / self.price - 1.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "target": self.target.code,
             "price": self.price,
@@ -546,7 +546,7 @@ class FootballFieldBand:
     def width(self) -> float:
         return self.high - self.low
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["width"] = self.width
         return data
@@ -578,7 +578,7 @@ class FootballField:
         a, b = self.band(first), self.band(second)
         return max(a.low, b.low) <= min(a.high, b.high)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """供 football_field.json 使用。"""
         return {
             "price": self.price,
