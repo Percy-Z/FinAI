@@ -224,6 +224,17 @@ class ForecastDrivers:
                 self, name, _as_tuple(getattr(self, name), self.years, name)
             )
 
+    def series(self, name: str) -> tuple[float, ...]:
+        """取归一化之后的序列。
+
+        构造时（见 __post_init__）所有序列字段都已经展开成元组，这个方法把
+        这个约定告诉类型检查器，顺便挡住写错字段名。
+        """
+        value = getattr(self, name, None)
+        if not isinstance(value, tuple):
+            raise TypeError(f"{name} 不是序列字段，或者构造时没有归一化")
+        return value
+
 
 @dataclass(frozen=True)
 class ForecastYear:
@@ -352,15 +363,26 @@ def build_forecast(
     previous_balance = opening
     revenue = drivers.revenue_base
 
+    # 显式取成元组，后面按下标取值时类型才明确
+    growth_path = drivers.series("revenue_growth")
+    gross_margin_path = drivers.series("gross_margin")
+    opex_path = drivers.series("opex_pct_revenue")
+    da_path = drivers.series("da_pct_revenue")
+    capex_path = drivers.series("capex_pct_revenue")
+    receivable_path = drivers.series("ar_pct_revenue")
+    inventory_path = drivers.series("inventory_pct_revenue")
+    payable_path = drivers.series("ap_pct_revenue")
+    repayment_path = drivers.series("net_debt_repayment")
+
     for index in range(drivers.years):
         year_number = drivers.base_year + index + 1
-        revenue = revenue * (1.0 + drivers.revenue_growth[index])
+        revenue = revenue * (1.0 + growth_path[index])
 
         # 利润表
-        gross_profit = revenue * drivers.gross_margin[index]
+        gross_profit = revenue * gross_margin_path[index]
         cost_of_sales = revenue - gross_profit
-        operating_expenses = revenue * drivers.opex_pct_revenue[index]
-        da = revenue * drivers.da_pct_revenue[index]
+        operating_expenses = revenue * opex_path[index]
+        da = revenue * da_path[index]
         ebitda = gross_profit - operating_expenses
         ebit = ebitda - da
 
@@ -391,21 +413,21 @@ def build_forecast(
         )
 
         # 资产负债表里由假设驱动的科目
-        accounts_receivable = revenue * drivers.ar_pct_revenue[index]
-        inventory = revenue * drivers.inventory_pct_revenue[index]
-        accounts_payable = revenue * drivers.ap_pct_revenue[index]
+        accounts_receivable = revenue * receivable_path[index]
+        inventory = revenue * inventory_path[index]
+        accounts_payable = revenue * payable_path[index]
         fixed_assets = (
             previous_balance.fixed_assets
-            + revenue * drivers.capex_pct_revenue[index]
+            + revenue * capex_path[index]
             - da
         )
         interest_bearing_debt = (
             previous_balance.interest_bearing_debt
-            - drivers.net_debt_repayment[index]
+            - repayment_path[index]
         )
         # 下面这些不是错误，但结果会失真，必须记下来交给报告说明
-        if drivers.net_debt_repayment[index] > 0:
-            share = drivers.net_debt_repayment[index] / (
+        if repayment_path[index] > 0:
+            share = repayment_path[index] / (
                 previous_balance.interest_bearing_debt
                 if previous_balance.interest_bearing_debt > 0
                 else 1.0
@@ -448,7 +470,7 @@ def build_forecast(
         operating = (
             net_profit + da - delta_receivable - delta_inventory + delta_payable
         )
-        capex = revenue * drivers.capex_pct_revenue[index]
+        capex = revenue * capex_path[index]
         investing = -capex
         debt_change = interest_bearing_debt - previous_balance.interest_bearing_debt
         financing = debt_change - dividends

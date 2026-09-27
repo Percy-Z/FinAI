@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from algorithm.finai.comps import (
     CompanyMetrics,
@@ -48,7 +49,7 @@ INF = float("inf")
 
 
 def clean_assumptions(**overrides) -> ForecastAssumptions:
-    params = dict(
+    params: dict[str, Any] = dict(
         revenue_base=100.0,
         revenue_growth=(0.0,) * 5,
         ebit_margin=(0.20,) * 5,
@@ -81,7 +82,7 @@ OPENING = BalanceSheetState(
 
 
 def drivers(**overrides) -> ForecastDrivers:
-    params = dict(
+    params: dict[str, Any] = dict(
         revenue_base=400.0,
         base_year=2025,
         years=3,
@@ -102,7 +103,7 @@ def drivers(**overrides) -> ForecastDrivers:
 
 
 def target(**overrides) -> CompanyMetrics:
-    params = dict(
+    params: dict[str, Any] = dict(
         code="T",
         name="目标公司",
         price=10.0,

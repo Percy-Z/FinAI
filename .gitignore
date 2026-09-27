@@ -28,9 +28,13 @@ Release/
 
 # 编辑器
 .idea/
-.vscode/
 *.swp
 *.swo
+
+# .vscode 下的内容默认不入库，但共享的编辑器设置要进库，
+# 否则每个队友打开项目都要自己配一遍 Pylance，又会看到满屏「导入无法解析」
+.vscode/*
+!.vscode/settings.json
 
 # Python
 __pycache__/

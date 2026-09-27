@@ -155,12 +155,13 @@ def main() -> None:
     print("=" * 88)
     print(f"{'倍数':<12}{'口径':<10}{'可比倍数':>12}{'隐含每股价值':>14}{'相对现价':>12}")
     for item in result.implied:
-        if not item.applicable:
+        per_share = item.implied_per_share
+        if per_share is None:
             continue
-        relative = item.implied_per_share / result.price - 1.0
+        relative = per_share / result.price - 1.0
         print(
             f"{item.label:<12}{item.stat_name:<10}{item.peer_value:>12.2f}"
-            f"{item.implied_per_share:>14.2f}{relative:>12.1%}"
+            f"{per_share:>14.2f}{relative:>12.1%}"
         )
 
     low, high = result.value_range

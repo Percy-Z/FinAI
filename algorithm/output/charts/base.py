@@ -14,13 +14,13 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 
 DPI = 180
 
-COLORS = {
+# 只放单色，值必须是 str：混进列表会让下游的类型推断变成 str | list[str]
+COLORS: dict[str, str] = {
     "ink": "#1b2c42",  # 正文与坐标轴文字
     "muted": "#6b7785",  # 次要标注
     "grid": "#dfe3e8",  # 网格与轴线
@@ -33,8 +33,17 @@ COLORS = {
     "danger": "#a33a2a",
     "danger_fill": "#f0cfc9",
     "neutral_fill": "#e8ebef",
-    "series": ["#2f6b45", "#3f5f85", "#8a6d1f", "#5d4786", "#a86a2a", "#b5442f"],
 }
+
+# 多条序列用的颜色，按顺序取
+SERIES_COLORS: list[str] = [
+    "#2f6b45",
+    "#3f5f85",
+    "#8a6d1f",
+    "#5d4786",
+    "#a86a2a",
+    "#b5442f",
+]
 
 CJK_FONT_CANDIDATES = (
     "PingFang SC",

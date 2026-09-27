@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # 只为类型检查，避免和 reporting 形成运行时的循环导入
     from algorithm.output.reporting import RunOutputs
@@ -35,15 +35,6 @@ CHART_FILES: dict[str, tuple[str, str]] = {
     "validation_summary": ("16", "validation_summary.png"),
 }
 
-if HAS_MATPLOTLIB:
-    from .football_field import render as render_football_field
-    from .forecast_trend import render as render_forecast_trend
-    from .peer_multiples import render as render_peer_multiples
-    from .sensitivity_heatmap import render as render_sensitivity_heatmap
-    from .tornado import render as render_tornado
-    from .validation_summary import render as render_validation_summary
-
-
 def chart_filename(name: str) -> str:
     """返回带编号的图表文件名。"""
     if name not in CHART_FILES:
@@ -52,43 +43,58 @@ def chart_filename(name: str) -> str:
     return f"{number}_{base}"
 
 
-def render_all(outputs: "RunOutputs", directory: str | Path) -> dict[str, Path]:
-    """按 outputs 里有哪些结果，渲染对应的图。返回 图名 -> 路径。"""
-    if not HAS_MATPLOTLIB:
+# 各图表模块都在顶部导入 matplotlib，所以只能在确认装好之后再导它们。
+# render_all 在两个分支里都要有定义，否则类型检查器会说「可能未绑定」。
+if HAS_MATPLOTLIB:
+    from .football_field import render as render_football_field
+    from .forecast_trend import render as render_forecast_trend
+    from .peer_multiples import render as render_peer_multiples
+    from .sensitivity_heatmap import render as render_sensitivity_heatmap
+    from .tornado import render as render_tornado
+    from .validation_summary import render as render_validation_summary
+
+    def render_all(outputs: "RunOutputs", directory: str | Path) -> dict[str, Path]:
+        """按 outputs 里有哪些结果渲染对应的图，返回 图名 -> 路径。"""
+        target_dir = Path(directory)
+        produced: dict[str, Path] = {}
+
+        def target(name: str) -> Path:
+            return target_dir / chart_filename(name)
+
+        if outputs.football_field is not None:
+            produced["football_field"] = render_football_field(
+                outputs.football_field, target("football_field")
+            )
+        if outputs.tornado:
+            price = (
+                outputs.football_field.price if outputs.football_field else 0.0
+            )
+            produced["tornado"] = render_tornado(
+                outputs.tornado, price, target("tornado")
+            )
+        if outputs.grid is not None:
+            produced["sensitivity"] = render_sensitivity_heatmap(
+                outputs.grid, target("sensitivity")
+            )
+        if outputs.comps is not None:
+            produced["peer_multiples"] = render_peer_multiples(
+                outputs.comps, target("peer_multiples")
+            )
+        if outputs.forecast is not None:
+            produced["forecast_trend"] = render_forecast_trend(
+                outputs.forecast, target("forecast_trend")
+            )
+        if outputs.validation:
+            produced["validation_summary"] = render_validation_summary(
+                outputs.validation, target("validation_summary")
+            )
+        return produced
+
+else:
+
+    def render_all(outputs: "RunOutputs", directory: str | Path) -> dict[str, Path]:
+        """没装 matplotlib 时不出图，直接返回空字典。"""
         return {}
-
-    directory = Path(directory)
-    produced: dict[str, Path] = {}
-
-    def target(name: str) -> Path:
-        return directory / chart_filename(name)
-
-    if outputs.football_field is not None:
-        produced["football_field"] = render_football_field(
-            outputs.football_field, target("football_field")
-        )
-    if outputs.tornado:
-        produced["tornado"] = render_tornado(
-            outputs.tornado, outputs.football_field.price if outputs.football_field else 0.0,
-            target("tornado"),
-        )
-    if outputs.grid is not None:
-        produced["sensitivity"] = render_sensitivity_heatmap(
-            outputs.grid, target("sensitivity")
-        )
-    if outputs.comps is not None:
-        produced["peer_multiples"] = render_peer_multiples(
-            outputs.comps, target("peer_multiples")
-        )
-    if outputs.forecast is not None:
-        produced["forecast_trend"] = render_forecast_trend(
-            outputs.forecast, target("forecast_trend")
-        )
-    if outputs.validation:
-        produced["validation_summary"] = render_validation_summary(
-            outputs.validation, target("validation_summary")
-        )
-    return produced
 
 
 __all__ = [

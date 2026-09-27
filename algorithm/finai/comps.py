@@ -422,18 +422,26 @@ class CompsResult:
 
     @property
     def value_range(self) -> tuple[float, float]:
-        values = [item.implied_per_share for item in self.medians]
+        values = [
+            item.implied_per_share
+            for item in self.medians
+            if item.implied_per_share is not None
+        ]
         if not values:
             raise ValueError("没有可用的隐含估值，无法给出区间")
-        return min(values), max(values)  # type: ignore[type-var]
+        return min(values), max(values)
 
     @property
     def central_value(self) -> float:
         """各方法中位数隐含价值的中位数，作为相对估值的中心值。"""
-        values = [item.implied_per_share for item in self.medians]
+        values = [
+            item.implied_per_share
+            for item in self.medians
+            if item.implied_per_share is not None
+        ]
         if not values:
             raise ValueError("没有可用的隐含估值，无法给出中心值")
-        return percentile(values, 0.5)  # type: ignore[arg-type]
+        return percentile(values, 0.5)
 
     @property
     def implied_return(self) -> float:

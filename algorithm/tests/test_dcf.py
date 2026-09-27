@@ -12,6 +12,7 @@
 
 import unittest
 from dataclasses import replace
+from typing import Any
 
 from algorithm.finai.dcf import (
     discount_factors,
@@ -26,7 +27,7 @@ from algorithm.finai.types import ForecastAssumptions, MarketData
 
 def flat_assumptions(**overrides) -> ForecastAssumptions:
     """常数现金流基准情景：FCFF 每年都是 15。"""
-    params = dict(
+    params: dict[str, Any] = dict(
         revenue_base=100.0,
         revenue_growth=(0.0, 0.0, 0.0, 0.0, 0.0),
         ebit_margin=(0.20, 0.20, 0.20, 0.20, 0.20),
@@ -42,7 +43,7 @@ def flat_assumptions(**overrides) -> ForecastAssumptions:
 
 
 def flat_market(**overrides) -> MarketData:
-    params = dict(
+    params: dict[str, Any] = dict(
         price=10.0,
         diluted_shares=10.0,
         interest_bearing_debt=40.0,

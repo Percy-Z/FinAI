@@ -145,6 +145,7 @@ __all__ = [
     "check_balance_sheet_tie",
     "check_cash_definition",
     "check_cash_rollforward",
+    "check_data_presence",
     "check_equity_composition",
     "check_non_recurring_share",
     "check_profit_cash_conversion",

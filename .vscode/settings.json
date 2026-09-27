@@ -1,0 +1,17 @@
+{
+    // 告诉 Pylance 以仓库根目录为解析起点，
+    // 否则 from algorithm.finai.xxx import yyy 会报「导入无法解析」
+    "python.analysis.extraPaths": [
+        "."
+    ],
+    // 用 unittest 跑测试：python3 -m unittest discover -s algorithm/tests
+    "python.testing.unittestEnabled": true,
+    "python.testing.pytestEnabled": false,
+    "python.testing.unittestArgs": [
+        "-v",
+        "-s",
+        "./algorithm/tests",
+        "-t",
+        "."
+    ]
+}

@@ -1,0 +1,7 @@
+# 这个文件只放工具配置，项目本身零依赖，用系统自带的 Python 3 就能跑。
+
+[tool.mypy]
+# 第三方库（例如要装了才有的 matplotlib）找不到类型存根时不报错
+ignore_missing_imports = true
+# 跑法：在仓库根目录执行 python3 -m mypy algorithm
+# algorithm/ 下有 __init__.py，所以包名能正确解析成 algorithm.finai.xxx

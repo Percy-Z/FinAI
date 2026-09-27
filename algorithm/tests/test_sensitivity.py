@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from algorithm.finai.dcf import enterprise_value, value_dcf
 from algorithm.finai.sensitivity import (
@@ -20,7 +21,7 @@ from algorithm.finai.types import ForecastAssumptions, MarketData
 
 
 def flat_assumptions(**overrides) -> ForecastAssumptions:
-    params = dict(
+    params: dict[str, Any] = dict(
         revenue_base=100.0,
         revenue_growth=(0.0, 0.0, 0.0, 0.0, 0.0),
         ebit_margin=(0.20, 0.20, 0.20, 0.20, 0.20),
@@ -36,7 +37,7 @@ def flat_assumptions(**overrides) -> ForecastAssumptions:
 
 
 def flat_market(**overrides) -> MarketData:
-    params = dict(
+    params: dict[str, Any] = dict(
         price=10.0,
         diluted_shares=10.0,
         interest_bearing_debt=40.0,

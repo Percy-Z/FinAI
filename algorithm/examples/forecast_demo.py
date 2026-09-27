@@ -130,7 +130,7 @@ def main() -> None:
                     "revenue_base": DRIVERS.revenue_base,
                     "base_year": DRIVERS.base_year,
                     "years": DRIVERS.years,
-                    "revenue_growth": list(DRIVERS.revenue_growth),
+                    "revenue_growth": list(DRIVERS.series("revenue_growth")),
                     "tax_rate": DRIVERS.tax_rate,
                     "dividend_payout_ratio": DRIVERS.dividend_payout_ratio,
                 },

@@ -8,7 +8,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
 from matplotlib.patches import Patch, Rectangle
 
 from algorithm.finai.validate import ValidationReport

@@ -163,12 +163,13 @@ def apply_variable(
 
     if variable.field in VECTOR_FIELDS:
         broadcast = tuple([float(value)] * assumptions.years)
-        return replace(assumptions, **{variable.field: broadcast}), wacc
+        # 字段名是运行期才知道的，类型检查器无法验证这种动态关键字参数
+        return replace(assumptions, **{variable.field: broadcast}), wacc  # type: ignore[arg-type]
 
     if not hasattr(assumptions, variable.field):
         raise ValueError(f"ForecastAssumptions 上没有字段 {variable.field!r}")
 
-    return replace(assumptions, **{variable.field: float(value)}), wacc
+    return replace(assumptions, **{variable.field: float(value)}), wacc  # type: ignore[arg-type]
 
 
 def _per_share_at(

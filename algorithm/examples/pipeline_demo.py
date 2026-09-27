@@ -278,8 +278,8 @@ def main() -> None:
                 f"{entry.label:<12} 中位数 {entry.median:>7.2f}"
                 f"　区间 [{entry.q1:.2f}, {entry.q3:.2f}]　样本 {entry.count}"
             )
-    for item in comps.medians:
-        print(f"{item.label:<12} 隐含每股价值 {item.implied_per_share:>6.2f}")
+    for implied in comps.medians:
+        print(f"{implied.label:<12} 隐含每股价值 {implied.implied_per_share:>6.2f}")
     for warning in comps.warnings:
         print(f"  提示：{warning}")
 
