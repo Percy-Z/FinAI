@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -30,11 +31,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from algorithm.finai.dcf import project  # noqa: E402
+from algorithm.finai.dcf import project, value_dcf  # noqa: E402
 from algorithm.finai.forecast import build_forecast  # noqa: E402
 from algorithm.finai.types import ForecastAssumptions  # noqa: E402
 from algorithm.finai.wacc import weights_from_market, wacc_from_market  # noqa: E402
 from pipeline import config, run, tracing  # noqa: E402
+from pipeline.adapters import (  # noqa: E402
+    company_to_market_data,
+    drivers_to_assumptions,
+    fill_target_from_forecast,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,53 +52,9 @@ def read_real_config():
     """读仓库里那份真实配置。测的是「配置和算法层能不能对上」。"""
     company, drivers, opening = config.load_case()
     params = config.load_wacc_params()
+    terminal = config.load_terminal_params()
     target, peers = config.load_market_snapshot()
-    return company, drivers, opening, params, target, peers
-
-
-def scalar_ratio(series, name: str) -> float:
-    """把「逐年比率」取成单个数字。
-
-    估值引擎（ForecastAssumptions）只接受单一比率，不接受逐年数组。
-    所以映射之前必须先确认它是逐年相同的，否则信息会丢。
-    """
-    values = set(series)
-    if len(values) != 1:
-        raise AssertionError(
-            f"{name} 逐年不同（{sorted(values)}），无法映射到估值引擎"
-        )
-    return series[0]
-
-
-def drivers_to_assumptions(drivers) -> ForecastAssumptions:
-    """ForecastDrivers → ForecastAssumptions。
-
-    ⚠️ 这是框架里最容易写错的一段，将来会搬到 pipeline/adapters.py。
-    关键在 ebit_margin 那一行：栈A 的 EBIT 是「扣过折旧摊销的」，
-    所以必须减掉 da_pct_revenue。只写 毛利-费用 会高估约三成。
-    """
-    return ForecastAssumptions(
-        revenue_base=drivers.revenue_base,
-        revenue_growth=drivers.revenue_growth,
-        ebit_margin=[
-            gross - opex - da
-            for gross, opex, da in zip(
-                drivers.gross_margin,
-                drivers.opex_pct_revenue,
-                drivers.da_pct_revenue,
-            )
-        ],
-        tax_rate=drivers.tax_rate,
-        da_pct_revenue=scalar_ratio(drivers.da_pct_revenue, "da_pct_revenue"),
-        capex_pct_revenue=scalar_ratio(
-            drivers.capex_pct_revenue, "capex_pct_revenue"
-        ),
-        nwc_pct_revenue=(
-            scalar_ratio(drivers.ar_pct_revenue, "ar_pct_revenue")
-            + scalar_ratio(drivers.inventory_pct_revenue, "inventory_pct_revenue")
-            - scalar_ratio(drivers.ap_pct_revenue, "ap_pct_revenue")
-        ),
-    )
+    return company, drivers, opening, params, terminal, target, peers
 
 
 class CsvFixture(unittest.TestCase):
@@ -118,11 +80,12 @@ class CsvFixture(unittest.TestCase):
 
 class TestConfigLoads(unittest.TestCase):
     def test_三个小节都读得出来(self):
-        company, drivers, opening, params, target, peers = read_real_config()
+        company, drivers, opening, params, terminal, target, peers = read_real_config()
         self.assertEqual(company.code, "T")
         self.assertEqual(drivers.years, 5)
         self.assertEqual(opening.total_assets, 385.0)
         self.assertGreater(params.beta, 0)
+        self.assertIn(terminal.terminal_method, ("perpetuity", "exit_multiple"))
         self.assertEqual(target.code, "T")
         self.assertEqual(len(peers), 3)
 
@@ -273,6 +236,47 @@ class TestConfigRejectsBadToml(unittest.TestCase):
             config.load_wacc_params(self.write_temp_toml(broken))
         self.assertIn("[wacc]", str(ctx.exception))
 
+    def test_终值方法写错要报错(self):
+        broken = self.toml_text().replace(
+            'terminal_method = "perpetuity"', 'terminal_method = "永久增长"'
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_terminal_params(self.write_temp_toml(broken))
+        self.assertIn("terminal_method", str(ctx.exception))
+
+    def test_选了退出倍数却不给倍数要报错(self):
+        broken = self.toml_text().replace(
+            'terminal_method = "perpetuity"', 'terminal_method = "exit_multiple"'
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_terminal_params(self.write_temp_toml(broken))
+        self.assertIn("exit_multiple", str(ctx.exception))
+
+    def test_基期资产负债表不平要在配置层拦住(self):
+        """数据自相矛盾属于「输入有问题」，不是代码问题。
+
+        这条在配置层拦，报错就能指出是哪个文件；如果放到三表预测里，
+        报错会是一段 Python 堆栈，只说差额多少。
+        """
+        broken = self.toml_text().replace(
+            "cash                        = 55.0",
+            "cash                        = 100.0",
+        )
+        path = self.write_temp_toml(broken)
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_case(path)
+        message = str(ctx.exception)
+        self.assertIn("[opening_balance]", message)
+        self.assertIn("不平", message)
+        self.assertIn("45.00", message)          # 差额
+        self.assertIn("资产总计", message)        # 三个合计数都列出来了
+        self.assertIn("负债合计", message)
+        self.assertIn("权益合计", message)
+
+        # 单独调这一个 loader 也要拦得住
+        with self.assertRaises(config.ConfigError):
+            config.load_opening_balance(path)
+
     def test_文件不存在要报错(self):
         with self.assertRaises(config.ConfigError) as ctx:
             config.load_case(Path("/tmp/绝对不存在的配置文件.toml"))
@@ -294,6 +298,7 @@ class TestTwoStackReconcile(unittest.TestCase):
     def setUp(self):
         self.drivers = config.load_case()[1]
         self.opening = config.load_case()[2]
+        self.terminal = config.load_terminal_params()
         self.forecast = build_forecast(self.opening, self.drivers)
 
     def test_基期口径是对齐的(self):
@@ -309,7 +314,7 @@ class TestTwoStackReconcile(unittest.TestCase):
             )
 
     def test_fcff_两条路径必须一致(self):
-        assumptions = drivers_to_assumptions(self.drivers)
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
         from_dcf_path = project(
             assumptions, base_year=self.drivers.base_year
         ).fcff
@@ -349,43 +354,126 @@ class TestTwoStackReconcile(unittest.TestCase):
             project(broken_assumptions)
 
     def test_映射漏减折旧率会高估(self):
-        """把「毛利 - 费用」当成 EBIT 利润率，会高估多少。"""
-        correct = drivers_to_assumptions(self.drivers)
-        wrong = ForecastAssumptions(
-            revenue_base=self.drivers.revenue_base,
-            revenue_growth=self.drivers.revenue_growth,
+        """把「毛利 − 费用」当成 EBIT 利润率（漏减折旧），会高估多少。
+
+        做法：在正确的假设上只改 ebit_margin 一项，其余参数全不动 ——
+        这样差额就只可能来自这一项，能断言一个精确的关系。
+        """
+        correct = drivers_to_assumptions(self.drivers, self.terminal)
+        wrong = replace(
+            correct,
             ebit_margin=[
                 gross - opex
                 for gross, opex in zip(
                     self.drivers.gross_margin, self.drivers.opex_pct_revenue
                 )
             ],
-            tax_rate=self.drivers.tax_rate,
-            da_pct_revenue=scalar_ratio(
-                self.drivers.da_pct_revenue, "da_pct_revenue"
-            ),
-            capex_pct_revenue=scalar_ratio(
-                self.drivers.capex_pct_revenue, "capex_pct_revenue"
-            ),
-            nwc_pct_revenue=(
-                scalar_ratio(self.drivers.ar_pct_revenue, "ar_pct_revenue")
-                + scalar_ratio(
-                    self.drivers.inventory_pct_revenue, "inventory_pct_revenue"
-                )
-                - scalar_ratio(self.drivers.ap_pct_revenue, "ap_pct_revenue")
-            ),
         )
-        correct_fcff = project(correct, base_year=2025).fcff
-        wrong_fcff = project(wrong, base_year=2025).fcff
+        right = project(correct, base_year=self.drivers.base_year)
+        inflated = project(wrong, base_year=self.drivers.base_year)
 
-        for index, (right, inflated) in enumerate(
-            zip(correct_fcff, wrong_fcff), start=1
+        for index, (correct_fcff, wrong_fcff) in enumerate(
+            zip(right.fcff, inflated.fcff), start=1
         ):
             self.assertGreater(
-                inflated, right, msg=f"第 {index} 年应该被高估却没有"
+                wrong_fcff, correct_fcff, msg=f"第 {index} 年应该被高估却没有"
             )
-        # 第一条就高估了两成以上
-        self.assertGreater(wrong_fcff[0] / correct_fcff[0] - 1, 0.2)
+            # 差额有精确公式：折旧摊销 × (1 − 税率)
+            # 因为折旧在 FCFF 里是「先扣掉再加回来」，净效果只剩抵税额；
+            # 漏掉「先扣」等于把整笔折旧白送一遍。
+            da = right.da[index - 1]
+            self.assertAlmostEqual(
+                wrong_fcff - correct_fcff,
+                da * (1 - self.drivers.tax_rate),
+                places=6,
+                msg=f"第 {index} 年差额应等于 折旧 {da:.2f} × (1 − 税率)",
+            )
+
+        # 头一年就高估两成以上
+        self.assertGreater(inflated.fcff[0] / right.fcff[0] - 1, 0.2)
+
+
+# ---------------------------------------------------------------------------
+# 三之二、适配层：三个转换各测一遍
+# ---------------------------------------------------------------------------
+
+
+class TestAdapters(unittest.TestCase):
+    def setUp(self):
+        _, self.drivers, self.opening = config.load_case()
+        self.terminal = config.load_terminal_params()
+
+    def test_转成假设后逐年字段长度对得上(self):
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        self.assertEqual(len(assumptions.revenue_growth), self.drivers.years)
+        self.assertEqual(len(assumptions.ebit_margin), self.drivers.years)
+
+    def test_转成假设时终值参数带到(self):
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        self.assertEqual(
+            assumptions.terminal_method, self.terminal.terminal_method
+        )
+        self.assertAlmostEqual(
+            assumptions.terminal_growth, self.terminal.terminal_growth
+        )
+        self.assertEqual(assumptions.mid_year, self.terminal.mid_year)
+
+    def test_逐年比率不同时适配层要报错(self):
+        """这是适配层存在的理由之一：把隐蔽的崩溃变成一句人话。
+
+        如果不在适配层拦住，会一路走到 dcf.project() 里才炸，
+        报错是「can't multiply sequence by non-int of type 'float'」。
+        """
+        varying = replace(
+            self.drivers, capex_pct_revenue=(0.06, 0.07, 0.08, 0.09, 0.10)
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            drivers_to_assumptions(varying, self.terminal)
+        message = str(ctx.exception)
+        self.assertIn("capex_pct_revenue", message)
+        self.assertIn("只支持单一比率", message)
+
+    def test_公司转市场数据字段一致(self):
+        target, _ = config.load_market_snapshot()
+        market = company_to_market_data(target)
+
+        self.assertEqual(market.price, target.price)
+        self.assertEqual(market.diluted_shares, target.diluted_shares)
+        self.assertEqual(
+            market.interest_bearing_debt, target.interest_bearing_debt
+        )
+        self.assertEqual(market.cash, target.cash)
+        self.assertEqual(market.as_of, target.as_of)
+        # 派生量也要对得上
+        self.assertAlmostEqual(market.market_cap, target.market_cap)
+        self.assertAlmostEqual(market.net_debt, target.net_debt)
+
+    def test_填进预测后利润指标来自预测第一年(self):
+        target, _ = config.load_market_snapshot()
+        forecast = build_forecast(self.opening, self.drivers)
+        filled = fill_target_from_forecast(target, forecast)
+        first = forecast.years[0].income
+
+        self.assertAlmostEqual(
+            filled.net_profit_attributable, first.net_profit_attributable
+        )
+        self.assertAlmostEqual(filled.revenue, first.revenue)
+        self.assertAlmostEqual(filled.ebit, first.ebit)
+        self.assertAlmostEqual(filled.ebitda, first.ebitda)
+        # 净资产取基期（抽取层就绪前是暂时的口径）
+        self.assertAlmostEqual(
+            filled.book_equity_attributable, self.opening.equity_attributable
+        )
+        # 市场数据没被动过
+        self.assertEqual(filled.price, target.price)
+        self.assertEqual(filled.diluted_shares, target.diluted_shares)
+
+    def test_填完之后能算出倍数(self):
+        target, _ = config.load_market_snapshot()
+        forecast = build_forecast(self.opening, self.drivers)
+        filled = fill_target_from_forecast(target, forecast)
+        self.assertIsNotNone(filled.eps)
+        self.assertGreater(filled.eps, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +541,103 @@ class TestEndToEnd(unittest.TestCase):
         # 编号是固定的，所以第二次会写进同一个目录（这符合设计）
         self.assertTrue((root / "outputs" / "固定编号" / "projections.json").exists())
 
+    def test_估值产物的_WACC_里有完整的七项(self):
+        """报告里要列出 WACC 的完整构成 —— 四个输入 + 一个复用 + 两个推导。"""
+        _, root = self.run_pipeline()
+        produced = next((root / "outputs").glob("*/valuation.json"))
+        payload = json.loads(produced.read_text(encoding="utf-8"))
+        wacc = payload["wacc"]
+
+        for field in [
+            "value",
+            "risk_free",           # 输入
+            "beta",                # 输入
+            "equity_risk_premium",  # 输入
+            "cost_of_debt",        # 输入
+            "tax_rate",            # 复用 [drivers]
+            "equity_weight",       # 推导
+            "debt_weight",         # 推导
+        ]:
+            self.assertIn(field, wacc, msg=f"WACC 缺少 {field}")
+
+        # 权重必须归一
+        self.assertAlmostEqual(
+            wacc["equity_weight"] + wacc["debt_weight"], 1.0, places=9
+        )
+        # 税率必须与三表预测用的是同一个
+        self.assertAlmostEqual(wacc["tax_rate"], config.load_case()[1].tax_rate)
+
+    def test_估值产物里的每股价值与算法层一致(self):
+        """端到端算出的每股价值，必须等于直接调算法模块的结果。
+
+        这条保护「编排没有引入数值错误」：框架只负责传参和落盘，
+        不应该改变任何数字。
+        """
+        _, root = self.run_pipeline()
+        produced = next((root / "outputs").glob("*/valuation.json"))
+        payload = json.loads(produced.read_text(encoding="utf-8"))
+
+        _, drivers, opening = config.load_case()
+        assumptions = drivers_to_assumptions(drivers, config.load_terminal_params())
+        target, _ = config.load_market_snapshot()
+        expected = value_dcf(
+            assumptions,
+            company_to_market_data(target),
+            payload["wacc"]["value"],
+            base_year=drivers.base_year,
+        )
+        self.assertAlmostEqual(
+            payload["valuation"]["per_share"], expected.per_share, places=9
+        )
+        self.assertAlmostEqual(
+            payload["valuation"]["enterprise_value"],
+            expected.enterprise_value,
+            places=6,
+        )
+
+    def test_同一份配置跑两次产物只有_run_id_不同(self):
+        """可复现性：同样的输入，产物除了运行标识之外逐字段相同。
+
+        为什么不比文件哈希：产物里写着 run_id（为了让单独拿出一个文件
+        也知道它属于哪次运行），所以哈希必然不同。要证明的是「结果可复现」
+        —— 那就逐字段比，把 run_id 排除掉。
+
+        这条同时也在防「计算不确定」：如果哪天引入了依赖字典顺序、
+        随机数、当前时间之类的计算，这里会挂。
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+
+        def run_as(run_id: str) -> None:
+            with mock.patch.object(run, "new_run_id", lambda: run_id), mock.patch.object(
+                run, "OUTPUT_ROOT", root / "outputs"
+            ), mock.patch.object(
+                run,
+                "RunTrace",
+                lambda rid: tracing.RunTrace(rid, log_root=root / "logs"),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(run.main(), 0, msg=f"以 {run_id} 为标识的运行失败")
+
+        run_as("第一次")
+        run_as("第二次")
+
+        for name in ("projections.json", "valuation.json"):
+            first = json.loads((root / "outputs" / "第一次" / name).read_text("utf-8"))
+            second = json.loads((root / "outputs" / "第二次" / name).read_text("utf-8"))
+
+            # 各自的运行标识是对的
+            self.assertEqual(first["run_id"], "第一次")
+            self.assertEqual(second["run_id"], "第二次")
+
+            # 除了运行标识，其余逐字段相同
+            self.assertEqual(
+                {key: value for key, value in first.items() if key != "run_id"},
+                {key: value for key, value in second.items() if key != "run_id"},
+                msg=f"{name} 除了 run_id 之外还有差异，说明存在不可复现的地方",
+            )
+
 
 # ---------------------------------------------------------------------------
 # 五、日志层
@@ -474,7 +659,7 @@ class TestTracing(unittest.TestCase):
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 3)  # load_config / forecast / write_projections
+        self.assertEqual(len(lines), 6)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -483,7 +668,18 @@ class TestTracing(unittest.TestCase):
             self.assertEqual(entry["status"], "ok")
             self.assertIsNotNone(entry["duration_s"])
             steps.append(entry["step"])
-        self.assertEqual(steps, ["load_config", "forecast", "write_projections"])
+        # 步骤名和顺序都锁住：加阶段时这条会挂，提醒你确认是有意的
+        self.assertEqual(
+            steps,
+            [
+                "load_config",
+                "forecast",
+                "wacc",
+                "valuation",
+                "write_projections",
+                "write_valuation",
+            ],
+        )
 
     def test_清单记了代码版本与全部产物哈希(self):
         tmp = tempfile.TemporaryDirectory()
@@ -543,6 +739,48 @@ class TestFailurePath(unittest.TestCase):
         manifest_file = next((root / "logs").glob("*/run_manifest.json"))
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
         self.assertEqual(manifest["status"], "failed")
+        # 失败的清单里也要能查到当时读的是哪份配置
+        self.assertTrue(manifest["inputs"], msg="失败记录没记输入文件")
+        self.assertTrue(
+            any(path.endswith("assumptions.toml") for path in manifest["inputs"])
+        )
+
+    def test_代码出错时也要留下失败记录(self):
+        """不是配置问题、而是代码 bug 时，同样要留证据，但堆栈要抛出去。
+
+        两类失败的处理方式不同：
+            配置错 → 一句人话，退出码 1
+            代码错 → 留记录，然后把异常抛出去（排查需要堆栈）
+        但「留下记录」这一条对两类都成立。
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("模拟的代码 bug")
+
+        with mock.patch.object(run, "load_case", boom), mock.patch.object(
+            run, "OUTPUT_ROOT", root / "outputs"
+        ), mock.patch.object(
+            run,
+            "RunTrace",
+            lambda rid: tracing.RunTrace(rid, log_root=root / "logs"),
+        ):
+            with redirect_stdout(io.StringIO()):
+                # 异常必须继续往外抛 —— 掩盖 bug 比丢记录更糟
+                with self.assertRaises(RuntimeError):
+                    run.main()
+
+        manifest_file = next((root / "logs").glob("*/run_manifest.json"))
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "failed")
+
+        trace_file = next((root / "logs").glob("*/trace.jsonl"))
+        entry = json.loads(trace_file.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["tool"], "RuntimeError")
+        self.assertIn("模拟的代码 bug", entry["extra"]["error"])
 
     def test_算不出来哈希也不许让流水线崩(self):
         """日志层的铁律：记不了就记 unknown，但不能打断正事。"""
