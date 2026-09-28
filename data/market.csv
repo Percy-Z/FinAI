@@ -1,0 +1,21 @@
+# FinAI 市场快照
+#
+# 一家公司一行。以 # 开头的行是注释，读数据时会被跳过。
+# 这是「估值基准日」的市场数据，不是年报数据 —— 它记录的是某一天的市场状态，
+# 所以每一行都要写 as_of（基准日），否则将来没人说得清用的是哪天的价格。
+#
+# role=target 的行应该正好一行，就是被估值的公司；其余行的 role 写 peer。
+# 目标公司由 role 指定，不靠代码去猜。
+#
+# 单位约定：金额元，股数股，比率小数。
+#
+# 注意：这里不放利润类指标（净利润、净资产、收入、EBITDA）。
+#       那些来自年报，属于「历史事实」，将来由抽取层提供；
+#       目标公司的利润指标则是从三表预测里取（前瞻口径）。
+#       字段：code,name,role,price,diluted_shares,interest_bearing_debt,cash,
+#             minority_interest,preferred_stock,non_operating_assets,as_of
+code,name,role,price,diluted_shares,interest_bearing_debt,cash,minority_interest,preferred_stock,non_operating_assets,as_of
+T,目标公司,target,10.00,100.00,100.00,55.00,0,0,0,2026-09-30
+A,可比甲,peer,21.00,10.00,5.00,3.00,0,0,0,2026-09-30
+B,可比乙,peer,15.00,20.00,10.00,5.00,0,0,0,2026-09-30
+C,可比丙,peer,30.00,8.00,5.00,15.00,0,0,0,2026-09-30
