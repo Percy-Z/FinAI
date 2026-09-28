@@ -123,6 +123,39 @@ class WaccParams:
     cost_of_debt: float
 
 
+@dataclass(frozen=True)
+class TerminalParams:
+    """终值假设：显式预测期结束之后，公司还值多少。
+
+    两种算法选一种，由 terminal_method 决定：
+        perpetuity      永续增长法，用 terminal_growth
+        exit_multiple   退出倍数法，用 exit_multiple
+
+    mid_year 是折现惯例：为真时假设现金流在年中发生，折现期数减 0.5。
+    它不影响现金流，只影响折现因子。
+
+    这里的两条校验算法模块也会做一遍。重复是有意的：在这里能说清
+    「是哪个文件的哪个字段」，在算法层只能说「参数不对」。
+    """
+
+    terminal_method: str = "perpetuity"
+    terminal_growth: float = 0.0
+    exit_multiple: float | None = None
+    mid_year: bool = False
+
+    def __post_init__(self) -> None:
+        if self.terminal_method not in ("perpetuity", "exit_multiple"):
+            raise ValueError(
+                "terminal_method 只能是 'perpetuity' 或 'exit_multiple'，"
+                f"收到 {self.terminal_method!r}"
+            )
+        if self.terminal_method == "exit_multiple" and self.exit_multiple is None:
+            raise ValueError(
+                "终值用退出倍数法（terminal_method = 'exit_multiple'）时，"
+                "必须提供 exit_multiple"
+            )
+
+
 def read_toml(path: str | Path) -> dict[str, Any]:
     """读一个 TOML 文件，返回普通字典。
 
@@ -173,16 +206,45 @@ def load_drivers(path: str | Path = DEFAULT_CONFIG_PATH) -> ForecastDrivers:
     return _build(ForecastDrivers, _section(cfg, "drivers", path), path, "drivers")
 
 
+def _opening_from(cfg: dict[str, Any], path: str | Path) -> BalanceSheetState:
+    """构造基期资产负债表，并立刻检查它是否配平。
+
+    为什么这个检查放在配置层：资产负债表不平属于「输入数据自相矛盾」，
+    不是代码问题。如果不在这里拦，它会一路走到三表预测里才炸，报错是
+    一段 Python 堆栈，只说「差额 45」，不说是哪个文件的哪几个科目。
+
+    容差与算法层保持一致（1e-6）：这里通过了，三表预测就一定能通过。
+    """
+    opening = _build(
+        BalanceSheetState,
+        _section(cfg, "opening_balance", path),
+        path,
+        "opening_balance",
+    )
+    gap = opening.balance_gap
+    if abs(gap) > 1e-6:
+        raise ConfigError(
+            f"{path} 的 [opening_balance] 不平：\n"
+            f"    资产总计  {opening.total_assets:>16,.2f}\n"
+            f"    负债合计  {opening.total_liabilities:>16,.2f}\n"
+            f"    权益合计  {opening.total_equity:>16,.2f}\n"
+            f"    差额      {gap:>16,.2f}   （应为 0）\n"
+            f"    检查资产侧的 cash / accounts_receivable / inventory /\n"
+            f"    fixed_assets / other_non_current_assets，是否等于\n"
+            f"    负债侧的 accounts_payable / interest_bearing_debt /\n"
+            f"    other_non_current_liabilities 加权益侧的 share_capital /\n"
+            f"    retained_earnings / minority_equity。"
+        )
+    return opening
+
+
 def load_opening_balance(path: str | Path = DEFAULT_CONFIG_PATH) -> BalanceSheetState:
     """读 [opening_balance] 小节 —— 基期资产负债表，性质是「历史事实」。
 
     现在从 TOML 读。等抽取层做好之后，这里改成从 financials.json 读，
     函数签名不变，调用方不用改。
     """
-    cfg = read_toml(path)
-    return _build(
-        BalanceSheetState, _section(cfg, "opening_balance", path), path, "opening_balance"
-    )
+    return _opening_from(read_toml(path), path)
 
 
 def load_case(
@@ -192,9 +254,7 @@ def load_case(
     cfg = read_toml(path)
     company = _build(CompanyInfo, _section(cfg, "company", path), path, "company")
     drivers = _build(ForecastDrivers, _section(cfg, "drivers", path), path, "drivers")
-    opening = _build(
-        BalanceSheetState, _section(cfg, "opening_balance", path), path, "opening_balance"
-    )
+    opening = _opening_from(cfg, path)
     return company, drivers, opening
 
 
@@ -202,6 +262,14 @@ def load_wacc_params(path: str | Path = DEFAULT_CONFIG_PATH) -> WaccParams:
     """读 [wacc] 小节 —— WACC 的四个输入参数。"""
     cfg = read_toml(path)
     return _build(WaccParams, _section(cfg, "wacc", path), path, "wacc")
+
+
+def load_terminal_params(path: str | Path = DEFAULT_CONFIG_PATH) -> TerminalParams:
+    """读 [terminal] 小节 —— 终值假设。"""
+    cfg = read_toml(path)
+    return _build(
+        TerminalParams, _section(cfg, "terminal", path), path, "terminal"
+    )
 
 
 def read_csv(path: str | Path) -> list[dict[str, str]]:
