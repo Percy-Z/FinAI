@@ -6,6 +6,7 @@
 
 import unittest
 from dataclasses import replace
+from typing import Any
 
 from algorithm.finai.dcf import value_dcf
 from algorithm.finai.reverse_dcf import (
@@ -17,9 +18,12 @@ from algorithm.finai.reverse_dcf import (
 from algorithm.finai.sensitivity import Variable
 from algorithm.finai.types import ForecastAssumptions, MarketData
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
 
-def flat_assumptions(**overrides) -> ForecastAssumptions:
-    params = dict(
+
+
+def flat_assumptions(**overrides: Any) -> ForecastAssumptions:
+    params: dict[str, Any] = dict(
         revenue_base=100.0,
         revenue_growth=(0.0, 0.0, 0.0, 0.0, 0.0),
         ebit_margin=(0.20, 0.20, 0.20, 0.20, 0.20),
@@ -34,8 +38,8 @@ def flat_assumptions(**overrides) -> ForecastAssumptions:
     return ForecastAssumptions(**params)
 
 
-def flat_market(**overrides) -> MarketData:
-    params = dict(
+def flat_market(**overrides: Any) -> MarketData:
+    params: dict[str, Any] = dict(
         price=10.0,
         diluted_shares=10.0,
         interest_bearing_debt=40.0,
@@ -59,8 +63,8 @@ class TestEffectiveBounds(unittest.TestCase):
     def test_explicit_bounds_override_defaults(self):
         variable = Variable.absolute("税率", "tax_rate", base=0.25, delta=0.05)
         lower, upper = effective_bounds(variable, wacc=0.10, bounds=(0.10, 0.30))
-        self.assertAlmostEqual(lower, 0.10)
-        self.assertAlmostEqual(upper, 0.30)
+        assert_close(self, lower, 0.10)
+        assert_close(self, upper, 0.30)
 
     def test_unknown_field_falls_back_to_base_span(self):
         variable = Variable.absolute("折旧率", "da_pct_revenue", base=0.05, delta=0.01)
@@ -100,7 +104,7 @@ class TestRoundTrip(unittest.TestCase):
             variable=Variable.bounds("WACC", "wacc", 0.02, 0.40, base=0.10),
             target_per_share=target,
         )
-        self.assertAlmostEqual(result.implied_value, true_wacc, places=6)
+        assert_close(self, result.implied_value, true_wacc, places=6)
         self.assertLess(abs(result.residual), 1e-6)
 
     def test_recover_terminal_growth(self):
@@ -119,7 +123,7 @@ class TestRoundTrip(unittest.TestCase):
             ),
             target_per_share=target,
         )
-        self.assertAlmostEqual(result.implied_value, true_growth, places=6)
+        assert_close(self, result.implied_value, true_growth, places=6)
 
     def test_recover_ebit_margin(self):
         assumptions, market = flat_assumptions(), flat_market()
@@ -137,7 +141,7 @@ class TestRoundTrip(unittest.TestCase):
             ),
             target_per_share=target,
         )
-        self.assertAlmostEqual(result.implied_value, true_margin, places=6)
+        assert_close(self, result.implied_value, true_margin, places=6)
 
     def test_recover_revenue_growth(self):
         assumptions, market = flat_assumptions(), flat_market()
@@ -155,7 +159,7 @@ class TestRoundTrip(unittest.TestCase):
             ),
             target_per_share=target,
         )
-        self.assertAlmostEqual(result.implied_value, true_growth, places=6)
+        assert_close(self, result.implied_value, true_growth, places=6)
 
     def test_default_target_is_current_price(self):
         """省略目标价时默认反解到当前股价，这就是标准的反向 DCF。"""
@@ -167,8 +171,8 @@ class TestRoundTrip(unittest.TestCase):
                 "永续增长率", "terminal_growth", base=0.0, delta=0.03
             ),
         )
-        self.assertAlmostEqual(result.target_per_share, 15.0)
-        self.assertAlmostEqual(result.achieved_per_share, 15.0, places=6)
+        assert_close(self, result.target_per_share, 15.0)
+        assert_close(self, result.achieved_per_share, 15.0, places=6)
 
     def test_solving_wacc_does_not_break_on_high_terminal_growth(self):
         """回归测试：永续增长率 3% 时反解 WACC，不能被「终值不收敛」打断。
@@ -183,7 +187,7 @@ class TestRoundTrip(unittest.TestCase):
             variable=Variable.bounds("WACC", "wacc", 0.01, 0.40, base=0.10),
         )
         self.assertGreater(result.implied_value, assumptions.terminal_growth)
-        self.assertAlmostEqual(result.achieved_per_share, 12.0, places=6)
+        assert_close(self, result.achieved_per_share, 12.0, places=6)
 
 
 class TestInterpretation(unittest.TestCase):
@@ -276,7 +280,7 @@ class TestBatchSolve(unittest.TestCase):
         )
         self.assertEqual(len(results), 3)
         for result in results:
-            self.assertAlmostEqual(result.achieved_per_share, 14.0, places=6)
+            assert_close(self, result.achieved_per_share, 14.0, places=6)
 
     def test_each_solve_keeps_other_assumptions_at_base(self):
         """逐个反解，互不影响，结果顺序与传入顺序一致。"""

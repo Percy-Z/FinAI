@@ -1,0 +1,85 @@
+%% FinAI 自动化估值建模 · 系统架构与数据流
+%% 渲染见 docs/README.md
+flowchart LR
+    subgraph C1["① 输入层 · 本地冻结文件（只读）"]
+        direction TB
+        I1["年报 PDF<br/>目标公司 + 3~5 家可比公司"]
+        I2["市场数据 CSV<br/>股价 · 股本 · 付息债务 · 现金"]
+        I3["经营假设 YAML<br/>增速 · 毛利率 · 费用率 · 分红"]
+        I4["科目映射 YAML<br/>年报科目名 → 内部字段名"]
+    end
+
+    subgraph C2["② 数据层与校验"]
+        direction TB
+        EX["文档抽取 · 尚未接入<br/>每个数字绑定页码与原文片段"]
+        FIN["financials.json<br/>结构化的三张表历史数据"]
+        MK["市场数据加载<br/>接入 MarketData 与可比公司"]
+        VAL["validate.py · 已完成<br/>勾稽校验 11 项"]
+        EX --> FIN
+        FIN --> VAL
+    end
+
+    subgraph C3["③ 算法层 · 已完成"]
+        direction TB
+        WACC["wacc.py<br/>CAPM · WACC"]
+        FC["forecast.py<br/>三表联动预测"]
+        DCF["dcf.py<br/>FCFF 折现 · 终值 · 估值桥"]
+        SENS["sensitivity.py<br/>龙卷风图 · 双因素网格 · 区间归因"]
+        REV["reverse_dcf.py<br/>反解市场隐含假设"]
+        COMPS["comps.py<br/>可比公司倍数 · 隐含价值"]
+        FF["足球场图<br/>DCF 与相对估值交叉验证"]
+        WACC --> DCF
+        FC --> DCF
+        DCF --> SENS
+        DCF --> REV
+        DCF --> FF
+        COMPS --> FF
+    end
+
+    subgraph C4["④ 输出层 · algorithm/output/"]
+        direction TB
+        O2["validation_report.json"]
+        O3["projections.json"]
+        O4["valuation.json"]
+        O5["sensitivity.csv<br/>tornado.csv"]
+        O6["reverse_dcf.json"]
+        O7["comps.csv<br/>comps_implied.csv"]
+        O8["football_field.json<br/>football_field.png"]
+        O9["run_manifest.json<br/>每个产物的 sha256"]
+        O10["估值报告 · 尚未接入<br/>md / pdf / 活公式 xlsx"]
+    end
+
+    I1 --> EX
+    I4 --> EX
+    I2 --> MK
+    I3 --> FC
+
+    FIN --> FC
+    FIN --> COMPS
+    MK --> WACC
+    MK --> DCF
+    MK --> REV
+    MK --> COMPS
+
+    VAL --> O2
+    FC --> O3
+    DCF --> O4
+    SENS --> O5
+    REV --> O6
+    COMPS --> O7
+    FF --> O8
+    O4 --> O10
+    O5 --> O10
+    O6 --> O10
+    O7 --> O10
+    O8 --> O10
+
+    classDef inBox fill:#eaf0f7,stroke:#3f5f85,stroke-width:1.5px,color:#1b2c42
+    classDef todoBox fill:#fdf1e3,stroke:#a86a2a,stroke-width:1.5px,stroke-dasharray:5 4,color:#5c3a13
+    classDef doneBox fill:#e6f2ea,stroke:#2f6b45,stroke-width:1.5px,color:#14361f
+    classDef fileBox fill:#f3eefa,stroke:#5d4786,stroke-width:1.5px,color:#2c1f4a
+
+    class I1,I2,I3,I4 inBox
+    class EX,MK,O10 todoBox
+    class FIN,VAL,WACC,FC,DCF,SENS,REV,COMPS,FF doneBox
+    class O2,O3,O4,O5,O6,O7,O8,O9 fileBox

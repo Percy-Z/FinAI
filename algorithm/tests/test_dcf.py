@@ -12,6 +12,7 @@
 
 import unittest
 from dataclasses import replace
+from typing import Any
 
 from algorithm.finai.dcf import (
     discount_factors,
@@ -23,10 +24,13 @@ from algorithm.finai.dcf import (
 )
 from algorithm.finai.types import ForecastAssumptions, MarketData
 
+from algorithm.tests._helpers import assert_close  # noqa: E402
 
-def flat_assumptions(**overrides) -> ForecastAssumptions:
+
+
+def flat_assumptions(**overrides: Any) -> ForecastAssumptions:
     """常数现金流基准情景：FCFF 每年都是 15。"""
-    params = dict(
+    params: dict[str, Any] = dict(
         revenue_base=100.0,
         revenue_growth=(0.0, 0.0, 0.0, 0.0, 0.0),
         ebit_margin=(0.20, 0.20, 0.20, 0.20, 0.20),
@@ -41,8 +45,8 @@ def flat_assumptions(**overrides) -> ForecastAssumptions:
     return ForecastAssumptions(**params)
 
 
-def flat_market(**overrides) -> MarketData:
-    params = dict(
+def flat_market(**overrides: Any) -> MarketData:
+    params: dict[str, Any] = dict(
         price=10.0,
         diluted_shares=10.0,
         interest_bearing_debt=40.0,
@@ -57,25 +61,25 @@ class TestProjection(unittest.TestCase):
     def test_fcff_is_constant_when_revenue_is_flat(self):
         p = project(flat_assumptions())
         for fcff in p.fcff:
-            self.assertAlmostEqual(fcff, 15.0, places=10)
+            assert_close(self, fcff, 15.0, places=10)
 
     def test_delta_nwc_is_zero_when_revenue_is_flat(self):
         """收入不变时营运资本不变，因此营运资本增加额为 0。"""
         p = project(flat_assumptions())
         for delta in p.delta_nwc:
-            self.assertAlmostEqual(delta, 0.0, places=10)
+            assert_close(self, delta, 0.0, places=10)
 
     def test_delta_nwc_consumes_cash_when_revenue_grows(self):
         """收入增长时营运资本占用现金，增加额为正。"""
         p = project(flat_assumptions(revenue_growth=(0.10,) * 5))
         # 第一期：收入 110，营运资本 11，上期 10 -> 增加 1
-        self.assertAlmostEqual(p.delta_nwc[0], 1.0, places=10)
+        assert_close(self, p.delta_nwc[0], 1.0, places=10)
         self.assertGreater(p.delta_nwc[0], 0.0)
 
     def test_ebitda_includes_da(self):
         p = project(flat_assumptions())
         for ebit, da, ebitda in zip(p.ebit, p.da, p.ebitda):
-            self.assertAlmostEqual(ebitda, ebit + da, places=10)
+            assert_close(self, ebitda, ebit + da, places=10)
 
     def test_year_labels_start_from_base_year(self):
         p = project(flat_assumptions(), base_year=2025)
@@ -85,9 +89,9 @@ class TestProjection(unittest.TestCase):
 class TestDiscounting(unittest.TestCase):
     def test_end_of_year_factors(self):
         df = discount_factors(0.10, 3)
-        self.assertAlmostEqual(df[0], 1 / 1.10, places=10)
-        self.assertAlmostEqual(df[1], 1 / 1.10**2, places=10)
-        self.assertAlmostEqual(df[2], 1 / 1.10**3, places=10)
+        assert_close(self, df[0], 1 / 1.10, places=10)
+        assert_close(self, df[1], 1 / 1.10**2, places=10)
+        assert_close(self, df[2], 1 / 1.10**3, places=10)
 
     def test_mid_year_factors_are_larger(self):
         end_year = discount_factors(0.10, 5)
@@ -102,7 +106,7 @@ class TestDiscounting(unittest.TestCase):
 
 class TestTerminalValue(unittest.TestCase):
     def test_perpetuity_with_zero_growth(self):
-        self.assertAlmostEqual(
+        assert_close(self, 
             terminal_value_perpetuity(15.0, 0.10, 0.0), 150.0, places=10
         )
 
@@ -112,7 +116,7 @@ class TestTerminalValue(unittest.TestCase):
 
     def test_exit_multiple(self):
         # EBITDA 25 x 6.0 = 150
-        self.assertAlmostEqual(terminal_value_exit_multiple(25.0, 6.0), 150.0, places=10)
+        assert_close(self, terminal_value_exit_multiple(25.0, 6.0), 150.0, places=10)
 
 
 class TestValueDcf(unittest.TestCase):
@@ -121,29 +125,29 @@ class TestValueDcf(unittest.TestCase):
     def test_enterprise_value_matches_closed_form(self):
         result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
         # g=0 且现金流恒定时，企业价值应精确等于 FCFF / WACC
-        self.assertAlmostEqual(result.enterprise_value, 150.0, places=6)
-        self.assertAlmostEqual(result.enterprise_value, 15.0 / 0.10, places=6)
+        assert_close(self, result.enterprise_value, 150.0, places=6)
+        assert_close(self, result.enterprise_value, 15.0 / 0.10, places=6)
 
     def test_equity_bridge_and_per_share(self):
         result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
         # 净债务 = 40 - 10 = 30；权益价值 = 150 - 30 = 120；每股 = 120 / 10 = 12
-        self.assertAlmostEqual(result.net_debt, 30.0, places=10)
-        self.assertAlmostEqual(result.equity_value, 120.0, places=6)
-        self.assertAlmostEqual(result.per_share, 12.0, places=6)
+        assert_close(self, result.net_debt, 30.0, places=10)
+        assert_close(self, result.equity_value, 120.0, places=6)
+        assert_close(self, result.per_share, 12.0, places=6)
 
     def test_implied_return(self):
         result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
         # 每股 12 / 现价 10 - 1 = 20%
-        self.assertAlmostEqual(result.implied_return, 0.20, places=6)
+        assert_close(self, result.implied_return, 0.20, places=6)
 
     def test_terminal_share(self):
         result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
         # 93.1382 / 150 = 62.09%
-        self.assertAlmostEqual(result.terminal_share_of_ev, 0.620921, places=6)
+        assert_close(self, result.terminal_share_of_ev, 0.620921, places=6)
 
     def test_pv_components_sum_to_enterprise_value(self):
         result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
-        self.assertAlmostEqual(
+        assert_close(self, 
             sum(result.pv_fcff) + result.pv_terminal,
             result.enterprise_value,
             places=6,
@@ -157,10 +161,10 @@ class TestValueDcf(unittest.TestCase):
             flat_market(),
             wacc=0.10,
         )
-        self.assertAlmostEqual(
+        assert_close(self, 
             multiple.enterprise_value, perpetual.enterprise_value, places=6
         )
-        self.assertAlmostEqual(multiple.implied_exit_multiple, 6.0, places=6)
+        assert_close(self, multiple.implied_exit_multiple, 6.0, places=6)
 
     def test_higher_wacc_lowers_value(self):
         low = value_dcf(flat_assumptions(), flat_market(), wacc=0.09)
@@ -179,14 +183,14 @@ class TestValueDcf(unittest.TestCase):
             wacc=0.10,
         )
         # 净现金 10 应加回：权益价值 = 150 + 10 = 160
-        self.assertAlmostEqual(result.equity_value, 160.0, places=6)
-        self.assertAlmostEqual(result.net_debt, -10.0, places=10)
+        assert_close(self, result.equity_value, 160.0, places=6)
+        assert_close(self, result.net_debt, -10.0, places=10)
 
     def test_minority_interest_reduces_equity_value(self):
         result = value_dcf(
             flat_assumptions(), flat_market(minority_interest=20.0), wacc=0.10
         )
-        self.assertAlmostEqual(result.equity_value, 100.0, places=6)
+        assert_close(self, result.equity_value, 100.0, places=6)
 
     def test_perpetuity_growth_above_wacc_rejected(self):
         with self.assertRaises(ValueError):
@@ -218,7 +222,7 @@ class TestDiagnostics(unittest.TestCase):
     def test_implied_exit_multiple_is_reported(self):
         result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
         # 终值 150 / EBITDA 25 = 6.0
-        self.assertAlmostEqual(result.implied_exit_multiple, 6.0, places=6)
+        assert_close(self, result.implied_exit_multiple, 6.0, places=6)
 
 
 class TestReusability(unittest.TestCase):
@@ -227,7 +231,7 @@ class TestReusability(unittest.TestCase):
     def test_enterprise_value_wrapper_matches_full_run(self):
         full = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
         light = enterprise_value(flat_assumptions(), wacc=0.10)
-        self.assertAlmostEqual(light, full.enterprise_value, places=6)
+        assert_close(self, light, full.enterprise_value, places=6)
 
     def test_replace_builds_a_sensitivity_grid(self):
         """替换假设后重算，就是敏感性分析的基本动作。"""

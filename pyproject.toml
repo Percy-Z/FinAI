@@ -1,0 +1,25 @@
+# 这个文件只放工具配置，项目本身零依赖，用系统自带的 Python 3 就能跑。
+
+[tool.mypy]
+# 第三方库（例如要装了才有的 matplotlib）找不到类型存根时不报错
+ignore_missing_imports = true
+# 跑法：在仓库根目录执行 python3 -m mypy algorithm
+# algorithm/ 下有 __init__.py，所以包名能正确解析成 algorithm.finai.xxx
+
+[tool.pyright]
+# 跑法：npx pyright algorithm
+# VSCode 的 Pylance 用的就是这套引擎，跑这个等于提前看到编辑器里的全部警告
+include = ["algorithm"]
+exclude = ["**/__pycache__"]
+# 直接按最严格的模式要求，当前代码在严格模式下也是干净的
+typeCheckingMode = "strict"
+# 图表层需要 matplotlib；没装的话那些文件会报「无法解析导入」，
+# 装一下即可：python3 -m pip install matplotlib
+#
+# 下面四条是 matplotlib 类型存根的局限，不是代码问题：
+# 它的参数签名里大量是 **kwargs: Unknown，严格模式会对每一处绘图调用报警。
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+reportUnknownParameterType = "none"
+reportMissingTypeStubs = "none"

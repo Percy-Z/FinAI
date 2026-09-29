@@ -1,0 +1,29 @@
+%% FinAI 自动化估值建模 · 三表联动机制
+%% 渲染见 docs/README.md
+flowchart TB
+    D["驱动假设<br/>收入增速 · 毛利率 · 费用率 · 折旧摊销率 · 资本开支率<br/>应收 / 存货 / 应付占收入比 · 利率 · 税率 · 分红比例"]
+
+    D --> IS["利润表<br/>收入 → 毛利 → 期间费用 → 折旧摊销 → EBIT<br/>→ 利息费用 → 税前利润 → 所得税 → 净利润"]
+    D --> BS1["资产负债表 · 假设驱动科目<br/>应收 · 存货 · 应付 = 收入 x 比例<br/>固定资产 = 期初 + 资本开支 − 折旧<br/>有息负债 = 期初 − 还款计划"]
+
+    IS -->|"净利润 + 折旧摊销"| CF["现金流量表（间接法）<br/>经营 + 投资 + 筹资"]
+    BS1 -->|"营运资本增加"| CF
+    IS -->|"归母净利润"| RE["留存收益滚存<br/>期末 = 期初 + 归母净利润 − 分红"]
+
+    CF --> CASH["现金是模型的塞子<br/>期末现金 = 期初现金 + 经营 + 投资 + 筹资"]
+    CASH -->|"回填"| BS2["资产负债表<br/>资产 = 负债 + 所有者权益"]
+    RE --> BS2
+    BS1 --> BS2
+
+    BS2 --> BAL["自动配平：差额恒为 0，不需要事后调平"]
+    BAL --> CHK["交给 validate.py 反向检查：预测出来的三张表自己是否自洽"]
+
+    classDef driver fill:#eaf0f7,stroke:#3f5f85,stroke-width:1.5px,color:#1b2c42
+    classDef stmt fill:#e6f2ea,stroke:#2f6b45,stroke-width:1.5px,color:#14361f
+    classDef plug fill:#fff2cc,stroke:#8a6d1f,stroke-width:1.5px,color:#4a3a08
+    classDef check fill:#f3eefa,stroke:#5d4786,stroke-width:1.5px,color:#2c1f4a
+
+    class D driver
+    class IS,BS1,CF,RE,BS2 stmt
+    class CASH plug
+    class BAL,CHK check

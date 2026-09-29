@@ -119,6 +119,10 @@ class GridResult:
     price: float
 
     def cell(self, row_value: float, col_value: float) -> float:
+        if row_value not in self.row_values:
+            raise KeyError(f"行参数没有取值 {row_value}，可选：{self.row_values}")
+        if col_value not in self.col_values:
+            raise KeyError(f"列参数没有取值 {col_value}，可选：{self.col_values}")
         i = self.row_values.index(row_value)
         j = self.col_values.index(col_value)
         return self.cells[i][j]
@@ -159,12 +163,13 @@ def apply_variable(
 
     if variable.field in VECTOR_FIELDS:
         broadcast = tuple([float(value)] * assumptions.years)
-        return replace(assumptions, **{variable.field: broadcast}), wacc
+        # 字段名是运行期才知道的，类型检查器无法验证这种动态关键字参数
+        return replace(assumptions, **{variable.field: broadcast}), wacc  # type: ignore[arg-type]
 
     if not hasattr(assumptions, variable.field):
         raise ValueError(f"ForecastAssumptions 上没有字段 {variable.field!r}")
 
-    return replace(assumptions, **{variable.field: float(value)}), wacc
+    return replace(assumptions, **{variable.field: float(value)}), wacc  # type: ignore[arg-type]
 
 
 def _per_share_at(

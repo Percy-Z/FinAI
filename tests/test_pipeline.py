@@ -332,26 +332,32 @@ class TestTwoStackReconcile(unittest.TestCase):
             )
 
     def test_逐年比率无法映射到估值引擎(self):
-        """栈B 允许逐年不同的资本开支率，栈A 只接受单一比率。
+        """每年不同的资本开支率，在估值模块里「构造那一刻」就会被拒绝。
 
-        这条测试锁住一个真实的接缝问题：类型注解骗过了构造，
-        要到 project() 里才炸，而且报错完全看不出是哪个字段。
+        行为变化记录（2026-09-29 合并 algorithm_finance 之后）：
+
+            合并前  类型注解写的是 float 但不校验
+                    → 构造能过，到 project() 里才炸
+                    → 报错「can't multiply sequence by non-int of type 'float'」
+
+            合并后  算法层在 __post_init__ 里用 require_finite 校验
+                    → 构造时立刻拒绝
+
+        所以这条测试现在断言「构造就报错」。
+        适配层另外还拦一道，给出的是配置里的字段名 —— 见 TestAdapters
+        里的 test_逐年比率不同时适配层要报错。两道不重复。
         """
         varying = [0.06, 0.07, 0.08, 0.09, 0.10]
-        broken_assumptions = ForecastAssumptions(
-            revenue_base=400.0,
-            revenue_growth=(0.1, 0.1, 0.1, 0.1, 0.1),
-            ebit_margin=(0.2,) * 5,
-            tax_rate=0.25,
-            da_pct_revenue=0.05,
-            capex_pct_revenue=varying,  # 类型注解写的是 float
-            nwc_pct_revenue=0.15,
-        )
-        # 构造阶段不报错 —— 这正是问题所在
-        self.assertEqual(broken_assumptions.capex_pct_revenue, varying)
-        # 但用的时候会炸
         with self.assertRaises(TypeError):
-            project(broken_assumptions)
+            ForecastAssumptions(
+                revenue_base=400.0,
+                revenue_growth=(0.1, 0.1, 0.1, 0.1, 0.1),
+                ebit_margin=(0.2,) * 5,
+                tax_rate=0.25,
+                da_pct_revenue=0.05,
+                capex_pct_revenue=varying,  # 估值模块只接受单个数字
+                nwc_pct_revenue=0.15,
+            )
 
     def test_映射漏减折旧率会高估(self):
         """把「毛利 − 费用」当成 EBIT 利润率（漏减折旧），会高估多少。

@@ -10,12 +10,14 @@
 import json
 import sys
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from algorithm.finai.forecast import (  # noqa: E402
     BalanceSheetState,
     ForecastDrivers,
+    ForecastYear,
     build_forecast,
     to_snapshots,
 )
@@ -53,7 +55,7 @@ DRIVERS = ForecastDrivers(
     dividend_payout_ratio=0.30,
 )
 
-ROWS = [
+ROWS: list[tuple[str, Callable[[ForecastYear], float]]] = [
     ("营业收入", lambda y: y.income.revenue),
     ("毛利", lambda y: y.income.gross_profit),
     ("期间费用", lambda y: y.income.operating_expenses),
@@ -130,7 +132,7 @@ def main() -> None:
                     "revenue_base": DRIVERS.revenue_base,
                     "base_year": DRIVERS.base_year,
                     "years": DRIVERS.years,
-                    "revenue_growth": list(DRIVERS.revenue_growth),
+                    "revenue_growth": list(DRIVERS.series("revenue_growth")),
                     "tax_rate": DRIVERS.tax_rate,
                     "dividend_payout_ratio": DRIVERS.dividend_payout_ratio,
                 },

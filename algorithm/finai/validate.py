@@ -9,6 +9,11 @@
     fail     该平的没平，属于数据错误，必须查
     skipped  输入缺失，检查无法进行（不是通过）
 
+前置检查（排在最前面，不通过后面的结论都不可信）
+    核心数字不能全为零或缺失（抽取失败时最常见的就是全零）
+    资产总额必须为正数
+    参与比较的数字必须是有限值（NaN 参与任何比较都是 False，普通的范围校验拦不住）
+
 核心恒等式
     资产 = 负债 + 所有者权益
     所有者权益 = 归母权益 + 少数股东权益
@@ -24,7 +29,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 from .statements import ReportSnapshot
 
@@ -44,7 +51,17 @@ class Tolerance:
     absolute: float = 1.0
     relative: float = 1e-6
 
+    def __post_init__(self) -> None:
+        for name in ("absolute", "relative"):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"Tolerance.{name} 必须是有限数字，收到 {value!r}")
+            if value < 0:
+                raise ValueError(f"Tolerance.{name} 不能为负，收到 {value}")
+
     def limit_for(self, scale: float) -> float:
+        if not math.isfinite(scale):
+            raise ValueError(f"容差的参考量必须是有限数字，收到 {scale!r}")
         return max(self.absolute, self.relative * abs(scale))
 
 
@@ -70,7 +87,7 @@ class CheckResult:
     tolerance: float | None = None
     note: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -104,7 +121,7 @@ class ValidationReport:
                 return check
         raise KeyError(f"没有编号为 {check_id} 的检查")
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "fiscal_year": self.fiscal_year,
             "source": self.source,
@@ -124,6 +141,20 @@ def _tie(
     scale: float | None = None,
 ) -> CheckResult:
     """恒等式类检查：差的绝对值在容差内算通过。"""
+    if not (math.isfinite(expected) and math.isfinite(actual)):
+        # 否则容差会被 inf 撑成无穷大，任何差额都能「通过」
+        return CheckResult(
+            check_id=check_id,
+            category=category,
+            description=description,
+            status="fail",
+            expected=None if not math.isfinite(expected) else expected,
+            actual=None if not math.isfinite(actual) else actual,
+            note=(
+                f"参与比较的数字不是有限值（期望 {expected}，实际 {actual}），"
+                "多半是抽取时读到了空值或异常值"
+            ),
+        )
     difference = actual - expected
     limit = tolerance.limit_for(
         scale if scale is not None else max(abs(expected), abs(actual))
@@ -148,6 +179,71 @@ def _skipped(check_id: str, category: str, description: str, missing: str) -> Ch
         description=description,
         status="skipped",
         note=f"缺少输入：{missing}",
+    )
+
+
+def check_data_presence(snapshot: ReportSnapshot) -> CheckResult:
+    """DQ-01 这份数据看起来是不是空的。
+
+    必须放在所有恒等式检查之前：资产全为零时「资产 = 负债 + 权益」恒成立，
+    会报出一条假通过，让读者以为数据没问题。抽取失败时最常见的表现就是全零。
+    """
+    balance = snapshot.balance
+    income = snapshot.income
+    cashflow = snapshot.cashflow
+
+    core = {
+        "资产总计": balance.total_assets,
+        "营业收入": income.revenue,
+        "净利润": income.net_profit,
+        "经营活动现金流": cashflow.operating,
+    }
+    usable = {
+        label: value
+        for label, value in core.items()
+        if value not in (None, 0) and math.isfinite(value)
+    }
+    empty = [label for label in core if label not in usable]
+
+    check_id = "DQ-01"
+    category = "data_quality"
+    description = "核心数字不应全部为零或缺失，资产总计必须为正"
+
+    if not usable:
+        return CheckResult(
+            check_id=check_id,
+            category=category,
+            description=description,
+            status="fail",
+            note=(
+                "资产总计、营业收入、净利润、经营活动现金流全部为零或缺失，"
+                "这份数据看起来什么都没抽到，下面的恒等式检查结果都不可信"
+            ),
+        )
+
+    if not (balance.total_assets and balance.total_assets > 0):
+        return CheckResult(
+            check_id=check_id,
+            category=category,
+            description=description,
+            status="fail",
+            expected=1.0,
+            actual=balance.total_assets,
+            note=(
+                f"资产总计为 {balance.total_assets}，真实的公司资产总额必须为正数，"
+                "检查是不是抽错了数或者单位不对"
+            ),
+        )
+
+    note = ""
+    if empty:
+        note = "以下核心数字为零或缺失：" + "、".join(empty) + "，注意核对"
+    return CheckResult(
+        check_id=check_id,
+        category=category,
+        description=description,
+        status="pass",
+        note=note,
     )
 
 
@@ -252,10 +348,10 @@ def check_assets_floor(
     """
     balance = snapshot.balance
     offenders: list[str] = []
-    for name, value, label in (
-        ("cash_and_equivalents", balance.cash_and_equivalents, "货币资金"),
-        ("accounts_receivable", balance.accounts_receivable, "应收账款"),
-        ("inventory", balance.inventory, "存货"),
+    for value, label in (
+        (balance.cash_and_equivalents, "货币资金"),
+        (balance.accounts_receivable, "应收账款"),
+        (balance.inventory, "存货"),
     ):
         if value is None:
             continue
@@ -580,6 +676,7 @@ def run_checks(
         fiscal_year=snapshot.fiscal_year, source=snapshot.source
     )
     report.checks = [
+        check_data_presence(snapshot),
         check_balance_sheet_tie(snapshot, tol),
         check_equity_composition(snapshot, tol),
         check_retained_earnings_rollforward(snapshot, tol),

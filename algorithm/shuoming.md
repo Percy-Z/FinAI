@@ -18,6 +18,8 @@
 | `reverse_dcf.py` | 反向求解：给定股价反解市场隐含假设 | `reverse_dcf.json` |
 | `comps.py` | 相对估值：可比公司倍数、隐含价值、足球场图 | `comps.csv`、`comps_implied.csv` |
 | `validate.py` | 勾稽校验：恒等式、现金口径、信号类检查 | `validation_report.json` |
+| `output/reporting.py` | 输出层：把结果写进 `outputs/<run_id>/` | 01 到 10 号数据文件 + 运行清单 |
+| `output/charts/` | 图表层：一个文件一张图 | 11 到 16 号 PNG |
 
 ---
 
@@ -215,6 +217,7 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 
 | 算法 | 编号 | 做什么 | 输入 | 输出 |
 | --- | --- | --- | --- | --- |
+| `check_data_presence()` | DQ-01 | 核心数字是否全为零或缺失、资产总额是否为正 | `ReportSnapshot` | `CheckResult` |
 | `check_balance_sheet_tie()` | BS-01 | 资产 = 负债 + 所有者权益 | `ReportSnapshot`、`Tolerance` | `CheckResult` |
 | `check_equity_composition()` | BS-02 | 所有者权益 = 归母权益 + 少数股东权益 | 同上 | `CheckResult` |
 | `check_retained_earnings_rollforward()` | BS-03 | 期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利 | 同上 | `CheckResult` |
@@ -226,7 +229,7 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 | `check_non_recurring_share()` | X-03 | 非经常性损益占归母净利润的比重 | 快照、触发阈值 | `CheckResult` |
 | `check_scale_sanity()` | X-04 | 收入与总资产的量级关系（抓单位混用） | 快照 | `CheckResult` |
 | `check_restatement()` | X-05 | 上年报本期数 = 本年报上期数 | 科目名、两个数、年份、`Tolerance` | `CheckResult` |
-| `run_checks()` | — | **主入口**，一次跑完前十条 | 快照、可选容差与阈值 | `ValidationReport` |
+| `run_checks()` | — | **主入口**，一次跑完前十一条 | 快照、可选容差与阈值 | `ValidationReport` |
 
 `CheckResult` 里两个数值字段的单位是分开的，不要混用：
 
@@ -296,33 +299,110 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
 
 ---
 
-## 10. 整体数据流
+## 10. `output/reporting.py` — 输出层
+
+这个模块**不在 `finai/` 包里**，它单独放在 `algorithm/output/` 下，
+是唯一一个不放在算法层里的模块。这样分层的依赖是单向的：
+`output` 依赖 `finai`，`finai` 完全不知道 `output` 的存在。
+
+**用途**：把算法层的结果落成文件与图表。每次运行产出一个带时间戳的目录
+`outputs/<run_id>/`，不覆盖上一次；同时写一份 `10_run_manifest.json`，
+记录每个产物的 sha256 与字节数。
+
+输出层分成两部分：`reporting.py` 负责数据文件与运行清单，`charts/` 子包负责图表。
+**一个文件负责一张图**，编号写在文件名最前面，全目录编号唯一（数据 01 到 10，图表 11 到 16）。
+详细的对应关系见 `algorithm/output/README.md`。
+
+| 算法 | 做什么 | 输入 | 输出 |
+| --- | --- | --- | --- |
+| `RunOutputs` | 一次运行的产出容器 | 各算法的结果对象，缺省为 None | 对象本身 |
+| `export_run()` | **主入口**，写全部数据文件与图表 | `RunOutputs`、可选根目录、可选 run_id、可选元信息、是否覆盖、是否出图 | `RunArtifacts`（含目录、文件字典、清单） |
+| `data_filename()` | 按编号拼数据文件名 | 产物名，如 `valuation` | 文件名，如 `03_valuation.json` |
+| `make_run_id()` | 生成时间戳运行编号 | 可选时间、可选前缀 | 字符串，如 `20260927T165932` |
+| `write_json()` | 写 JSON，中文不转义 | 路径、任意可序列化对象 | 文件路径 |
+| `sha256_of()` | 算文件哈希 | 文件路径 | 十六进制哈希字符串 |
+| `summarize()` | 把产物列成一段文本 | `RunArtifacts` | 多行文本，终端打印用 |
+| `charts.render_all()` | 按有哪些结果批量出图 | `RunOutputs`、目标目录 | 图名到路径的字典 |
+| `charts.chart_filename()` | 按编号拼图表文件名 | 图名，如 `tornado` | 文件名，如 `12_tornado.png` |
+
+每个文件来自哪个算法的结果：
+
+| 编号 | 文件 | 来自 |
+| --- | --- | --- |
+| 01 | `01_projections.json` | `forecast.build_forecast()` |
+| 02 | `02_validation_report.json` | `validate.run_checks()` |
+| 03 | `03_valuation.json` | `dcf.value_dcf()` |
+| 04 | `04_tornado.csv` | `sensitivity.tornado()` |
+| 05 | `05_sensitivity.csv` | `sensitivity.two_way_grid()` |
+| 06 | `06_reverse_dcf.json` | `reverse_dcf.reverse_solve_many()` |
+| 07 | `07_comps.csv` | `comps.comps_valuation()` |
+| 08 | `08_comps_implied.csv` | `comps.comps_valuation()` |
+| 09 | `09_football_field.json` | `comps.football_field()` |
+| 10 | `10_run_manifest.json` | `export_run()` 自己生成 |
+
+### 10.2 图表子包 `charts/`
+
+公共样式放在 `base.py`，所有图共用一套配色、中文字体和保存参数。
+每个图表模块只暴露一个 `render()` 函数。
+
+| 编号 | 文件 | 程序 | 数据来源 | 回答什么问题 |
+| --- | --- | --- | --- | --- |
+| 11 | `11_football_field.png` | `charts/football_field.py` | 09 | 各方法区间差多少，现价在区间内还是外 |
+| 12 | `12_tornado.png` | `charts/tornado.py` | 04 | 哪个假设影响最大 |
+| 13 | `13_sensitivity_heatmap.png` | `charts/sensitivity_heatmap.py` | 05 | 哪些组合下估值低于现价 |
+| 14 | `14_peer_multiples.png` | `charts/peer_multiples.py` | 07 | 相对可比公司贵还是便宜 |
+| 15 | `15_forecast_trend.png` | `charts/forecast_trend.py` | 01 | 未来五年的盈利与偿债能力 |
+| 16 | `16_validation_summary.png` | `charts/validation_summary.py` | 02 | 哪一年哪一项勾稽检查出问题 |
+
+三条设计约定。**哪些字段是 None，对应文件就不会生成**，所以可以只导出部分结果。
+**同名运行目录已存在且有内容时直接报错**，要覆盖得显式传 `overwrite=True`，
+避免把上一次的结果悄悄冲掉。**清单里不列它自己**：`run_manifest.json` 是在写完
+所有产物之后才生成的，没法包含自己的哈希。
+
+`run_manifest.json` 是复现性的凭证，结构如下：
+
+```json
+{
+  "run_id": "20260927T165932",
+  "created_at": "2026-09-27T16:59:32",
+  "python": "3.14.5",
+  "platform": "macOS-...",
+  "inputs": {"target": "T", "price": 10.0, "wacc": 0.0947},
+  "outputs": [
+    {"name": "valuation", "file": "03_valuation.json", "bytes": 2217, "sha256": "..."},
+    {"name": "chart_tornado", "file": "charts/12_tornado.png", "bytes": 92297, "sha256": "..."}
+  ],
+  "warnings": []
+}
+```
+
+---
+
+## 11. 整体数据流
 
 ```text
-年报 PDF（尚未接入）
-      |
-      v
-statements.py 的数据结构 ---------> validate.py 勾稽校验 ----> validation_report.json
-      |
-      v
-forecast.py 三表联动预测 ----> projections.json ----> FCFF 序列
-      |                                                      |
-      v                                                      v
-wacc.py 资本成本 -----------------------------> dcf.py 估值得出 valuation.json
-                                                         |
-                    +------------------------------------+
-                    v                                    v
-        sensitivity.py 敏感性分析            reverse_dcf.py 反向求解
-        tornado.csv / sensitivity.csv        reverse_dcf.json
-                    |
-                    v
-        comps.py 相对估值 ----> comps.csv / comps_implied.csv
-                    |
-                    v
-        football_field 足球场图（检查 DCF 与相对估值的区间是否重叠）
-                    |
-                    v
-        报告生成（尚未接入）
+① 数据准备与校验
+    年报 PDF（尚未接入） → 文档抽取 → financials.json
+                                          |
+                                          v
+                             validate.py 勾稽校验 → validation_report.json
+
+② 估值计算
+    wacc.py 资本成本 ─┐
+    forecast.py 三表预测 ─┴→ dcf.py 估值 ─┬→ sensitivity.py 敏感性分析
+                                            ├→ reverse_dcf.py 反向求解
+                                            └→ 足球场图 ← comps.py 相对估值
+
+③ 落盘（reporting.py）
+    上面所有结果 → export_run(RunOutputs(...)) → outputs/<run_id>/
+        valuation.json                ← dcf
+        football_field.json / .png    ← 足球场图
+        comps.csv / comps_implied.csv ← comps
+        sensitivity.csv / tornado.csv ← sensitivity
+        reverse_dcf.json              ← reverse_dcf
+        validation_report.json        ← validate
+        projections.json              ← forecast
+        run_manifest.json             ← 每个产物的 sha256
 ```
 
 两条独立的估值线（DCF 与相对估值）算出区间后，`football_field()` 会检查它们是否重叠。
@@ -330,13 +410,13 @@ wacc.py 资本成本 -----------------------------> dcf.py 估值得出 valuatio
 
 ---
 
-## 11. 还没做的部分
+## 12. 还没做的部分
 
 | 待做 | 说明 |
 | --- | --- |
-| 数据层 | 读 YAML 假设文件、写 JSON 结果、记录运行日志（`trace.jsonl`、`run_manifest.json`） |
+| 数据层 | 读 YAML 假设文件、写运行日志（`trace.jsonl`）。JSON 落盘与运行清单已由 `reporting.py` 完成 |
 | 文档抽取 | 年报 PDF 到结构化财报，每个数字绑定页码与原文片段 |
 | DCF 接三表 | 目前 `dcf.py` 走的是简化路径，`forecast.py` 算出的 FCFF 序列还没有接进估值函数 |
 | 报告生成 | 从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx） |
 
-当前测试规模：`algorithm/tests/` 下 244 个单元测试，全部用手算数字做断言。
+当前测试规模：`algorithm/tests/` 下 271 个单元测试，全部用手算数字做断言。

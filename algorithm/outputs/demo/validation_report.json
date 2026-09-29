@@ -2,13 +2,25 @@
   "fiscal_year": 2025,
   "source": "示例公司_2025_annual.pdf",
   "summary": {
-    "pass": 5,
+    "pass": 6,
     "warning": 4,
     "fail": 1,
     "skipped": 0,
-    "total": 10
+    "total": 11
   },
   "checks": [
+    {
+      "check_id": "DQ-01",
+      "category": "data_quality",
+      "description": "核心数字不应全部为零或缺失，资产总计必须为正",
+      "status": "pass",
+      "expected": null,
+      "actual": null,
+      "difference": null,
+      "metric": null,
+      "tolerance": null,
+      "note": ""
+    },
     {
       "check_id": "BS-01",
       "category": "balance_sheet",

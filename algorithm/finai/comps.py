@@ -27,12 +27,17 @@ from __future__ import annotations
 
 import csv
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean as _mean
-from typing import Sequence
+from typing import Any, Sequence
 
 from .dcf import DCFResult
+from .types import (
+    require_finite,
+    require_optional_finite,
+    require_positive,
+)
 
 MULTIPLE_NAMES = ("pe", "pb", "ps", "ev_ebitda", "ev_ebit")
 EQUITY_MULTIPLES = frozenset({"pe", "pb", "ps"})
@@ -73,10 +78,25 @@ class CompanyMetrics:
     as_of: str = ""
 
     def __post_init__(self) -> None:
-        if self.price <= 0:
-            raise ValueError(f"{self.code}：price 必须为正数")
-        if self.diluted_shares <= 0:
-            raise ValueError(f"{self.code}：diluted_shares 必须为正数")
+        require_positive(self.price, f"{self.code}：price")
+        require_positive(self.diluted_shares, f"{self.code}：diluted_shares")
+        for name in (
+            "net_profit_attributable",
+            "book_equity_attributable",
+            "revenue",
+            "ebit",
+            "ebitda",
+            "earnings_growth",
+        ):
+            require_optional_finite(getattr(self, name), f"{self.code}：{name}")
+        for name in (
+            "interest_bearing_debt",
+            "cash",
+            "minority_interest",
+            "preferred_stock",
+            "non_operating_assets",
+        ):
+            require_finite(getattr(self, name), f"{self.code}：{name}")
 
     @property
     def market_cap(self) -> float:
@@ -112,6 +132,8 @@ class CompanyMetrics:
 def _ratio(numerator: float | None, denominator: float | None) -> float | None:
     """分母不存在或非正时返回 None：这类倍数没有意义，不能当便宜。"""
     if numerator is None or denominator is None or denominator <= 0:
+        return None
+    if not (math.isfinite(numerator) and math.isfinite(denominator)):
         return None
     return numerator / denominator
 
@@ -237,6 +259,9 @@ def build_stats(
             if value is None:
                 entry.excluded.append((company.code, "分母非正或数据缺失"))
                 continue
+            if not math.isfinite(value):
+                entry.excluded.append((company.code, "倍数不是有限数字"))
+                continue
             if value <= 0:
                 entry.excluded.append((company.code, f"倍数非正（{value:.4f}）"))
                 continue
@@ -351,6 +376,12 @@ def implied_from_multiple(
         - target.preferred_stock
         + target.non_operating_assets
     )
+    note = (
+        f"企业价值类倍数：隐含企业价值 {implied_ev:,.0f}，"
+        f"减净债务 {target.net_debt:,.0f} 后得到权益价值"
+    )
+    if implied_equity < 0:
+        note += "。注意：隐含权益价值为负，这个倍数对应的企业价值还不够还债，结果不可用"
     return ImpliedValuation(
         multiple=multiple,
         stat_name=stat_name,
@@ -358,10 +389,7 @@ def implied_from_multiple(
         implied_enterprise_value=implied_ev,
         implied_equity_value=implied_equity,
         implied_per_share=implied_equity / target.diluted_shares,
-        note=(
-            f"企业价值类倍数：隐含企业价值 {implied_ev:,.0f}，"
-            f"减净债务 {target.net_debt:,.0f} 后得到权益价值"
-        ),
+        note=note,
     )
 
 
@@ -394,24 +422,32 @@ class CompsResult:
 
     @property
     def value_range(self) -> tuple[float, float]:
-        values = [item.implied_per_share for item in self.medians]
+        values = [
+            item.implied_per_share
+            for item in self.medians
+            if item.implied_per_share is not None
+        ]
         if not values:
             raise ValueError("没有可用的隐含估值，无法给出区间")
-        return min(values), max(values)  # type: ignore[type-var]
+        return min(values), max(values)
 
     @property
     def central_value(self) -> float:
         """各方法中位数隐含价值的中位数，作为相对估值的中心值。"""
-        values = [item.implied_per_share for item in self.medians]
+        values = [
+            item.implied_per_share
+            for item in self.medians
+            if item.implied_per_share is not None
+        ]
         if not values:
             raise ValueError("没有可用的隐含估值，无法给出中心值")
-        return percentile(values, 0.5)  # type: ignore[arg-type]
+        return percentile(values, 0.5)
 
     @property
     def implied_return(self) -> float:
         return self.central_value / self.price - 1.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "target": self.target.code,
             "price": self.price,
@@ -510,6 +546,11 @@ class FootballFieldBand:
     def width(self) -> float:
         return self.high - self.low
 
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["width"] = self.width
+        return data
+
 
 @dataclass
 class FootballField:
@@ -536,6 +577,16 @@ class FootballField:
     def overlaps(self, first: str, second: str) -> bool:
         a, b = self.band(first), self.band(second)
         return max(a.low, b.low) <= min(a.high, b.high)
+
+    def to_dict(self) -> dict[str, Any]:
+        """供 football_field.json 使用。"""
+        return {
+            "price": self.price,
+            "overall_low": self.overall_low,
+            "overall_high": self.overall_high,
+            "bands": [band.to_dict() for band in self.bands],
+            "warnings": list(self.warnings),
+        }
 
 
 def comps_bands(result: CompsResult) -> list[FootballFieldBand]:
@@ -599,6 +650,16 @@ def football_field(
 
     field = FootballField(bands=list(bands), price=price)
     for first, second in check_pairs:
+        # 某一侧不存在时不能直接报错：可比公司全部亏损时 PE 横条就不会生成，
+        # 这时应该跳过重叠检查并说明原因，而不是让整条流水线崩掉
+        available = {band.name for band in field.bands}
+        missing = [name for name in (first, second) if name not in available]
+        if missing:
+            field.warnings.append(
+                f"跳过 {first} 与 {second} 的重叠检查："
+                f"没有生成 {'、'.join(missing)} 这条区间"
+            )
+            continue
         if not field.overlaps(first, second):
             a, b = field.band(first), field.band(second)
             field.warnings.append(

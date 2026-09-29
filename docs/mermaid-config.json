@@ -1,0 +1,14 @@
+{
+  "theme": "default",
+  "themeVariables": {
+    "fontFamily": "'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Helvetica, Arial, sans-serif",
+    "fontSize": "16px"
+  },
+  "flowchart": {
+    "wrappingWidth": 460,
+    "nodeSpacing": 45,
+    "rankSpacing": 60,
+    "curve": "basis",
+    "padding": 12
+  }
+}

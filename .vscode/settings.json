@@ -1,0 +1,27 @@
+{
+    // 告诉 Pylance 以仓库根目录为解析起点，
+    // 否则 from algorithm.finai.xxx import yyy 会报「导入无法解析」
+    "python.analysis.extraPaths": [
+        "."
+    ],
+    // 与 pyproject.toml 里的 [tool.pyright] 保持一致：
+    // matplotlib 的类型存根里大量参数是 **kwargs: Unknown，
+    // 严格模式下会对每一处绘图调用报警，这不是代码问题
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportUnknownMemberType": "none",
+        "reportUnknownArgumentType": "none",
+        "reportUnknownVariableType": "none",
+        "reportUnknownParameterType": "none",
+        "reportMissingTypeStubs": "none"
+    },
+    // 用 unittest 跑测试：python3 -m unittest discover -s algorithm/tests
+    "python.testing.unittestEnabled": true,
+    "python.testing.pytestEnabled": false,
+    "python.testing.unittestArgs": [
+        "-v",
+        "-s",
+        "./algorithm/tests",
+        "-t",
+        "."
+    ]
+}

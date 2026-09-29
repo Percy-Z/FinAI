@@ -12,8 +12,44 @@ dataclasses.replace(...)，而不是就地修改对象。这是敏感性分析�
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
+
+if TYPE_CHECKING:
+    # 只为类型检查器导入。Projection 定义在 dcf.py，而 dcf.py 又要导入本模块，
+    # 运行时不导入才不会形成循环导入。
+    from .dcf import Projection
+
+
+def require_finite(value: float | None, label: str) -> float:
+    """校验数字是有限值。
+
+    必须单独写这一步，因为 NaN 参与任何比较都是 False：
+    `if x <= 0` 拦不住 NaN，`if x > 0` 也拦不住。缺失值从年报抽出来时
+    常常是 NaN，所以每个数字入模型前都要过这一关。
+    """
+    if value is None:
+        raise ValueError(f"{label} 不能为空")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{label} 必须是有限数字，收到 {value!r}")
+    return number
+
+
+def require_positive(value: float | None, label: str) -> float:
+    """校验数字是有限的正数。"""
+    number = require_finite(value, label)
+    if number <= 0:
+        raise ValueError(f"{label} 必须为正数，收到 {number}")
+    return number
+
+
+def require_optional_finite(value: float | None, label: str) -> float | None:
+    """校验可空数字：要么是 None，要么是有限值。"""
+    if value is None:
+        return None
+    return require_finite(value, label)
 
 
 @dataclass(frozen=True)
@@ -27,6 +63,18 @@ class WaccInputs:
     tax_rate: float
     equity_weight: float
     debt_weight: float
+
+    def __post_init__(self) -> None:
+        for name in (
+            "risk_free",
+            "beta",
+            "equity_risk_premium",
+            "cost_of_debt",
+            "tax_rate",
+            "equity_weight",
+            "debt_weight",
+        ):
+            require_finite(getattr(self, name), name)
 
 
 @dataclass(frozen=True)
@@ -51,14 +99,20 @@ class ForecastAssumptions:
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "revenue_growth", tuple(float(x) for x in self.revenue_growth)
+            self,
+            "revenue_growth",
+            tuple(require_finite(x, "revenue_growth 的每一项") for x in self.revenue_growth),
         )
         object.__setattr__(
-            self, "ebit_margin", tuple(float(x) for x in self.ebit_margin)
+            self,
+            "ebit_margin",
+            tuple(require_finite(x, "ebit_margin 的每一项") for x in self.ebit_margin),
         )
 
-        if self.revenue_base <= 0:
-            raise ValueError("revenue_base 必须为正数（单位：元）")
+        require_positive(self.revenue_base, "revenue_base")
+        for name in ("da_pct_revenue", "capex_pct_revenue", "nwc_pct_revenue"):
+            require_finite(getattr(self, name), name)
+        require_finite(self.terminal_growth, "terminal_growth")
         if len(self.revenue_growth) == 0:
             raise ValueError("revenue_growth 不能为空，预测期至少 1 年")
         if len(self.ebit_margin) != len(self.revenue_growth):
@@ -75,6 +129,8 @@ class ForecastAssumptions:
             )
         if self.terminal_method == "exit_multiple" and self.exit_multiple is None:
             raise ValueError("使用退出倍数法时必须提供 exit_multiple")
+        if self.exit_multiple is not None:
+            require_positive(self.exit_multiple, "exit_multiple")
 
     @property
     def years(self) -> int:
@@ -100,10 +156,16 @@ class MarketData:
     as_of: str = ""
 
     def __post_init__(self) -> None:
-        if self.price <= 0:
-            raise ValueError("price 必须为正数")
-        if self.diluted_shares <= 0:
-            raise ValueError("diluted_shares 必须为正数")
+        require_positive(self.price, "price")
+        require_positive(self.diluted_shares, "diluted_shares")
+        for name in (
+            "interest_bearing_debt",
+            "cash",
+            "minority_interest",
+            "preferred_stock",
+            "non_operating_assets",
+        ):
+            require_finite(getattr(self, name), name)
 
     @property
     def net_debt(self) -> float:
@@ -120,7 +182,7 @@ class DCFResult:
     """估值结果。字段名与 outputs/<run_id>/valuation.json 保持一致。"""
 
     wacc: float
-    projection: "Projection"
+    projection: Projection
     discount_factor: list[float]
     pv_fcff: list[float]
     terminal_value: float
