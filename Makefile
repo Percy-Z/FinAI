@@ -18,7 +18,7 @@ help:
 	@echo "  make run       跑完整条流水线"
 	@echo "  make test      跑全部单元测试"
 	@echo "  make verify    提交前的全量检查（测试 + 配置 + 完整跑一遍）"
-	@echo "  make clean     删掉运行产物（outputs/ 和 logs/）"
+	@echo "  make clean     删掉运行产物（runs/ 和 logs/）"
 	@echo ""
 	@echo "  可以指定解释器：make run PYTHON=python3.12"
 
@@ -37,18 +37,19 @@ run:
 test: test-algorithm test-pipeline
 
 
-# 算法层：244 个单元测试，用手算数字做断言。
+# 算法层：345 个单元测试（其中 22 个需要 matplotlib，没装则跳过）。
 # -s 参数不能省，algorithm 是命名空间包，不指定会找不到测试。
 test-algorithm:
 	$(PYTHON) -m unittest discover -s algorithm/tests
 
 
-# 框架层：还没写。这里先留好位置，等 tests/ 目录建出来就自动生效。
+# 框架层：42 个测试，验的是「装配」——配置读得对不对、串起来跑不跑得通、
+# 出错时有没有拦住并留下记录。测试目录跟着框架代码走，所以是 pipeline/tests。
 test-pipeline:
-	@if [ -d tests ]; then \
-		$(PYTHON) -m unittest discover -s tests; \
+	@if [ -d pipeline/tests ]; then \
+		$(PYTHON) -m unittest discover -s pipeline/tests; \
 	else \
-		echo "（框架层还没有 tests/ 目录，跳过）"; \
+		echo "（框架层还没有 pipeline/tests/ 目录，跳过）"; \
 	fi
 
 
@@ -65,5 +66,5 @@ verify: test config run
 # 加了守卫：只在仓库根目录才执行，避免在别处误删。
 clean:
 	@test -d algorithm && test -f Makefile || (echo "请在仓库根目录执行 make clean"; exit 1)
-	rm -rf outputs/* logs/*
-	@echo "已清空 outputs/ 和 logs/（algorithm/outputs/ 里的示例产物保留）"
+	rm -rf runs/* logs/*
+	@echo "已清空 runs/ 和 logs/（algorithm/runs/ 里的示例产物保留）"

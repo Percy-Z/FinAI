@@ -9,8 +9,8 @@
     python3 -m pipeline.run
 
 产物：
-    outputs/<run_id>/projections.json   三表预测
-    outputs/<run_id>/valuation.json     DCF 估值结果与 WACC 的完整构成
+    runs/<run_id>/projections.json   三表预测
+    runs/<run_id>/valuation.json     DCF 估值结果与 WACC 的完整构成
     logs/<run_id>/trace.jsonl           逐步执行轨迹
     logs/<run_id>/run_manifest.json     本次运行总清单
 
@@ -55,7 +55,7 @@ from .tracing import RunTrace
 
 # 仓库根目录：本文件在 pipeline/ 下，往上退一级就是 FinAI/
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = REPO_ROOT / "outputs"
+OUTPUT_ROOT = REPO_ROOT / "runs"
 CONFIG_PATH = DEFAULT_CONFIG_PATH
 MARKET_PATH = DEFAULT_MARKET_PATH
 

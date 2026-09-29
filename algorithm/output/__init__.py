@@ -5,7 +5,9 @@
     output 的任何东西，层次是单向的。
 
 命名提醒
-    本包叫 output（代码），产物写在 algorithm/outputs/（产物），只差一个 s。
+    本包 output/ 是代码，产物写在 algorithm/runs/。
+    产物目录统一叫 runs/（框架层那边是仓库根的 runs/），不再用 outputs，
+    避免「output 是代码、outputs 是产物」只差一个 s 的混淆。
 """
 
 from .reporting import (

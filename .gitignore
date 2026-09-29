@@ -55,10 +55,10 @@ venv/
 #      不受规则影响，要让它们也失效必须先 git rm --cached。
 # ---------------------------------------------------------------------------
 
-# 流水线运行产物：outputs/<run_id>/ 下有 projections.json、valuation.json 等
-/outputs/
+# 框架层的运行产物：runs/<run_id>/ 下有 projections.json、valuation.json 等
+/runs/
 
-# 运行日志：trace.jsonl 与 run_manifest.json
+# 框架层的运行日志：trace.jsonl 与 run_manifest.json
 /logs/
 
 # ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ venv/
 # 原则：决定之前，不要把这两类文件提交进去。规则随时能加，
 #       但已经提交的文件要取消跟踪就得多做一步。
 # ---------------------------------------------------------------------------
-# 运行产物：时间戳目录不入库（每次跑 pipeline_demo 都会新建一个），
+# 算法侧（输出层）的运行产物：时间戳目录不入库（每次跑 pipeline_demo 都会新建一个），
 # demo/ 保留在库里，作为输出格式的示例
-algorithm/outputs/*
-!algorithm/outputs/demo/
+algorithm/runs/*
+!algorithm/runs/demo/

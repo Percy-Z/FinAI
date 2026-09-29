@@ -27,7 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 # 让测试可以从任何目录运行
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -488,7 +488,7 @@ class TestAdapters(unittest.TestCase):
 
 
 class TestEndToEnd(unittest.TestCase):
-    """在临时目录里跑完整流水线，不污染真实的 outputs/ 和 logs/。"""
+    """在临时目录里跑完整流水线，不污染真实的 runs/ 和 logs/。"""
 
     def run_pipeline(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -496,7 +496,7 @@ class TestEndToEnd(unittest.TestCase):
         root = Path(self.tmp.name)
         logs = root / "logs"
 
-        with mock.patch.object(run, "OUTPUT_ROOT", root / "outputs"), mock.patch.object(
+        with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
             run, "RunTrace", lambda run_id: tracing.RunTrace(run_id, log_root=logs)
         ):
             with redirect_stdout(io.StringIO()):
@@ -509,7 +509,7 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_产物写出来了而且内容对(self):
         _, root = self.run_pipeline()
-        produced = list((root / "outputs").glob("*/projections.json"))
+        produced = list((root / "runs").glob("*/projections.json"))
         self.assertEqual(len(produced), 1)
 
         payload = json.loads(produced[0].read_text(encoding="utf-8"))
@@ -522,7 +522,7 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_产物内容与三表预测一致(self):
         _, root = self.run_pipeline()
-        produced = next((root / "outputs").glob("*/projections.json"))
+        produced = next((root / "runs").glob("*/projections.json"))
         payload = json.loads(produced.read_text(encoding="utf-8"))
 
         drivers = config.load_case()[1]
@@ -536,7 +536,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(first_code, 0)
         with mock.patch.object(run, "new_run_id", lambda: "固定编号"):
             with mock.patch.object(
-                run, "OUTPUT_ROOT", root / "outputs"
+                run, "OUTPUT_ROOT", root / "runs"
             ), mock.patch.object(
                 run,
                 "RunTrace",
@@ -545,12 +545,12 @@ class TestEndToEnd(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     run.main()
         # 编号是固定的，所以第二次会写进同一个目录（这符合设计）
-        self.assertTrue((root / "outputs" / "固定编号" / "projections.json").exists())
+        self.assertTrue((root / "runs" / "固定编号" / "projections.json").exists())
 
     def test_估值产物的_WACC_里有完整的七项(self):
         """报告里要列出 WACC 的完整构成 —— 四个输入 + 一个复用 + 两个推导。"""
         _, root = self.run_pipeline()
-        produced = next((root / "outputs").glob("*/valuation.json"))
+        produced = next((root / "runs").glob("*/valuation.json"))
         payload = json.loads(produced.read_text(encoding="utf-8"))
         wacc = payload["wacc"]
 
@@ -580,7 +580,7 @@ class TestEndToEnd(unittest.TestCase):
         不应该改变任何数字。
         """
         _, root = self.run_pipeline()
-        produced = next((root / "outputs").glob("*/valuation.json"))
+        produced = next((root / "runs").glob("*/valuation.json"))
         payload = json.loads(produced.read_text(encoding="utf-8"))
 
         _, drivers, opening = config.load_case()
@@ -617,7 +617,7 @@ class TestEndToEnd(unittest.TestCase):
 
         def run_as(run_id: str) -> None:
             with mock.patch.object(run, "new_run_id", lambda: run_id), mock.patch.object(
-                run, "OUTPUT_ROOT", root / "outputs"
+                run, "OUTPUT_ROOT", root / "runs"
             ), mock.patch.object(
                 run,
                 "RunTrace",
@@ -630,8 +630,8 @@ class TestEndToEnd(unittest.TestCase):
         run_as("第二次")
 
         for name in ("projections.json", "valuation.json"):
-            first = json.loads((root / "outputs" / "第一次" / name).read_text("utf-8"))
-            second = json.loads((root / "outputs" / "第二次" / name).read_text("utf-8"))
+            first = json.loads((root / "runs" / "第一次" / name).read_text("utf-8"))
+            second = json.loads((root / "runs" / "第二次" / name).read_text("utf-8"))
 
             # 各自的运行标识是对的
             self.assertEqual(first["run_id"], "第一次")
@@ -655,7 +655,7 @@ class TestTracing(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        with mock.patch.object(run, "OUTPUT_ROOT", root / "outputs"), mock.patch.object(
+        with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
             run,
             "RunTrace",
             lambda run_id: tracing.RunTrace(run_id, log_root=root / "logs"),
@@ -691,7 +691,7 @@ class TestTracing(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        with mock.patch.object(run, "OUTPUT_ROOT", root / "outputs"), mock.patch.object(
+        with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
             run,
             "RunTrace",
             lambda run_id: tracing.RunTrace(run_id, log_root=root / "logs"),
@@ -726,7 +726,7 @@ class TestFailurePath(unittest.TestCase):
             raise config.ConfigError("模拟的配置错误：税率写成了 0.9")
 
         with mock.patch.object(run, "load_case", boom), mock.patch.object(
-            run, "OUTPUT_ROOT", root / "outputs"
+            run, "OUTPUT_ROOT", root / "runs"
         ), mock.patch.object(
             run,
             "RunTrace",
@@ -767,7 +767,7 @@ class TestFailurePath(unittest.TestCase):
             raise RuntimeError("模拟的代码 bug")
 
         with mock.patch.object(run, "load_case", boom), mock.patch.object(
-            run, "OUTPUT_ROOT", root / "outputs"
+            run, "OUTPUT_ROOT", root / "runs"
         ), mock.patch.object(
             run,
             "RunTrace",

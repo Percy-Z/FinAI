@@ -2,7 +2,9 @@
 
 把算法层的结果落成文件。**一个文件负责一张图，编号写在文件名最前面。**
 
-命名提醒：代码目录叫 `output/`，产物目录叫 `algorithm/outputs/`，只差一个 s。
+命名提醒：代码目录叫 `output/`，产物目录叫 `algorithm/runs/`。
+产物目录统一叫 `runs/`（框架层那边是仓库根的 `runs/`），不再用 `outputs`，
+避免「output 是代码、outputs 是产物」只差一个 s 的混淆。
 
 ## 目录结构
 

@@ -55,8 +55,10 @@ from algorithm.finai.validate import ValidationReport
 
 from . import charts
 
-# 产物目录是 algorithm/outputs/，与本包名 output 只差一个 s：output 是代码，outputs 是产物
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parents[1] / "outputs"
+# 产物目录是 algorithm/runs/。
+# 产物目录统一叫 runs/（框架层那边是仓库根的 runs/），不再用 outputs ——
+# 因为本包名就叫 output，产物再叫 outputs 只差一个 s，太容易看错。
+DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parents[1] / "runs"
 
 # 数据文件的编号与文件名。编号固定不随运行变化，报告里可以按编号引用。
 DATA_FILES: dict[str, tuple[str, str]] = {

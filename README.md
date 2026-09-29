@@ -48,11 +48,11 @@ algorithm/
     comps.py        相对估值：可比公司倍数、隐含价值、足球场图
     forecast.py     三表联动预测：从假设推出完整三张表
   output/           输出层（只依赖 finai，不反向依赖）
-    reporting.py    把结果写进 outputs/<run_id>/
+    reporting.py    把结果写进 algorithm/runs/<run_id>/
     charts/         一个文件一张图，11 到 16 号
   tests/            单元测试，用手算数字做断言
   examples/         可直接运行的示例脚本
-  outputs/          运行产物。代码是 output，产物是 outputs，差一个 s
+  runs/             运行产物。产物目录统一叫 runs/，避免和包名 output 只差一个 s
 ```
 
 ## 端到端跑一遍
@@ -68,7 +68,7 @@ algorithm/
 数据文件 01 到 10、图表 11 到 16，全目录编号唯一，按文件名字典序排出来就是流水线顺序：
 
 ```text
-outputs/20260927T165932/
+algorithm/runs/20260927T165932/
   01_projections.json        三表联动预测
   02_validation_report.json  勾稽校验报告（可能含多年）
   03_valuation.json          DCF 估值结果
