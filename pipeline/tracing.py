@@ -105,6 +105,28 @@ class RunTrace:
         self._inputs: dict[str, str] = {}
         self._outputs: dict[str, str] = {}
 
+    @property
+    def input_hashes(self) -> dict[str, str]:
+        """这次运行读过的输入文件及其哈希。
+
+        供上层导出到「产物清单」——这样产物目录里的清单是自解释的，
+        打开 runs/<编号>/ 就能看到当时读的是哪份配置、哈希是多少。
+        """
+        return dict(self._inputs)
+
+    @property
+    def step_summary(self) -> list[dict[str, Any]]:
+        """各步骤的摘要（序号、名字、状态、耗时），供上层导出。"""
+        return [
+            {
+                "seq": item["seq"],
+                "step": item["step"],
+                "status": item["status"],
+                "duration_s": item["duration_s"],
+            }
+            for item in self._steps
+        ]
+
     def _hash_all(self, paths: Iterable[str | Path]) -> dict[str, str]:
         """把一批路径算成 {路径: sha256}，同时登记到输入/输出总表里。"""
         result: dict[str, str] = {}

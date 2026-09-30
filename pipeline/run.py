@@ -24,7 +24,6 @@ ForecastAssumptions），中间由 adapters 转换。两条路径算出的 FCFF 
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -39,6 +38,7 @@ from algorithm.finai.wacc import (
     wacc_from_market,
     weights_from_market,
 )
+from algorithm.output import RunOutputs, export_run, summarize
 
 from .adapters import company_to_market_data, drivers_to_assumptions
 from .config import (
@@ -61,20 +61,15 @@ MARKET_PATH = DEFAULT_MARKET_PATH
 
 
 def new_run_id() -> str:
-    """生成一次运行的标识。用时间戳，保证多次运行互不覆盖。"""
-    return datetime.now().strftime("%Y%m%dT%H%M%S")
+    """生成一次运行的标识。时间戳 + 毫秒，保证多次运行互不覆盖。
 
-
-def write_json(path: Path, payload: dict[str, Any]) -> Path:
-    """把字典写成 JSON 文件，自动建父目录。
-
-    ensure_ascii=False 让中文原样写出（否则会变成 \\u6c49 这种转义），
-    indent=2 让文件能被人和 git diff 读懂。
+    为什么要带毫秒：整套流水线只要 0.1 秒，同一秒内跑两次完全可能。
+    而产物落盘用的是输出层的 export_run —— 它遇到「目录已存在且有内容」
+    会明确报错（这比静默覆盖好，静默覆盖会让人以为看到的是最新结果）。
+    所以编号必须细到毫秒。
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    path.write_text(text, encoding="utf-8")
-    return path
+    now = datetime.now()
+    return now.strftime("%Y%m%dT%H%M%S") + f"{now.microsecond // 1000:03d}"
 
 
 def stage_forecast(
@@ -247,53 +242,49 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         assumptions, market, wacc_summary["value"], drivers.base_year, trace
     )
 
-    run_dir = OUTPUT_ROOT / run_id
-    common = {
-        "run_id": run_id,
-        "company": {
-            "name": company.name,
-            "code": company.code,
-            "source": company.source,
-        },
-    }
-
-    # 产物一：三表预测。假设用 asdict 整个导出，是为了产物「自解释」——
-    # 半年后打开这个 json，能直接看到当时用的每一个假设值。
-    forecast_payload = {
-        **common,
-        "assumptions": asdict(drivers),
-        "opening_balance": asdict(opening),
-        "years": forecast.to_records(),
-        "summary": {
-            "base_year": drivers.base_year,
-            "years": drivers.years,
-            "worst_balance_gap": forecast.worst_balance_gap,
-            "fcff_series": forecast.fcff_series,
-        },
-    }
+    # 落盘：交给算法侧输出层的 export_run。
+    #
+    # 只传目前拿得到的结果 —— RunOutputs 里为 None 的字段不会生成文件。
+    # 所以以后接一个新阶段时，这里只是多传一个参数，不用再写一遍
+    # 「组装内容 → 写文件 → 记账」。
+    #
+    # meta 里塞的是框架层独有的信息：代码版本、输入文件哈希、步骤摘要。
+    # 这样产物目录里的清单是自解释的 —— 打开 runs/<编号>/ 就能看到
+    # 这批数字是哪版代码、读的哪份配置算出来的。
     started = time.perf_counter()
-    forecast_path = write_json(run_dir / "projections.json", forecast_payload)
-    trace.record(
-        step="write_projections",
-        tool="pipeline.run.write_json",
-        duration_s=time.perf_counter() - started,
-        outputs=[forecast_path],
+    artifacts = export_run(
+        RunOutputs(forecast=forecast, dcf=result),
+        root=OUTPUT_ROOT,
+        run_id=run_id,
+        meta={
+            # ── 框架层独有的信息 ──────────────────────────────────
+            # 哪一版代码算的
+            "code": trace.git,
+            # 读了哪些输入文件（含哈希，可核验）
+            "inputs": trace.input_hashes,
+            # 每一步的名字、状态、耗时
+            "steps": trace.step_summary,
+            # ── 这次运行用到的参数快照 ────────────────────────────
+            # 输出层的产物文件只放「结果」，不放假设。所以假设、基期数据、
+            # WACC 的完整构成都记在这里 —— 报告里要引用假设和 WACC 构成时，
+            # 从这一处拿，不用回去翻配置文件（配置文件日后会变）。
+            "run_parameters": {
+                "company": {
+                    "name": company.name,
+                    "code": company.code,
+                    "source": company.source,
+                },
+                "assumptions": asdict(drivers),
+                "opening_balance": asdict(opening),
+                "wacc": wacc_summary,
+            },
+        },
     )
-
-    # 产物二：估值结果，附 WACC 的完整构成（报告里要逐行列出来）
-    valuation_payload = {
-        **common,
-        "assumptions": asdict(assumptions),
-        "wacc": wacc_summary,
-        "valuation": result.to_dict(),
-    }
-    started = time.perf_counter()
-    valuation_path = write_json(run_dir / "valuation.json", valuation_payload)
     trace.record(
-        step="write_valuation",
-        tool="pipeline.run.write_json",
+        step="write_outputs",
+        tool="algorithm.output.export_run",
         duration_s=time.perf_counter() - started,
-        outputs=[valuation_path],
+        outputs=sorted(str(path) for path in artifacts.files.values()),
     )
 
     manifest = trace.finish()
@@ -335,10 +326,11 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         f"{year.year} {year.fcff:,.2f}" for year in forecast.years
     ))
 
-    print(f"\n产物      {forecast_path}")
-    print(f"          {valuation_path}")
-    print(f"轨迹      {trace.trace_path}")
-    print(f"运行清单  {manifest}")
+    # 产物列表由输出层的 summarize 打印（编号、文件名、字节数）
+    print()
+    print(summarize(artifacts))
+    print(f"轨迹        {trace.trace_path}")
+    print(f"运行记录    {manifest}")
 
     if trace.git["dirty"]:
         print(

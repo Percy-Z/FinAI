@@ -509,50 +509,99 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_产物写出来了而且内容对(self):
         _, root = self.run_pipeline()
-        produced = list((root / "runs").glob("*/projections.json"))
+        produced = list((root / "runs").glob("*/01_projections.json"))
         self.assertEqual(len(produced), 1)
 
         payload = json.loads(produced[0].read_text(encoding="utf-8"))
-        self.assertEqual(payload["company"]["code"], "T")
         self.assertEqual(len(payload["years"]), 5)
-        # 产物要「自解释」：假设必须完整写在里面
-        self.assertIn("revenue_base", payload["assumptions"])
-        self.assertIn("gross_margin", payload["assumptions"])
-        self.assertEqual(len(payload["summary"]["fcff_series"]), 5)
+        self.assertAlmostEqual(payload["worst_balance_gap"], 0.0, places=6)
+
+    def test_这次运行的假设记在清单里(self):
+        """输出层的产物文件只放「结果」，不放假设。
+
+        假设、基期数据、WACC 构成都记在清单的 run_parameters 里 ——
+        这样产物目录是自解释的：打开 runs/<编号>/ 就能看到这批数字
+        是哪套假设算出来的，不用回去翻配置文件（配置文件日后会变）。
+        """
+        _, root = self.run_pipeline()
+        manifest = json.loads(
+            next((root / "runs").glob("*/10_run_manifest.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        params = manifest["inputs"]["run_parameters"]
+
+        self.assertEqual(params["company"]["code"], "T")
+        # 经营假设要完整
+        self.assertIn("revenue_base", params["assumptions"])
+        self.assertIn("gross_margin", params["assumptions"])
+        # 基期数据要完整
+        self.assertIn("cash", params["opening_balance"])
+        self.assertIn("retained_earnings", params["opening_balance"])
+
+        # 而且与配置文件里的一致
+        _, drivers, opening = config.load_case()
+        self.assertAlmostEqual(
+            params["assumptions"]["revenue_base"], drivers.revenue_base
+        )
+        self.assertAlmostEqual(params["opening_balance"]["cash"], opening.cash)
 
     def test_产物内容与三表预测一致(self):
         _, root = self.run_pipeline()
-        produced = next((root / "runs").glob("*/projections.json"))
+        produced = next((root / "runs").glob("*/01_projections.json"))
         payload = json.loads(produced.read_text(encoding="utf-8"))
 
-        drivers = config.load_case()[1]
-        opening = config.load_case()[2]
+        _, drivers, opening = config.load_case()
         expected = build_forecast(opening, drivers).fcff_series
-        for got, want in zip(payload["summary"]["fcff_series"], expected):
-            self.assertAlmostEqual(got, want, places=6)
+        got = [year["fcff"] for year in payload["years"]]
+        self.assertEqual(len(got), len(expected))
+        for left, right in zip(got, expected):
+            self.assertAlmostEqual(left, right, places=6)
 
-    def test_两次运行互不覆盖(self):
-        first_code, root = self.run_pipeline()
-        self.assertEqual(first_code, 0)
-        with mock.patch.object(run, "new_run_id", lambda: "固定编号"):
+    def test_同一编号跑两次会被明确拒绝(self):
+        """产物目录已有内容时，输出层的 export_run 会拒绝覆盖。
+
+        这比静默覆盖好：静默覆盖会让人以为看到的是最新结果，
+        其实可能是上一次留下的。所以运行编号带毫秒，避免同一秒撞车。
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+
+        def run_as_fixed_id() -> int:
             with mock.patch.object(
+                run, "new_run_id", lambda: "固定编号"
+            ), mock.patch.object(
                 run, "OUTPUT_ROOT", root / "runs"
             ), mock.patch.object(
                 run,
                 "RunTrace",
-                lambda run_id: tracing.RunTrace(run_id, log_root=root / "logs"),
+                lambda rid: tracing.RunTrace(rid, log_root=root / "logs"),
             ):
                 with redirect_stdout(io.StringIO()):
-                    run.main()
-        # 编号是固定的，所以第二次会写进同一个目录（这符合设计）
-        self.assertTrue((root / "runs" / "固定编号" / "projections.json").exists())
+                    return run.main()
 
-    def test_估值产物的_WACC_里有完整的七项(self):
-        """报告里要列出 WACC 的完整构成 —— 四个输入 + 一个复用 + 两个推导。"""
+        # 第一次：正常写出
+        self.assertEqual(run_as_fixed_id(), 0)
+        self.assertTrue((root / "runs" / "固定编号" / "01_projections.json").exists())
+
+        # 第二次：同一个编号，目录已有内容 → 明确报错，而不是悄悄覆盖
+        with self.assertRaises(FileExistsError):
+            run_as_fixed_id()
+
+    def test_清单里记了_WACC_的完整七项(self):
+        """报告里要列出 WACC 的完整构成 —— 四个输入 + 一个复用 + 两个推导。
+
+        产物文件（03_valuation.json）只放估值结果和 WACC 的数值；
+        完整构成记在清单的 run_parameters 里，写报告时从这一处引用。
+        """
         _, root = self.run_pipeline()
-        produced = next((root / "runs").glob("*/valuation.json"))
-        payload = json.loads(produced.read_text(encoding="utf-8"))
-        wacc = payload["wacc"]
+        manifest = json.loads(
+            next((root / "runs").glob("*/10_run_manifest.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        wacc = manifest["inputs"]["run_parameters"]["wacc"]
 
         for field in [
             "value",
@@ -580,7 +629,7 @@ class TestEndToEnd(unittest.TestCase):
         不应该改变任何数字。
         """
         _, root = self.run_pipeline()
-        produced = next((root / "runs").glob("*/valuation.json"))
+        produced = next((root / "runs").glob("*/03_valuation.json"))
         payload = json.loads(produced.read_text(encoding="utf-8"))
 
         _, drivers, opening = config.load_case()
@@ -589,24 +638,22 @@ class TestEndToEnd(unittest.TestCase):
         expected = value_dcf(
             assumptions,
             company_to_market_data(target),
-            payload["wacc"]["value"],
+            payload["wacc"],
             base_year=drivers.base_year,
         )
         self.assertAlmostEqual(
-            payload["valuation"]["per_share"], expected.per_share, places=9
+            payload["per_share"], expected.per_share, places=9
         )
         self.assertAlmostEqual(
-            payload["valuation"]["enterprise_value"],
-            expected.enterprise_value,
-            places=6,
+            payload["enterprise_value"], expected.enterprise_value, places=6
         )
 
-    def test_同一份配置跑两次产物只有_run_id_不同(self):
-        """可复现性：同样的输入，产物除了运行标识之外逐字段相同。
+    def test_同一份配置跑两次数据产物逐字节相同(self):
+        """可复现性：同样的输入 → 完全相同的数据产物，一个字节都不差。
 
-        为什么不比文件哈希：产物里写着 run_id（为了让单独拿出一个文件
-        也知道它属于哪次运行），所以哈希必然不同。要证明的是「结果可复现」
-        —— 那就逐字段比，把 run_id 排除掉。
+        输出层的产物文件里不含运行标识和时间戳，所以可以直接比字节 ——
+        这比「逐字段比对」更强。清单里必然有 run_id 和 created_at
+        （那是运行标识和时刻），但清单记录的实质内容两次必须一致。
 
         这条同时也在防「计算不确定」：如果哪天引入了依赖字典顺序、
         随机数、当前时间之类的计算，这里会挂。
@@ -629,20 +676,48 @@ class TestEndToEnd(unittest.TestCase):
         run_as("第一次")
         run_as("第二次")
 
-        for name in ("projections.json", "valuation.json"):
-            first = json.loads((root / "runs" / "第一次" / name).read_text("utf-8"))
-            second = json.loads((root / "runs" / "第二次" / name).read_text("utf-8"))
+        # 数据产物逐字节相同
+        for name in ("01_projections.json", "03_valuation.json"):
+            first = (root / "runs" / "第一次" / name).read_bytes()
+            second = (root / "runs" / "第二次" / name).read_bytes()
+            self.assertEqual(first, second, msg=f"{name} 两次运行的内容不完全相同")
 
-            # 各自的运行标识是对的
-            self.assertEqual(first["run_id"], "第一次")
-            self.assertEqual(second["run_id"], "第二次")
+        # 清单：run_id 与 created_at 不同（那是运行时产生的），
+        # 但记录的实质内容必须一致
+        first_manifest = json.loads(
+            (root / "runs" / "第一次" / "10_run_manifest.json").read_text("utf-8")
+        )
+        second_manifest = json.loads(
+            (root / "runs" / "第二次" / "10_run_manifest.json").read_text("utf-8")
+        )
+        self.assertEqual(first_manifest["run_id"], "第一次")
+        self.assertEqual(second_manifest["run_id"], "第二次")
 
-            # 除了运行标识，其余逐字段相同
-            self.assertEqual(
-                {key: value for key, value in first.items() if key != "run_id"},
-                {key: value for key, value in second.items() if key != "run_id"},
-                msg=f"{name} 除了 run_id 之外还有差异，说明存在不可复现的地方",
-            )
+        def reproducible_part(manifest: dict) -> dict:
+            """清单里「应该可复现」的部分。
+
+            排除三样必然不同的：run_id（运行标识）、created_at（时刻）、
+            steps 里的 duration_s（耗时）。其余全比 —— 包括 outputs 的哈希、
+            代码版本、输入文件哈希、参数快照。
+
+            这样比「只挑几个字段比」严：以后往 meta 里新加了什么，
+            只要它是不可复现的，这条测试就会挂。
+            """
+            return {
+                "inputs": {
+                    key: value
+                    for key, value in manifest["inputs"].items()
+                    if key != "steps"
+                },
+                "outputs": manifest["outputs"],
+                "warnings": manifest["warnings"],
+            }
+
+        self.assertEqual(
+            reproducible_part(first_manifest),
+            reproducible_part(second_manifest),
+            msg="清单里除了运行标识、时刻、步骤耗时之外，还有不一致的地方",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +740,7 @@ class TestTracing(unittest.TestCase):
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 5)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -682,8 +757,7 @@ class TestTracing(unittest.TestCase):
                 "forecast",
                 "wacc",
                 "valuation",
-                "write_projections",
-                "write_valuation",
+                "write_outputs",
             ],
         )
 
