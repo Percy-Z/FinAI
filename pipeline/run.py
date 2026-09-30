@@ -31,8 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from algorithm.finai.forecast import BalanceSheetState, ForecastDrivers, build_forecast
+from algorithm.finai.forecast import to_snapshots
 from algorithm.finai.dcf import value_dcf
 from algorithm.finai.types import ForecastAssumptions, MarketData, WaccInputs
+from algorithm.finai.validate import run_checks
 from algorithm.finai.wacc import (
     check_wacc_sanity,
     wacc_from_market,
@@ -97,6 +99,46 @@ def stage_forecast(
         },
     )
     return result
+
+
+def validation_totals(reports) -> dict[str, int]:
+    """把各年的校验结论汇总成四个计数。
+
+    四种结论的含义不同，不能混为一谈：
+        pass     该平的平了
+        warning  有差异但存在合理解释空间，或触发了信号类检查
+        fail     该平的没平，属于数据错误，必须查
+        skipped  输入缺失，无法检查 —— 注意这**不等于通过**
+    """
+    totals = {"pass": 0, "warning": 0, "fail": 0, "skipped": 0}
+    for report in reports:
+        for status in totals:
+            totals[status] += report.summary[status]
+    return totals
+
+
+def stage_validate(forecast, trace: RunTrace) -> list:
+    """阶段：勾稽校验。把算出来的三张表反过来验一遍。
+
+    校验的是「报表内部自不自洽」——资产 = 负债 + 权益、现金滚动、
+    利润与现金的转化关系、量级是否合理等，一共 11 项。
+
+    ⚠️ 现在校验的是「预测出来的三张表」，用来证明预测内部自洽。
+    等抽取层就绪后，年报里的历史数据也要走同一套校验 —— 那才是
+    真正意义上的「年报勾稽校验」，也是评分点里「财务勾稽关系」的正主。
+    现在这一步是那件事的预演，链路和接口完全一样。
+    """
+    started = time.perf_counter()
+    snapshots = to_snapshots(forecast)
+    reports = [run_checks(snapshot) for snapshot in snapshots]
+    totals = validation_totals(reports)
+    trace.record(
+        step="validate",
+        tool="algorithm.finai.validate.run_checks",
+        duration_s=time.perf_counter() - started,
+        extra={"years": len(reports), **totals},
+    )
+    return reports
 
 
 def stage_wacc(
@@ -234,10 +276,13 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 阶段二：三表预测
     forecast = stage_forecast(drivers, opening, company.source, trace)
 
-    # 阶段三：资本成本
+    # 阶段三：勾稽校验（把刚算出的三张表反过来验一遍）
+    reports = stage_validate(forecast, trace)
+
+    # 阶段四：资本成本
     wacc_summary = stage_wacc(drivers, params, market, trace)
 
-    # 阶段四：估值
+    # 阶段五：估值
     result = stage_valuation(
         assumptions, market, wacc_summary["value"], drivers.base_year, trace
     )
@@ -253,7 +298,7 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 这批数字是哪版代码、读的哪份配置算出来的。
     started = time.perf_counter()
     artifacts = export_run(
-        RunOutputs(forecast=forecast, dcf=result),
+        RunOutputs(forecast=forecast, validation=reports, dcf=result),
         root=OUTPUT_ROOT,
         run_id=run_id,
         meta={
@@ -296,6 +341,26 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     print(f"预测期    {first_year} ~ {last_year}，共 {drivers.years} 年")
     print(f"基期平衡差额  {opening.balance_gap:,.6f}")
     print(f"预测期最大平衡差额  {forecast.worst_balance_gap:.2e}")
+
+    print("\n勾稽校验（预测期的三张表）")
+    print(f"    {'年份':<8}{'通过':>6}{'告警':>6}{'失败':>6}{'跳过':>6}")
+    for report in reports:
+        counts = report.summary
+        print(
+            f"    {report.fiscal_year:<8}{counts['pass']:>6}"
+            f"{counts['warning']:>6}{counts['fail']:>6}{counts['skipped']:>6}"
+        )
+    totals = validation_totals(reports)
+    if totals["fail"]:
+        print(
+            f"    ⚠️ 有 {totals['fail']} 项校验失败 —— 结果照常产出，"
+            "但报告里必须说明原因"
+        )
+    if totals["skipped"]:
+        print(
+            f"    注：{totals['skipped']} 项跳过（输入缺失，无法检查）—— "
+            "跳过不等于通过"
+        )
 
     print("\nWACC 的构成")
     print(f"    无风险利率  {wacc_summary['risk_free']:>9.4%}")

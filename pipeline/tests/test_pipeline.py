@@ -32,8 +32,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from algorithm.finai.dcf import project, value_dcf  # noqa: E402
-from algorithm.finai.forecast import build_forecast  # noqa: E402
+from algorithm.finai.forecast import build_forecast, to_snapshots  # noqa: E402
 from algorithm.finai.types import ForecastAssumptions  # noqa: E402
+from algorithm.finai.validate import run_checks  # noqa: E402
 from algorithm.finai.wacc import weights_from_market, wacc_from_market  # noqa: E402
 from pipeline import config, run, tracing  # noqa: E402
 from pipeline.adapters import (  # noqa: E402
@@ -558,6 +559,62 @@ class TestEndToEnd(unittest.TestCase):
         for left, right in zip(got, expected):
             self.assertAlmostEqual(left, right, places=6)
 
+    def test_勾稽校验产物逐年都有且预测期无失败(self):
+        """勾稽校验：把预测出来的三张表反过来验一遍。
+
+        产物里每年一份报告，每份 11 项检查。注意「跳过」不等于通过 ——
+        预测里没有非经常性损益，所以 X-03 每年都会跳过。
+        """
+        _, root = self.run_pipeline()
+        produced = next((root / "runs").glob("*/02_validation_report.json"))
+        payload = json.loads(produced.read_text(encoding="utf-8"))
+
+        _, drivers, _ = config.load_case()
+        self.assertEqual(payload["count"], drivers.years)
+        self.assertEqual(len(payload["reports"]), drivers.years)
+
+        for report in payload["reports"]:
+            counts = report["summary"]
+            # 预测出来的三张表内部应当自洽：一项失败都不该有
+            self.assertEqual(
+                counts["fail"], 0, msg=f"{report['fiscal_year']} 年有校验失败"
+            )
+            # 至少 11 项（算法侧以后加检查项，这里不该挂）
+            self.assertGreaterEqual(counts["total"], 11)
+            # 四项结论加起来等于总项数（跳过也是其中一项）
+            self.assertEqual(
+                counts["pass"] + counts["warning"] + counts["fail"] + counts["skipped"],
+                counts["total"],
+            )
+            # 预测期没有非经常性损益 → 跳过的是 X-03
+            skipped = {c["check_id"] for c in report["checks"] if c["status"] == "skipped"}
+            self.assertIn("X-03", skipped, msg="预测里没有非经常性损益，X-03 应当跳过")
+
+    def test_校验产物的结论与算法层一致(self):
+        """框架只负责把校验结果搬进产物，不应该改变任何结论。
+
+        这是「框架不引入错误」的又一处证明 —— 与估值那条同一个思路。
+        """
+        _, root = self.run_pipeline()
+        produced = next((root / "runs").glob("*/02_validation_report.json"))
+        payload = json.loads(produced.read_text(encoding="utf-8"))
+
+        _, drivers, opening = config.load_case()
+        forecast = build_forecast(opening, drivers)
+        expected = [run_checks(snapshot) for snapshot in to_snapshots(forecast)]
+
+        self.assertEqual(len(payload["reports"]), len(expected))
+        for got, want in zip(payload["reports"], expected):
+            self.assertEqual(got["summary"], want.summary)
+            self.assertEqual(
+                [c["check_id"] for c in got["checks"]],
+                [c.check_id for c in want.checks],
+            )
+            self.assertEqual(
+                [c["status"] for c in got["checks"]],
+                [c.status for c in want.checks],
+            )
+
     def test_同一编号跑两次会被明确拒绝(self):
         """产物目录已有内容时，输出层的 export_run 会拒绝覆盖。
 
@@ -740,7 +797,7 @@ class TestTracing(unittest.TestCase):
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 6)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -755,6 +812,7 @@ class TestTracing(unittest.TestCase):
             [
                 "load_config",
                 "forecast",
+                "validate",
                 "wacc",
                 "valuation",
                 "write_outputs",
