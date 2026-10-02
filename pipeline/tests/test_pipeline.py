@@ -116,6 +116,23 @@ class CsvFixture(unittest.TestCase):
     def market_csv_text(self) -> str:
         return config.DEFAULT_MARKET_PATH.read_text(encoding="utf-8")
 
+    def broken_market_csv(
+        self, anchor: str, replacement: str, count: int = -1
+    ) -> str:
+        """把真实市场快照里的锚点替换掉；锚点找不到就当场失败。
+
+        和 TestConfigRejectsBadToml.broken_config 同一个道理：这几条测试是
+        「拿真实数据改坏一点，看配置层拦不拦得住」。直接用 str.replace 的话，
+        锚点一旦失效（数据文件换了写法、加了说明行），替换会静默不做，测试报
+        出来的是「没拦住」，误导成配置层的 bug。count=1 只替换第一处。
+        """
+        text = self.market_csv_text()
+        if anchor not in text:
+            self.fail(
+                f"测试锚点在 data/market.csv 里找不到了，请更新锚点：{anchor!r}"
+            )
+        return text.replace(anchor, replacement, count)
+
 
 # ---------------------------------------------------------------------------
 # 一、配置层：能正确读出来
@@ -188,13 +205,13 @@ class TestConfigLoads(unittest.TestCase):
 
 class TestConfigRejectsBadCsv(CsvFixture):
     def test_表头拼错要报错(self):
-        broken = self.market_csv_text().replace("diluted_shares", "diluted_share")
+        broken = self.broken_market_csv("diluted_shares", "diluted_share")
         with self.assertRaises(config.ConfigError) as ctx:
             config.load_market_snapshot(self.write_temp_csv(broken))
         self.assertIn("无法识别的列", str(ctx.exception))
 
     def test_数字列写了非数字要报错(self):
-        broken = self.market_csv_text().replace(
+        broken = self.broken_market_csv(
             "T,目标公司,target,10.00", "T,目标公司,target,十块"
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -203,13 +220,13 @@ class TestConfigRejectsBadCsv(CsvFixture):
         self.assertIn("第 2 行", str(ctx.exception))
 
     def test_role_写错要报错(self):
-        broken = self.market_csv_text().replace("target,10.00", "boss,10.00", 1)
+        broken = self.broken_market_csv("target,10.00", "boss,10.00", 1)
         with self.assertRaises(config.ConfigError) as ctx:
             config.load_market_snapshot(self.write_temp_csv(broken))
         self.assertIn("role", str(ctx.exception))
 
     def test_没有目标公司要报错(self):
-        broken = self.market_csv_text().replace(
+        broken = self.broken_market_csv(
             "T,目标公司,target", "T,目标公司,peer", 1
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -227,7 +244,7 @@ class TestConfigRejectsBadCsv(CsvFixture):
         self.assertIn("peer", str(ctx.exception))
 
     def test_必填列留空要报错(self):
-        broken = self.market_csv_text().replace(
+        broken = self.broken_market_csv(
             "target,10.00,100.00", "target,,100.00", 1
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -235,7 +252,7 @@ class TestConfigRejectsBadCsv(CsvFixture):
         self.assertIn("缺少必填的 price", str(ctx.exception))
 
     def test_可选列留空取零不报错(self):
-        broken = self.market_csv_text().replace(
+        broken = self.broken_market_csv(
             "target,10.00,100.00,100.00,55.00", "target,10.00,100.00,100.00,", 1
         )
         target, _ = config.load_market_snapshot(self.write_temp_csv(broken))
@@ -260,14 +277,30 @@ class TestConfigRejectsBadToml(unittest.TestCase):
     def toml_text(self) -> str:
         return config.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
 
+    def broken_config(self, anchor: str, replacement: str) -> str:
+        """把真实配置里的锚点替换掉；锚点找不到就当场失败。
+
+        为什么需要这个助手：这一类的测试都是「拿真实配置改坏一点，看配置层拦不拦
+        得住」。如果直接用 str.replace，锚点一旦失效（比如给配置加了几行注释、改了
+        缩进），替换会**静默什么都不做** —— 测试报出来的是「ConfigError not raised」，
+        看起来像配置层的 bug，实际是测试的锚点过期了。
+        2026-10-02 给 delta 补注释时就撞过一次（field 与 delta 之间插了注释）。
+        """
+        text = self.toml_text()
+        if anchor not in text:
+            self.fail(
+                f"测试锚点在 data/assumptions.toml 里找不到了，请更新锚点：{anchor!r}"
+            )
+        return text.replace(anchor, replacement)
+
     def test_字段名拼错要报错(self):
-        broken = self.toml_text().replace("revenue_base ", "revenu_base ")
+        broken = self.broken_config("revenue_base ", "revenu_base ")
         with self.assertRaises(config.ConfigError) as ctx:
             config.load_drivers(self.write_temp_toml(broken))
         self.assertIn("字段对不上", str(ctx.exception))
 
     def test_取值越界要报错(self):
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             "tax_rate                = 0.25", "tax_rate                = 0.90"
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -275,13 +308,13 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         self.assertIn("取值不合法", str(ctx.exception))
 
     def test_缺少小节要报错(self):
-        broken = self.toml_text().replace("[wacc]", "[wacc_typo]")
+        broken = self.broken_config("[wacc]", "[wacc_typo]")
         with self.assertRaises(config.ConfigError) as ctx:
             config.load_wacc_params(self.write_temp_toml(broken))
         self.assertIn("[wacc]", str(ctx.exception))
 
     def test_终值方法写错要报错(self):
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'terminal_method = "perpetuity"', 'terminal_method = "永久增长"'
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -289,7 +322,7 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         self.assertIn("terminal_method", str(ctx.exception))
 
     def test_选了退出倍数却不给倍数要报错(self):
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'terminal_method = "perpetuity"', 'terminal_method = "exit_multiple"'
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -302,7 +335,7 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         这条在配置层拦，报错就能指出是哪个文件；如果放到三表预测里，
         报错会是一段 Python 堆栈，只说差额多少。
         """
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             "cash                        = 55.0",
             "cash                        = 100.0",
         )
@@ -328,7 +361,7 @@ class TestConfigRejectsBadToml(unittest.TestCase):
 
     def test_敏感性变量字段名拼错要报错(self):
         """字段白名单的意义：拼错在这里就挡住，不用等到算法模块报错。"""
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'field = "ebit_margin"', 'field = "ebit_margins"'
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -338,16 +371,20 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         self.assertIn("不是可调节的字段", message)
 
     def test_敏感性delta和区间不能同时给(self):
-        broken = self.toml_text().replace(
-            'field = "ebit_margin"\ndelta = 0.03',
-            'field = "ebit_margin"\ndelta = 0.03\nlow = 0.15\nhigh = 0.25',
+        """delta 与 low/high 互斥，同时给要报错。
+
+        锚点取 field 那一行，不依赖「field 与 delta 相邻」—— 两者之间可以夹注释。
+        """
+        broken = self.broken_config(
+            'field = "ebit_margin"',
+            'field = "ebit_margin"\nlow = 0.15\nhigh = 0.25',
         )
         with self.assertRaises(config.ConfigError) as ctx:
             config.load_sensitivity(self.write_temp_toml(broken))
         self.assertIn("只能给一种", str(ctx.exception))
 
     def test_敏感性网格引用的变量名不存在要报错(self):
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'grid_row    = "永续增长率"', 'grid_row    = "这个变量不存在"'
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -367,7 +404,7 @@ class TestConfigRejectsBadToml(unittest.TestCase):
 
     def test_反解字段不能反解要报错(self):
         """只有算法模块给了搜索区间的字段才能反解。"""
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'field = "terminal_growth"', 'field = "revenue_base"'
         )
         with self.assertRaises(config.ConfigError) as ctx:
@@ -385,7 +422,7 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         self.assertIn("[[reverse.variables]]", message)
 
     def test_估值倍数名写错要报错(self):
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'multiples = ["pe", "pb", "ev_ebitda"]',
             'multiples = ["pe", "pb", "ev_ebitdaaaa"]',
         )
@@ -396,7 +433,7 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         self.assertIn("不可用", message)
 
     def test_估值倍数列表为空要报错(self):
-        broken = self.toml_text().replace(
+        broken = self.broken_config(
             'multiples = ["pe", "pb", "ev_ebitda"]', "multiples = []"
         )
         with self.assertRaises(config.ConfigError) as ctx:
