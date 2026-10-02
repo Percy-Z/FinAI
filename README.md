@@ -2,13 +2,18 @@
 
 2026 年北京市大学生金融人工智能竞赛「自动化估值建模」方向的实现仓库。
 
-当前进度：估值引擎、敏感性分析、反向求解、勾稽校验、相对估值、三表联动预测、
-输出层七个模块已完成，共 271 个单元测试覆盖。每个算法的输入输出见
-[`algorithm/shuoming.md`](algorithm/shuoming.md)。
+当前进度：
+
+- **算法层**（`algorithm/finai/`）九个模块已完成：三表联动预测、资本成本、估值引擎、
+  敏感性分析、反向求解、相对估值、勾稽校验、财务报表数据结构、输入输出契约，
+  共 345 个单元测试覆盖。每个算法的输入输出见 [`algorithm/shuoming.md`](algorithm/shuoming.md)。
+- **输出层**（`algorithm/output/`）把结果落成文件：编号数据文件、运行清单、6 张图表。
+- **框架层**（`pipeline/`）把上述模块装成一条能跑的流水线：读配置、串流程、留痕迹。
+  一条命令跑完整流程，另附 54 个测试。
 
 ## 快速开始
 
-不需要安装任何第三方依赖，用系统自带的 Python 3 即可。
+核心流程不需要任何第三方依赖，用系统自带的 Python 3.11+ 即可（用到标准库 `tomllib`）。
 下面的命令都在仓库根目录 `FinAI/` 下执行：
 
 ```bash
@@ -24,6 +29,67 @@ python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件�
 注意 `discover` 必须指定 `-s algorithm/tests`：`algorithm` 是命名空间包，
 不带参数直接跑 `python3 -m unittest discover` 会找不到测试。
 
+## 依赖
+
+| 范围 | 依赖 | 说明 |
+| --- | --- | --- |
+| 核心流程 | **无** | 读配置、三表预测、勾稽校验、资本成本、估值、敏感性、落盘、日志 —— 只用标准库 |
+| 图表层 | matplotlib | 渲染 6 张图。**没装也能跑通全流程**，只是不生成图表，运行清单里会记一条告警 |
+
+图表是**可选依赖**。装它有三种方式，选一种即可：
+
+```bash
+# 方式一：虚拟环境（推荐，不碰系统 Python）
+cd FinAI
+python3 -m venv .venv
+.venv/bin/pip install matplotlib
+make run PYTHON=.venv/bin/python      # 用虚拟环境的解释器跑，才会出图
+
+# 方式二：用 Homebrew 装（走 brew 自己的依赖体系）
+brew install matplotlib
+
+# 方式三：装到用户目录（不碰系统 Python，但要显式绕开 PEP 668 的保护）
+python3 -m pip install --break-system-packages --user matplotlib
+```
+
+> **如果直接 `pip install matplotlib` 报 `externally-managed-environment`**：
+> 那不是本项目的问题 —— Homebrew 会给它的 Python 打上 `externally-managed` 标记
+> （PEP 668），禁止 pip 往系统 Python 里装包，以免和包管理器打架。
+> 用上面三种方式之一即可。
+
+### 关键：装的地方和跑的地方要对上
+
+代码只检查「**当前这个 Python 能不能 import matplotlib**」，不关心它装在哪。
+所以不管用哪种方式装，都要保证**装的解释器和跑的解释器是同一个**：
+
+| 装在哪 | 怎么跑 |
+| --- | --- |
+| 虚拟环境 | `make run PYTHON=.venv/bin/python` |
+| 系统或用户目录（brew / `pip --user`） | `make run` |
+
+**最常见的坑**：装进了虚拟环境，但跑 `make run` 时忘了带 `PYTHON=`，
+于是用回系统 Python，又看到「没有安装 matplotlib」的提示。
+
+排查方法：
+
+```bash
+python3 -c "import matplotlib; print('系统 Python 里有')"          # 有 → make run 就能出图
+.venv/bin/python -c "import matplotlib; print('虚拟环境里有')"      # 有 → 要带 PYTHON= 跑
+```
+
+`.venv/` 已在 `.gitignore` 里，不会被提交 —— 它和机器绑定（路径写死在
+`pyvenv.cfg` 里），队友克隆后要自己建一个，一条命令的事。
+
+### 第三方组件说明
+
+（竞赛通知要求：使用第三方开源项目应列明名称、版本、来源、许可证及具体使用范围）
+
+| 名称 | 版本 | 来源 | 许可证 | 使用范围 |
+| --- | --- | --- | --- | --- |
+| matplotlib | 以实际安装为准 | <https://matplotlib.org> | BSD 兼容许可（见官方 LICENSE） | 仅用于渲染图表；**所有数值计算不依赖它** |
+
+Python 版本要求：**3.11 及以上**（标准库 `tomllib` 从 3.11 开始提供）。
+
 ## 系统架构
 
 ![系统架构与数据流](docs/architecture.png)
@@ -36,6 +102,17 @@ python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件�
 ## 目录结构
 
 ```text
+data/                输入：人填的假设与市场快照
+  assumptions.toml   经营假设、估值参数、终值、敏感性变量表、基期资产负债表
+  market.csv         市场快照：目标公司与可比公司的股价、股本、负债、现金
+
+pipeline/            框架层：把算法模块装成一条流水线（不含任何金融计算）
+  config.py          配置层：文件 → 对象，并检查合法性
+  adapters.py        适配层：把一种对象翻译成另一种
+  tracing.py         留痕层：逐步轨迹 + 运行清单
+  run.py             编排层：主流程，按顺序调各阶段
+  tests/             框架层测试，验的是「装配」而不是算术
+
 algorithm/
   finai/
     types.py        估值引擎的输入输出契约（经营假设、市场数据、估值结果）
@@ -53,6 +130,10 @@ algorithm/
   tests/            单元测试，用手算数字做断言
   examples/         可直接运行的示例脚本
   runs/             运行产物。产物目录统一叫 runs/，避免和包名 output 只差一个 s
+
+runs/<run_id>/       框架层一次运行的产物：01_projections.json … 10_run_manifest.json
+logs/<run_id>/       该次运行的轨迹（trace.jsonl）与运行记录（run_manifest.json）
+docs/                架构图：Mermaid 源码 + 渲染好的 PNG
 ```
 
 ## 端到端跑一遍
@@ -146,9 +227,15 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 
 ## 下一步
 
-按依赖顺序，接下来要做的是：
+已完成的（原来列在这里的两条）：
 
-1. 数据层：读 YAML 假设文件、写运行日志（`trace.jsonl`）
-2. 把 `forecast.py` 算出的 FCFF 序列接进 `dcf.py` 的估值函数
-3. 文档抽取：年报 PDF 到结构化财报
-4. 报告生成：从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx）
+- **数据层**：读 `data/assumptions.toml`（TOML 而不是 YAML —— 见上面「依赖」一节的理由）、
+  `data/market.csv`，写 JSON 结果、运行日志与逐步轨迹
+- **把 `forecast.py` 的 FCFF 接进估值**：由 `pipeline/adapters.py` 完成形状转换。
+  两条路径算出的 FCFF 必须一致，有回归测试盯着
+
+还在做的，按依赖顺序：
+
+1. **框架层**把剩下的两个算法模块接进来：反向求解、相对估值（含足球场图）
+2. **文档抽取**：年报 PDF 到结构化财报，每个数字绑定页码与原文片段
+3. **报告生成**：从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx）
