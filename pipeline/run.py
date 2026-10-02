@@ -60,14 +60,12 @@ from algorithm.finai.forecast import (
     to_snapshots,
 )
 from algorithm.finai.reverse_dcf import (
-    DEFAULT_BOUNDS,
     ReverseResult,
     reverse_solve_many,
 )
 from algorithm.finai.sensitivity import (
     GridResult,
     TornadoRow,
-    Variable,
     attribute,
     tornado,
     two_way_grid,
@@ -86,18 +84,23 @@ from .adapters import (
     drivers_to_assumptions,
     fill_peers_from_financials,
     fill_target_from_forecast,
+    to_reverse_variables,
     to_sensitivity_variables,
 )
 from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MARKET_PATH,
     DEFAULT_PEER_PATH,
+    CompsParams,
     ConfigError,
+    ReverseParams,
     SensitivityConfig,
     WaccParams,
     load_case,
+    load_comps_params,
     load_market_snapshot,
     load_peer_financials,
+    load_reverse_params,
     load_sensitivity,
     load_terminal_params,
     load_wacc_params,
@@ -335,30 +338,11 @@ def stage_sensitivity(
 
 
 
-def reverse_variables(
-    assumptions: ForecastAssumptions, wacc: float
-) -> list[Variable]:
-    """构造要反解的四个参数。
-
-    搜索区间直接用算法模块给的 DEFAULT_BOUNDS，不另设一套 ——
-    反解区间如果和模块默认值不一致，同一个问题会有两个答案。
-    """
-    specs = [
-        ("永续增长率", "terminal_growth", assumptions.terminal_growth),
-        ("WACC", "wacc", wacc),
-        ("收入增速", "revenue_growth", assumptions.revenue_growth[0]),
-        ("EBIT 利润率", "ebit_margin", assumptions.ebit_margin[0]),
-    ]
-    return [
-        Variable.bounds(name, field, *DEFAULT_BOUNDS[field], base=base)
-        for name, field, base in specs
-    ]
-
-
 def stage_reverse(
     assumptions: ForecastAssumptions,
     market: MarketData,
     wacc: float,
+    reverse_config: ReverseParams,
     trace: RunTrace,
 ) -> tuple[list[ReverseResult], list[str]]:
     """阶段：反向求解。反解「要让每股价值等于现价，各参数得是多少」。
@@ -372,7 +356,7 @@ def stage_reverse(
     results: list[ReverseResult] = []
     notes: list[str] = []
 
-    for variable in reverse_variables(assumptions, wacc):
+    for variable in to_reverse_variables(reverse_config, assumptions, wacc):
         try:
             solved = reverse_solve_many(
                 assumptions, market, wacc, [variable]
@@ -404,6 +388,7 @@ def stage_reverse(
 def stage_comps(
     target: CompanyMetrics,
     peers: Sequence[CompanyMetrics],
+    comps_config: CompsParams,
     trace: RunTrace,
 ) -> CompsResult:
     """阶段：相对估值。
@@ -413,7 +398,7 @@ def stage_comps(
     这一步本身不再补数据，只负责算倍数 —— 补数据是适配层的活。
     """
     started = time.perf_counter()
-    result = comps_valuation(target, peers)
+    result = comps_valuation(target, peers, multiples=comps_config.multiples)
 
     usable = {name: stat.median for name, stat in result.stats.items() if stat.count}
     central = result.central_value if result.medians else None
@@ -503,6 +488,8 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     terminal = load_terminal_params()
     params = load_wacc_params()
     sensitivity_config = load_sensitivity()
+    reverse_config = load_reverse_params()
+    comps_config = load_comps_params()
     target, peers = load_market_snapshot()  # peers 留给后面的相对估值阶段
     peer_financials = load_peer_financials()  # 可比公司年度财务数据（来自 peers.csv）
     trace.record(
@@ -539,7 +526,7 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
 
     # 阶段七：反向求解
     reverse_results, reverse_notes = stage_reverse(
-        assumptions, market, wacc_summary["value"], trace
+        assumptions, market, wacc_summary["value"], reverse_config, trace
     )
 
     # 阶段八：相对估值
@@ -550,7 +537,7 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 市场快照里只有股价股数债务，没有这些，PE / PB / EV-EBITDA 都算不出来。
     filled_target = fill_target_from_forecast(target, forecast)
     filled_peers, peer_notes = fill_peers_from_financials(peers, peer_financials)
-    comps_result = stage_comps(filled_target, filled_peers, trace)
+    comps_result = stage_comps(filled_target, filled_peers, comps_config, trace)
 
     # 阶段九：足球场图
     field = stage_football_field(

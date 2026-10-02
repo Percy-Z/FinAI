@@ -20,6 +20,7 @@ from dataclasses import replace
 from typing import Sequence
 
 from algorithm.finai.comps import CompanyMetrics
+from algorithm.finai.reverse_dcf import DEFAULT_BOUNDS
 from algorithm.finai.forecast import (
     ForecastDrivers,
     ThreeStatementForecast,
@@ -31,6 +32,7 @@ from algorithm.finai.types import ForecastAssumptions, MarketData
 from .config import (
     ConfigError,
     PeerFinancials,
+    ReverseParams,
     SensitivityConfig,
     TerminalParams,
 )
@@ -88,6 +90,37 @@ def _base_value(field: str, assumptions: ForecastAssumptions, wacc: float) -> fl
             f"[sensitivity] 里的字段 {field!r} 不是数字，做不了敏感性分析"
         )
     return float(value)
+
+
+def to_reverse_variables(
+    config: ReverseParams,
+    assumptions: ForecastAssumptions,
+    wacc: float,
+) -> list[Variable]:
+    """把配置里的变量表变成反向求解用的 Variable 列表。
+
+    两处刻意复用，都是为了「同一个问题不要有两个答案」：
+        搜索区间  用算法模块的 DEFAULT_BOUNDS，不在配置里另设一套
+        基准值    与敏感性用同一个 _base_value（逐年字段取各年平均）——
+                  同一份假设在两处取不同的基准值，报告会自相矛盾
+
+    反解的前提是「当前值落在搜索区间内」：如果 base 在区间外，
+    求解器一开始就在边界上，返回的结论没有意义。
+    """
+    result: list[Variable] = []
+    for item in config.variables:
+        low, high = DEFAULT_BOUNDS[item.field]
+        base = _base_value(item.field, assumptions, wacc)
+        if not low <= base <= high:
+            raise ConfigError(
+                f"[reverse] 里 {item.name}（{item.field}）的当前值 "
+                f"{base:.6f} 不在算法模块给的搜索区间 [{low}, {high}] 内。\n"
+                "    反解要求当前值落在区间内，否则求解器会直接撞边界。"
+            )
+        result.append(
+            Variable.bounds(item.name, item.field, low, high, base=base)
+        )
+    return result
 
 
 def to_sensitivity_variables(

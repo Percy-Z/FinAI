@@ -40,6 +40,7 @@ from algorithm.finai.forecast import (  # noqa: E402
     build_forecast,
     to_snapshots,
 )
+from algorithm.finai.reverse_dcf import DEFAULT_BOUNDS  # noqa: E402
 from algorithm.finai.sensitivity import tornado  # noqa: E402
 from algorithm.finai.types import ForecastAssumptions  # noqa: E402
 from algorithm.finai.validate import run_checks  # noqa: E402
@@ -50,6 +51,7 @@ from pipeline.adapters import (  # noqa: E402
     drivers_to_assumptions,
     fill_peers_from_financials,
     fill_target_from_forecast,
+    to_reverse_variables,
     to_sensitivity_variables,
 )
 
@@ -362,6 +364,44 @@ class TestConfigRejectsBadToml(unittest.TestCase):
         self.assertIn("没有任何变量", message)
         self.assertIn("[[sensitivity.variables]]", message)  # 报错里带正确写法
 
+    def test_反解字段不能反解要报错(self):
+        """只有算法模块给了搜索区间的字段才能反解。"""
+        broken = self.toml_text().replace(
+            'field = "terminal_growth"', 'field = "revenue_base"'
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_reverse_params(self.write_temp_toml(broken))
+        message = str(ctx.exception)
+        self.assertIn("revenue_base", message)
+        self.assertIn("不能反解", message)
+
+    def test_反解没有参数要报错(self):
+        minimal = '[reverse]\n'
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_reverse_params(self.write_temp_toml(minimal))
+        message = str(ctx.exception)
+        self.assertIn("没有任何参数", message)
+        self.assertIn("[[reverse.variables]]", message)
+
+    def test_估值倍数名写错要报错(self):
+        broken = self.toml_text().replace(
+            'multiples = ["pe", "pb", "ev_ebitda"]',
+            'multiples = ["pe", "pb", "ev_ebitdaaaa"]',
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_comps_params(self.write_temp_toml(broken))
+        message = str(ctx.exception)
+        self.assertIn("ev_ebitdaaaa", message)
+        self.assertIn("不可用", message)
+
+    def test_估值倍数列表为空要报错(self):
+        broken = self.toml_text().replace(
+            'multiples = ["pe", "pb", "ev_ebitda"]', "multiples = []"
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_comps_params(self.write_temp_toml(broken))
+        self.assertIn("不能为空", str(ctx.exception))
+
 
 # ---------------------------------------------------------------------------
 # 三、两条预测路径必须一致（回归测试：防止漏减折旧率）
@@ -647,6 +687,43 @@ class TestAdapters(unittest.TestCase):
             to_sensitivity_variables(bad, assumptions, 0.0946)
         self.assertIn("不包含当前的基准值", str(ctx.exception))
 
+    def test_反解变量的基准值与敏感性口径一致(self):
+        """同一个字段，在敏感性和反向求解里必须取同一个基准值。
+
+        合并前两边不一致：敏感性取各年平均（0.08），反解取第一年（0.10）——
+        同一份假设在两处取不同的基准值，报告会自相矛盾。
+        """
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        variables = to_reverse_variables(
+            config.load_reverse_params(), assumptions, 0.0946
+        )
+        by_name = {item.name: item for item in variables}
+
+        # 逐年字段：取各年平均，不是第一年
+        self.assertAlmostEqual(by_name["收入增速"].base, 0.08)
+        self.assertAlmostEqual(by_name["EBIT 利润率"].base, 0.20)
+        # 标量字段：取值本身
+        self.assertAlmostEqual(
+            by_name["永续增长率"].base, assumptions.terminal_growth
+        )
+        self.assertAlmostEqual(by_name["WACC"].base, 0.0946)
+
+        # 搜索区间来自算法模块的 DEFAULT_BOUNDS，不在配置里另设一套
+        low, high = DEFAULT_BOUNDS["revenue_growth"]
+        self.assertAlmostEqual(by_name["收入增速"].low, low)
+        self.assertAlmostEqual(by_name["收入增速"].high, high)
+
+    def test_反解的当前值不在搜索区间内要报错(self):
+        """base 落在区间外时，求解器一开始就在边界上，结论没有意义。"""
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        # DEFAULT_BOUNDS["wacc"] 是 (0.01, 0.40)，传个 0.9 就在区间外
+        reverse_config = config.ReverseParams(
+            variables=(config.ReverseVariable(name="WACC", field="wacc"),)
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            to_reverse_variables(reverse_config, assumptions, 0.9)
+        self.assertIn("不在算法模块给的搜索区间", str(ctx.exception))
+
 
 # ---------------------------------------------------------------------------
 # 四、端到端：跑一整遍
@@ -832,6 +909,37 @@ class TestEndToEnd(unittest.TestCase):
                 float(got["波动幅度"]), want.swing, places=2,
                 msg=f"{want.name} 的波动幅度与算法层不一致",
             )
+
+    def test_相对估值用的倍数来自配置(self):
+        """改配置里的 [comps].multiples，产物里的倍数就跟着变。"""
+        _, root = self.run_pipeline()
+        implied = next((root / "runs").glob("*/08_comps_implied.csv"))
+        rows = list(
+            csv.DictReader(implied.read_text(encoding="utf-8-sig").splitlines())
+        )
+
+        configured = config.load_comps_params().multiples
+        used = {row["倍数"] for row in rows}
+        # 产物里的倍数集合 = 配置里的倍数（中文标签，和 config 的 key 对应）
+        expected_labels = {
+            "pe": "PE",
+            "pb": "PB",
+            "ps": "PS",
+            "ev_ebitda": "EV/EBITDA",
+            "ev_ebit": "EV/EBIT",
+        }
+        self.assertEqual(used, {expected_labels[name] for name in configured})
+        # 每个倍数三个统计口径（q1 / median / q3）
+        self.assertEqual(len(rows), len(configured) * 3)
+
+    def test_反解产物来自配置里的参数表(self):
+        _, root = self.run_pipeline()
+        produced = next((root / "runs").glob("*/06_reverse_dcf.json"))
+        payload = json.loads(produced.read_text(encoding="utf-8"))
+        names = [item["name"] for item in payload["results"]]
+        configured = [item.name for item in config.load_reverse_params().variables]
+        # 反解出来的参数名与配置里的顺序、名字一致
+        self.assertEqual(names, configured)
 
     def test_同一编号跑两次会被明确拒绝(self):
         """产物目录已有内容时，输出层的 export_run 会拒绝覆盖。

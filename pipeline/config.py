@@ -41,12 +41,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from algorithm.finai.comps import CompanyMetrics
+from algorithm.finai.comps import MULTIPLE_NAMES, CompanyMetrics
 from algorithm.finai.forecast import (
     BalanceSheetState,
     ForecastDrivers,
     as_series,
 )
+from algorithm.finai.reverse_dcf import DEFAULT_BOUNDS
+
+# 能反解的字段就是算法模块给了搜索区间的那些。
+# 直接引用算法层的常量，不在这里另抄一份 —— 抄了就会有两份，
+# 改了一处忘了另一处。
+REVERSE_FIELDS = frozenset(DEFAULT_BOUNDS)
 
 # 默认配置路径。用 __file__ 往上退两级定位仓库根目录，
 # 这样不管当前工作目录在哪都能找对文件。
@@ -269,6 +275,62 @@ class SensitivityConfig:
 
 
 @dataclass(frozen=True)
+class ReverseVariable:
+    """反向求解要反解的一个参数。
+
+    只写「名字 + 字段」，**搜索区间和基准值都不写**：
+        搜索区间  用算法模块的 DEFAULT_BOUNDS（见 reverse_dcf.py）
+        基准值    与敏感性同一口径，由适配层推导
+    这样同一个问题不会有两个答案。
+    """
+
+    name: str
+    field: str
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("name 不能为空")
+        if self.field not in REVERSE_FIELDS:
+            raise ValueError(
+                f"field={self.field!r} 不能反解。"
+                f"可反解的是：{sorted(REVERSE_FIELDS)}"
+            )
+
+
+@dataclass(frozen=True)
+class ReverseParams:
+    """反向求解配置：反解哪些参数。"""
+
+    variables: tuple[ReverseVariable, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.variables:
+            raise ValueError("至少要反解一个参数")
+        fields = [item.field for item in self.variables]
+        if len(set(fields)) != len(fields):
+            raise ValueError(f"同一个字段不能反解两次：{fields}")
+
+
+@dataclass(frozen=True)
+class CompsParams:
+    """相对估值配置：用哪些倍数。"""
+
+    multiples: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "multiples", tuple(self.multiples))
+        if not self.multiples:
+            raise ValueError("multiples 不能为空，至少要给一个倍数")
+        unknown = [name for name in self.multiples if name not in MULTIPLE_NAMES]
+        if unknown:
+            raise ValueError(
+                f"这些倍数不可用：{unknown}。可用的是：{list(MULTIPLE_NAMES)}"
+            )
+        if len(set(self.multiples)) != len(self.multiples):
+            raise ValueError(f"multiples 里有重复：{list(self.multiples)}")
+
+
+@dataclass(frozen=True)
 class PeerFinancials:
     """一家可比公司的年度财务数据。
 
@@ -449,6 +511,36 @@ def load_sensitivity(path: str | Path = DEFAULT_CONFIG_PATH) -> SensitivityConfi
             )
     return config
 
+
+
+def load_reverse_params(path: str | Path = DEFAULT_CONFIG_PATH) -> ReverseParams:
+    """读 [reverse] 小节 —— 反向求解反解哪些参数。
+
+    与 [sensitivity] 一样用了数组表（[[reverse.variables]]），所以要逐个构造。
+    """
+    cfg = read_toml(path)
+    section = _section(cfg, "reverse", path)
+
+    raw = section.get("variables")
+    if not raw:
+        raise ConfigError(
+            f"{path} 的 [reverse] 里没有任何参数。至少要写一个 "
+            "[[reverse.variables]]，例如：\n"
+            "    [[reverse.variables]]\n"
+            '    name  = "永续增长率"\n'
+            '    field = "terminal_growth"'
+        )
+    variables = tuple(
+        _build(ReverseVariable, item, path, f"reverse.variables[{index}]")
+        for index, item in enumerate(raw, start=1)
+    )
+    return _build(ReverseParams, {"variables": variables}, path, "reverse")
+
+
+def load_comps_params(path: str | Path = DEFAULT_CONFIG_PATH) -> CompsParams:
+    """读 [comps] 小节 —— 相对估值用哪些倍数。"""
+    cfg = read_toml(path)
+    return _build(CompsParams, _section(cfg, "comps", path), path, "comps")
 
 
 def load_peer_financials(
