@@ -72,6 +72,8 @@ DATA_FILES: dict[str, tuple[str, str]] = {
     "comps_implied": ("08", "comps_implied.csv"),
     "football_field": ("09", "football_field.json"),
     "run_manifest": ("10", "run_manifest.json"),
+    "report": ("17", "report.md"),
+    "report_html": ("18", "report.html"),
 }
 
 
@@ -185,11 +187,26 @@ def export_run(
     meta: dict[str, Any] | None = None,
     overwrite: bool = False,
     render_charts: bool = True,
+    narrative: Any = None,
+    report_meta: dict[str, Any] | None = None,
 ) -> RunArtifacts:
-    """把一次运行的全部结果写进 outputs/<run_id>/。"""
+    """把一次运行的全部结果写进 outputs/<run_id>/。
+
+    narrative 是 narrative.NarrativeResult（大模型写的各章节正文），可以不给：
+    报告照样出，只是叙述段落换成一句说明。这样「有没有大模型」不影响
+    流水线能否跑完，也不影响报告里的数字。
+
+    report_meta 提供报告抬头要用的元信息（公司名、基准日等），
+    通常直接来自清单里的 run_parameters。
+    """
     root_path = Path(root) if root is not None else DEFAULT_OUTPUT_ROOT
     identifier = validate_run_id(run_id) if run_id else make_run_id()
     directory = _prepare_directory(root_path, identifier, overwrite)
+
+    # 延迟导入：report 与 narrative 都要用到本模块里的 RunOutputs，
+    # 在模块顶层互相 import 会形成循环。
+    from .narrative import build_fact_sheet
+    from .report import ReportContext, build_blocks, render_html, render_markdown
 
     artifacts = RunArtifacts(run_id=identifier, directory=directory)
     warnings: list[str] = []
@@ -264,11 +281,63 @@ def export_run(
         else:
             warnings.append("没有安装 matplotlib，跳过全部图表的渲染")
 
+    # 报告：放在图表之后，因为它要引用图表的文件名。
+    # 编号 17 / 18，接在数据文件（01-10）与图表（11-16）之后。
+    # 键保留 chart_ 前缀，与 charts.render_all 以及报告层的查找保持一致。
+    chart_files = {
+        name: path
+        for name, path in artifacts.files.items()
+        if name.startswith("chart_")
+    }
+    run_parameters = (meta or {}).get("run_parameters", {})
+    company = run_parameters.get("company", {})
+    context = ReportContext(
+        run_id=identifier,
+        created_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        company_name=company.get("name", "目标公司"),
+        company_code=company.get("code", ""),
+        as_of=(report_meta or {}).get("as_of", ""),
+        data_source=company.get("source", ""),
+        # 过程记录进报告附录：通知要求「完整记录文件访问、工具调用、
+        # 计算过程和结果生成情况」，这是那一条的落地。
+        steps=tuple((meta or {}).get("steps") or ()),
+        inputs=tuple(sorted(((meta or {}).get("inputs") or {}).items())),
+    )
+    facts = build_fact_sheet(outputs, context=run_parameters)
+    blocks = build_blocks(facts, narrative, chart_files, context)
+
+    def write_text(name: str, content: str) -> None:
+        path = target(name)
+        path.write_text(content, encoding="utf-8")
+        record(name, path)
+
+    write_text("report", render_markdown(blocks))
+    write_text(
+        "report_html",
+        render_html(
+            blocks,
+            title=f"{context.company_name}（{context.company_code}）估值报告",
+            base_dir=directory,
+            footer_note=(
+                "本报告由自动化估值流水线生成，"
+                f"运行编号 {identifier}。所有数字均可在产物目录中追溯到源文件。"
+            ),
+        ),
+    )
+
+    if narrative is not None:
+        # 大模型的模型名、提示词版本、哈希、token 用量都进清单 ——
+        # 报告正文本身不可复现，但「用哪个模型、哪版提示词写的」必须可查。
+        meta = {**(meta or {}), "narrative": narrative.to_dict()}
+    else:
+        meta = dict(meta or {})
+        warnings.append("本次没有调用大模型，报告只含数据表与模板文字")
+
     manifest = _build_manifest(
         run_id=identifier,
         directory=directory,
         files=artifacts.files,
-        meta=meta or {},
+        meta=meta,
         warnings=warnings,
     )
     manifest_path = write_json(target("run_manifest"), manifest)

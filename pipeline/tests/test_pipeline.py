@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -44,12 +45,60 @@ from algorithm.finai.types import ForecastAssumptions  # noqa: E402
 from algorithm.finai.validate import run_checks  # noqa: E402
 from algorithm.finai.wacc import weights_from_market, wacc_from_market  # noqa: E402
 from pipeline import config, run, tracing  # noqa: E402
+from pipeline.check_run import (  # noqa: E402
+    REQUIRED_CHARTS,
+    REQUIRED_DATA_FILES,
+    REQUIRED_REPORTS,
+    check_run,
+    newest_run,
+)
 from pipeline.adapters import (  # noqa: E402
     company_to_market_data,
     drivers_to_assumptions,
     fill_peers_from_financials,
     fill_target_from_forecast,
 )
+
+
+# ---------------------------------------------------------------------------
+# 全局桩：本模块的测试绝不调用真实的大模型接口
+# ---------------------------------------------------------------------------
+#
+# 这件事踩过坑：仓库根目录放着 apikey.txt，于是 run.main() 里的叙述阶段
+# 会真的发请求，每个端到端用例多花三分钟，还会产生费用、
+# 在别人的机器上（没 key）表现不一致。
+#
+# 测试必须是自己自足的：不依赖环境里的凭据、不依赖网络、不花钱。
+# 想看真实输出，跑 make run，不要跑 make test。
+
+_llm_patcher: Any = None
+
+
+def _stub_narrative(
+    facts: dict[str, Any], request: Any, log_dir: Any = None
+) -> Any:
+    """假的叙述结果：结构完整、内容为空，等价于「没有 key 时的降级」。"""
+    from algorithm.output.narrative import PROMPT_VERSION, NarrativeResult
+
+    return NarrativeResult(
+        ok=False,
+        model=request.model,
+        endpoint=request.endpoint,
+        prompt_version=PROMPT_VERSION,
+        temperature=request.temperature,
+        notes=["测试桩：本用例不调用真实大模型接口"],
+    )
+
+
+def setUpModule() -> None:
+    global _llm_patcher
+    _llm_patcher = mock.patch("pipeline.run.write_narrative", _stub_narrative)
+    _llm_patcher.start()
+
+
+def tearDownModule() -> None:
+    if _llm_patcher is not None:
+        _llm_patcher.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +858,21 @@ class TestEndToEnd(unittest.TestCase):
             second = (root / "runs" / "第二次" / name).read_bytes()
             self.assertEqual(first, second, msg=f"{name} 两次运行的内容不完全相同")
 
+        # 报告：正文可复现，但抬头里的运行编号与出具时间随运行变化，
+        # 所以整份文件不是逐字节相同。去掉那两行之后必须完全一致。
+        def report_body(text: str) -> str:
+            return "\n".join(
+                line
+                for line in text.splitlines()
+                if "运行编号" not in line and "出具时间" not in line
+            )
+
+        self.assertEqual(
+            report_body((root / "runs" / "第一次" / "17_report.md").read_text("utf-8")),
+            report_body((root / "runs" / "第二次" / "17_report.md").read_text("utf-8")),
+            msg="报告正文两次运行不一致（抬头的时间戳已经排除）",
+        )
+
         # 清单：run_id 与 created_at 不同（那是运行时产生的），
         # 但记录的实质内容必须一致
         first_manifest = json.loads(
@@ -830,13 +894,28 @@ class TestEndToEnd(unittest.TestCase):
             这样比「只挑几个字段比」严：以后往 meta 里新加了什么，
             只要它是不可复现的，这条测试就会挂。
             """
-            return {
-                "inputs": {
+            inputs = {
+                key: value
+                for key, value in manifest["inputs"].items()
+                if key != "steps"
+            }
+            # 叙述元信息里的耗时与日志路径由运行标识和时刻派生，天然不同；
+            # 其余（模型名、提示词版本、提示词与响应哈希、token 用量）必须一致。
+            if "narrative" in inputs:
+                inputs["narrative"] = {
                     key: value
-                    for key, value in manifest["inputs"].items()
-                    if key != "steps"
-                },
-                "outputs": manifest["outputs"],
+                    for key, value in inputs["narrative"].items()
+                    if key not in ("elapsed_s", "raw_path")
+                }
+            return {
+                "inputs": inputs,
+                # 报告文件的内容含运行编号与出具时间，哈希自然每次不同。
+                # 报告正文的可复现性由上面那条单独比。
+                "outputs": [
+                    entry
+                    for entry in manifest["outputs"]
+                    if entry["name"] not in ("report", "report_html")
+                ],
                 "warnings": manifest["warnings"],
             }
 
@@ -873,6 +952,8 @@ class TestEndToEnd(unittest.TestCase):
                 "08_comps_implied.csv",
                 "09_football_field.json",
                 "10_run_manifest.json",
+                "17_report.md",
+                "18_report.html",
             ],
         )
 
@@ -977,6 +1058,107 @@ class TestEndToEnd(unittest.TestCase):
         self.assertAlmostEqual(dcf_band["low"], min(cell_values), delta=0.01)
         self.assertAlmostEqual(dcf_band["high"], max(cell_values), delta=0.01)
 
+    # ── 报告层 ──────────────────────────────────────────────────────
+
+    def test_没配_API_key_也照样出报告(self):
+        """大模型不可用是可接受的降级，不是失败。报告里必须写明这一点。"""
+        _, root = self.run_pipeline()
+        report = self.artifact(root, "17_report.md").read_text("utf-8")
+
+        # 八个章节一个不少
+        for heading in (
+            "1. 投资结论",
+            "2. 估值摘要",
+            "3. 公司与预测概览",
+            "4. 假设合理性审查",
+            "5. 财务勾稽校验",
+            "6. 估值分析",
+            "7. 敏感性与区间归因",
+            "8. 反向估值",
+            "9. 风险与适用边界",
+            "10. 附录",
+        ):
+            self.assertIn(heading, report)
+        # 三种内容性质标注都在
+        for label in ("【事实】", "【推论】", "【观点】"):
+            self.assertIn(label, report)
+        # 而且要说清叙述为什么没生成
+        self.assertIn("未生成", report)
+
+    def test_报告里的数字与估值产物一致(self):
+        """报告里的关键数字必须来自产物，不能是大模型或模板自己编的。"""
+        _, root = self.run_pipeline()
+        report = self.artifact(root, "17_report.md").read_text("utf-8")
+        valuation = json.loads(
+            self.artifact(root, "03_valuation.json").read_text("utf-8")
+        )
+
+        per_share = f"{valuation['per_share']:,.2f}"
+        self.assertIn(per_share, report)
+        self.assertIn(f"{valuation['price']:,.2f}", report)
+
+    def test_报告引用了图表且路径可解析(self):
+        _, root = self.run_pipeline()
+        directory = next((root / "runs").iterdir())
+        report = (directory / "17_report.md").read_text("utf-8")
+
+        markdown_images = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", report)
+        self.assertTrue(markdown_images, "报告里至少要引用一张图")
+        for relative in markdown_images:
+            self.assertTrue((directory / relative).exists(), relative)
+
+    def test_报告_html_是自包含的(self):
+        _, root = self.run_pipeline()
+        html_text = self.artifact(root, "18_report.html").read_text("utf-8")
+
+        self.assertTrue(html_text.startswith("<!doctype html>"))
+        self.assertIn("<style>", html_text)          # 样式内嵌，不依赖外部资源
+        self.assertNotIn("<script", html_text)       # 报告不该带脚本
+        # 徽章样式定义在，说明大模型段落的标注机制是活的
+        self.assertIn(".ai-generated", html_text)
+
+    def test_叙述信息记进清单(self):
+        """正文不可复现，但「用哪个模型、哪版提示词」必须可查。"""
+        _, root = self.run_pipeline()
+        manifest = json.loads(
+            self.artifact(root, "10_run_manifest.json").read_text("utf-8")
+        )
+
+        self.assertIn("narrative", manifest["inputs"])
+        narrative = manifest["inputs"]["narrative"]
+        self.assertIn("model", narrative)
+        self.assertEqual(narrative["prompt_version"], "report-v2")
+        self.assertIn("number_warnings", narrative)
+
+    def test_报告里有图表与过程追溯(self):
+        """报告不能只有文字表：图要嵌进去，执行过程要可追溯。
+
+        这两条都对应通知的硬要求（成果以结构化形式呈现、完整记录执行过程），
+        而且它们曾经因为「图表被静默跳过」而同时消失过，所以单独锁住。
+        """
+        _, root = self.run_pipeline()
+        directory = next((root / "runs").iterdir())
+        report = (directory / "17_report.md").read_text("utf-8")
+
+        images = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", report)
+        self.assertEqual(len(images), 6, "六张图都要出现在报告里")
+        for relative in images:
+            self.assertTrue((directory / relative).exists(), relative)
+
+        self.assertIn("10.4 过程追溯", report)
+        self.assertIn("load_config", report)   # 阶段名来自真实轨迹
+        self.assertIn("narrative", report)
+
+    def test_假设依据台账进报告(self):
+        """通知把「假设依据」列为考察点，依据要能在报告里逐条看到。"""
+        _, root = self.run_pipeline()
+        report = self.artifact(root, "17_report.md").read_text("utf-8")
+        evidence = config.load_evidence()
+
+        self.assertTrue(evidence, "配置文件里应该有依据台账")
+        for key in evidence:
+            self.assertIn(key, report)
+
 
 # ---------------------------------------------------------------------------
 # 五、日志层
@@ -998,7 +1180,7 @@ class TestTracing(unittest.TestCase):
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 10)
+        self.assertEqual(len(lines), 11)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -1020,6 +1202,7 @@ class TestTracing(unittest.TestCase):
                 "reverse_dcf",
                 "comps",
                 "football_field",
+                "narrative",
                 "write_outputs",
             ],
         )
@@ -1135,6 +1318,163 @@ class TestFailurePath(unittest.TestCase):
             inputs=[Path("/tmp/这个文件肯定不存在.dat")],
         )
         self.assertIn("unavailable", list(entry["inputs"].values())[0])
+
+
+# ---------------------------------------------------------------------------
+# 七、产物验收：拦住「跑完了但产物不全」的运行
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRun(unittest.TestCase):
+    """验收层存在的理由：图表被跳过时，流水线不会失败，但报告会缺图。
+
+    这件事真的发生过 —— 一次 make verify 产出的报告里一张图都没有，
+    而 verify 仍然打印「全部检查通过」。所以验收必须验产物，不能只看退出码。
+    """
+
+    def make_fake_run(self, root: Path, *, charts: bool = True) -> Path:
+        """造一个假运行目录，内容最小但齐全，方便按需删掉某些文件。"""
+        directory = root / "20260101T000000000"
+        (directory / "charts").mkdir(parents=True)
+        for name in REQUIRED_DATA_FILES:
+            (directory / name).write_text("{}", encoding="utf-8")
+        for name in REQUIRED_REPORTS:
+            (directory / name).write_text("# 报告\n", encoding="utf-8")
+        if charts:
+            for name in REQUIRED_CHARTS:
+                (directory / "charts" / name).write_bytes(b"png")
+        # 报告总是写满 10 个章节；只有装图那一次才带图片引用。
+        # 这样「缺图」与「章节不够」两种问题不会混在一起。
+        report = (
+            "".join(f"![图](charts/{name})\n" for name in REQUIRED_CHARTS)
+            if charts
+            else ""
+        )
+        report += "\n".join(f"## {i}. 章节" for i in range(10))
+        (directory / "17_report.md").write_text(report, encoding="utf-8")
+        return directory
+
+    def test_complete_run_passes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        outcome = check_run(directory)
+        self.assertTrue(outcome.ok, outcome.errors)
+
+    def test_missing_charts_are_blocking(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name), charts=False)
+        outcome = check_run(directory)
+        self.assertFalse(outcome.ok)
+        self.assertTrue(any("缺图表" in err for err in outcome.errors))
+
+    def test_missing_charts_can_be_explicitly_allowed(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name), charts=False)
+        outcome = check_run(directory, require_charts=False)
+        self.assertTrue(outcome.ok, outcome.errors)
+        self.assertTrue(any("已声明可以没有" in note for note in outcome.notes))
+
+    def test_missing_data_file_is_blocked(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        (directory / "03_valuation.json").unlink()
+        outcome = check_run(directory)
+        self.assertFalse(outcome.ok)
+        self.assertIn("缺数据文件：03_valuation.json", outcome.errors)
+
+    def test_report_without_images_is_blocked(self):
+        """图生成了但报告没引用，等于没有 —— 这条也要拦。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        (directory / "17_report.md").write_text(
+            "\n".join(f"## {i}. 章节" for i in range(10)), encoding="utf-8"
+        )
+        outcome = check_run(directory)
+        self.assertFalse(outcome.ok)
+        self.assertTrue(any("没有引用" in err for err in outcome.errors))
+
+    def test_broken_image_reference_is_blocked(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        with (directory / "17_report.md").open("a", encoding="utf-8") as handle:
+            handle.write("\n![断图](charts/99_not_there.png)\n")
+        outcome = check_run(directory)
+        self.assertFalse(outcome.ok)
+        self.assertTrue(any("引用" in err for err in outcome.errors))
+
+    def test_manifest_warnings_are_surfaced(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        (directory / "10_run_manifest.json").write_text(
+            json.dumps({"warnings": ["没有安装 matplotlib，跳过全部图表的渲染"]}),
+            encoding="utf-8",
+        )
+        outcome = check_run(directory)
+        self.assertTrue(
+            any("matplotlib" in warning for warning in outcome.warnings)
+        )
+
+    def test_no_narrative_is_reported_as_note_not_error(self):
+        """没有大模型是可接受的降级，不该判不合格，但必须说出来。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        (directory / "10_run_manifest.json").write_text(
+            json.dumps({"warnings": [], "inputs": {"narrative": {"ok": False, "notes": ["没有 key"]}}}),
+            encoding="utf-8",
+        )
+        outcome = check_run(directory)
+        self.assertTrue(outcome.ok, outcome.errors)
+        self.assertTrue(any("数据版本" in note for note in outcome.notes))
+
+    def test_short_report_is_blocked(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = self.make_fake_run(Path(tmp.name))
+        (directory / "17_report.md").write_text("## 1. 只有一节\n", encoding="utf-8")
+        outcome = check_run(directory)
+        self.assertFalse(outcome.ok)
+        self.assertTrue(any("章节偏少" in err for err in outcome.errors))
+
+    def test_newest_run_picks_the_last_by_name(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name in ("20260101T000000", "20260202T000000", "20260115T000000"):
+            (root / name).mkdir()
+        self.assertEqual(newest_run(root).name, "20260202T000000")
+
+    def test_empty_runs_dir_raises(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with self.assertRaises(FileNotFoundError):
+            newest_run(Path(tmp.name))
+
+    def test_real_pipeline_output_passes(self):
+        """端到端跑一次，验收必须通过 —— 这是 make verify 最后一步的依据。"""
+        root = self.run_pipeline_in_tmp()
+        outcome = check_run(next((root / "runs").iterdir()))
+        self.assertTrue(outcome.ok, outcome.errors)
+
+    def run_pipeline_in_tmp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
+            run,
+            "RunTrace",
+            trace_factory(root / "logs"),
+        ):
+            with redirect_stdout(io.StringIO()):
+                run.main()
+        return root
 
 
 if __name__ == "__main__":

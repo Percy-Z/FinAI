@@ -46,6 +46,7 @@ from algorithm.finai.forecast import (
     ForecastDrivers,
     as_series,
 )
+from algorithm.output.narrative import NarrativeRequest
 
 # 默认配置路径。用 __file__ 往上退两级定位仓库根目录，
 # 这样不管当前工作目录在哪都能找对文件。
@@ -356,6 +357,42 @@ def load_sensitivity_params(
     return _build(
         SensitivityParams, _section(cfg, "sensitivity", path), path, "sensitivity"
     )
+
+
+def load_report_params(
+    path: str | Path = DEFAULT_CONFIG_PATH,
+) -> NarrativeRequest:
+    """读 [report] 小节 —— 报告叙述生成的参数。
+
+    [report] 小节可以不存在：这时用全默认值（启用、deepseek-v4-pro）。
+    老配置文件不会因为多了个新功能就读不出来。
+
+    真正决定跑不跑得成大模型的是环境变量里有没有 API key —— 没有 key 时
+    叙述层自己降级，报告照常出，流水线不会失败。
+    """
+    cfg = read_toml(path)
+    if "report" not in cfg:
+        return NarrativeRequest()
+    return _build(NarrativeRequest, _section(cfg, "report", path), path, "report")
+
+
+def load_evidence(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, str]:
+    """读 [evidence] 小节 —— 每条假设的依据与状态。
+
+    通知把「假设依据」列为选题 4 的考察点之一。依据是人写进去的判断说明，
+    不是代码能推导出来的东西，所以它属于配置层，由组员逐条填。
+
+    做成自由格式的键值对（参数名 -> 依据说明）而不是逐字段的结构化定义，
+    是因为每条依据的写法差别很大：有的引年报页码，有的引可比公司，
+    有的直接写「⚠️ 待查」。用一张表把它们登记下来，比强行统一格式更实际。
+
+    [evidence] 可以不存在（返回空字典），报告里会说明依据台账为空。
+    """
+    cfg = read_toml(path)
+    if "evidence" not in cfg:
+        return {}
+    section = _section(cfg, "evidence", path)
+    return {str(key): str(value) for key, value in section.items()}
 
 
 def load_peer_financials(

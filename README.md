@@ -2,9 +2,10 @@
 
 2026 年北京市大学生金融人工智能竞赛「自动化估值建模」方向的实现仓库。
 
-当前进度：算法层九个模块、输出层（数据文件 + 六张图）、框架层九个阶段全部打通。
-`make run` 一条命令从配置跑到产物，共 399 个单元测试覆盖
-（算法层 345 + 框架层 54）。每个算法的输入输出见
+当前进度：算法层十个模块、输出层（数据文件 + 六张图 + 报告）、框架层十个阶段、
+年报抽取、MCP 服务与 Skill 全部打通。`make run` 一条命令从配置跑到
+**带图表与大模型推理的报告**，共 486 个单元测试覆盖（算法层 401 +
+框架层 73 + MCP 12）。每个算法的输入输出见
 [`algorithm/shuoming.md`](algorithm/shuoming.md)。
 
 ## 快速开始
@@ -24,6 +25,23 @@ python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件�
 
 注意 `discover` 必须指定 `-s algorithm/tests`：`algorithm` 是命名空间包，
 不带参数直接跑 `python3 -m unittest discover` 会找不到测试。
+
+### 让大模型写报告正文（可选）
+
+报告的数字全部由代码算好，大模型只负责把数字讲成人话。**不配 key 也能跑** ——
+这时会出一份「数据版本报告」：表格、图、数字都在，只是叙述段落换成一句说明。
+注意报告开头会出现红色横幅，明确写着这份报告不满足提交要求。
+
+```bash
+export DEEPSEEK_API_KEY=sk-xxxxx     # 方式一：环境变量
+echo 'sk-xxxxx' > apikey.txt         # 方式二：本地文件（已在 .gitignore 里）
+make run
+```
+
+模型与参数在 `data/assumptions.toml` 的 `[report]` 小节（默认 `deepseek-v4-pro`，
+调试时换成 `deepseek-flash`、把 `effort` 调成 `low`，能快一倍）。**key 不写进配置文件。**
+
+一次完整运行约 3 分钟，其中 2 分半是大模型在推理与写报告。
 
 ## 系统架构
 
@@ -48,12 +66,17 @@ algorithm/
     validate.py     勾稽校验：恒等式、现金口径、信号类检查
     comps.py        相对估值：可比公司倍数、隐含价值、足球场图
     forecast.py     三表联动预测：从假设推出完整三张表
+    extract.py      年报抽取：从年报 PDF 取关键科目，每个数字带页码与原文
   output/           输出层（只依赖 finai，不反向依赖）
     reporting.py    把结果写进 algorithm/runs/<run_id>/
     charts/         一个文件一张图，11 到 16 号
+    narrative.py    叙述层：把结果交给大模型写成报告正文（可降级）
+    report.py       报告层：组装成 17 报告 md 与 18 报告 html
   tests/            单元测试，用手算数字做断言
   examples/         可直接运行的示例脚本
   runs/             运行产物。产物目录统一叫 runs/，避免和包名 output 只差一个 s
+  mcp_server/       MCP 服务：把流水线能力暴露成标准协议接口
+  skills/           Agent Skill：描述什么时候、怎么用这套估值流程
 ```
 
 ## 端到端跑一遍
@@ -80,6 +103,8 @@ algorithm/runs/20260927T165932/
   08_comps_implied.csv       每种倍数的隐含每股价值
   09_football_field.json     估值区间的数据
   10_run_manifest.json       运行清单，含每个产物的 sha256
+  17_report.md               估值报告（Markdown）
+  18_report.html             估值报告（自包含 HTML，可直接打印成 PDF）
   charts/
     11_football_field.png      估值区间
     12_tornado.png             单因素敏感性
@@ -90,6 +115,12 @@ algorithm/runs/20260927T165932/
 ```
 
 图表层的组织方式和完整对应表见 [`algorithm/output/README.md`](algorithm/output/README.md)。
+
+报告的八个章节是：估值摘要、公司与预测概览、财务勾稽校验、估值分析、
+敏感性与区间归因、反向估值、风险与适用边界、附录。每个章节标题标出内容性质
+（【事实】/【推论】/【观点】），大模型写的段落单独打「AI 生成」徽章；
+附录里有大模型使用记录（模型、提示词版本、哈希、token 用量）和数字校验结论 ——
+程序会把正文里出现的每一个数字与事实表比对，对不上的全部列出来。
 
 `run_manifest.json` 是可复现性的凭证：记录每个输出文件的 sha256、字节数，
 以及调用方传入的输入说明。两次运行结果不一样时，用它就能判断是输入变了、
@@ -151,8 +182,10 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 
 1. 文档抽取：年报 PDF 到结构化财报。这是数据入口最后一段手工环节 ——
    现在 `[opening_balance]` 和 `data/peers.csv` 都是手填的过渡数据
-2. 报告生成：从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx）。
-   数据已经齐了，差的是把数字拼成文章
-3. 把 `forecast.py` 算出的 FCFF 序列接进 `dcf.py` 的估值函数
+2. 把 `forecast.py` 算出的 FCFF 序列接进 `dcf.py` 的估值函数
    （目前估值走的是简化路径，两条路径的 FCFF 由回归测试盯着，数值一致）
-4. 初赛交付物：项目计划书与 5 分钟演示视频（截止 10 月 18 日）
+3. 初赛交付物：项目计划书与 5 分钟演示视频（截止 10 月 18 日）
+
+报告已经能出 Markdown 与自包含 HTML，后者可以直接在浏览器里打印成 PDF。
+刻意没有引入 reportlab：本项目的原则是核心零第三方依赖，
+可选的增强（matplotlib 画图、大模型写正文）都做成「缺了就降级」。

@@ -37,6 +37,8 @@ ForecastAssumptions），中间由 adapters 转换。两条路径算出的 FCFF 
 from __future__ import annotations
 
 import time
+import contextlib
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -78,7 +80,14 @@ from algorithm.finai.wacc import (
     wacc_from_market,
     weights_from_market,
 )
-from algorithm.output import RunOutputs, export_run, summarize
+from algorithm.output import (
+    NarrativeRequest,
+    RunOutputs,
+    build_fact_sheet,
+    export_run,
+    summarize,
+    write_narrative,
+)
 
 from .adapters import (
     company_to_market_data,
@@ -94,8 +103,10 @@ from .config import (
     SensitivityParams,
     WaccParams,
     load_case,
+    load_evidence,
     load_market_snapshot,
     load_peer_financials,
+    load_report_params,
     load_sensitivity_params,
     load_terminal_params,
     load_wacc_params,
@@ -513,6 +524,65 @@ def stage_football_field(
     return field
 
 
+def run_pipeline(run_id: str | None = None) -> tuple[str, Path]:
+    """以编程方式跑一遍流水线，返回 (运行编号, 产物目录)。
+
+    与 main() 的区别有三点，都是为了被别的程序调用：
+        1. 不往 stdout 打印 —— stdio 传输的 MCP 服务器里 stdout 是协议通道，
+           混进运行摘要把客户端的 JSON 解析搞坏（这里重定向到 stderr）。
+        2. 不吞异常 —— 失败了让调用方决定怎么处理。
+        3. 返回产物目录，调用方不用自己拼路径。
+    """
+    identifier = run_id or new_run_id()
+    trace = RunTrace(identifier)
+    with contextlib.redirect_stdout(sys.stderr):
+        _run_once(identifier, trace)
+    return identifier, OUTPUT_ROOT / identifier
+
+
+def stage_narrative(
+    outputs: RunOutputs,
+    request: NarrativeRequest,
+    run_parameters: dict[str, Any],
+    trace: RunTrace,
+):
+    """阶段：叙述生成。把算好的结果交给大模型写成报告正文。
+
+    这个阶段和别的阶段有两处不同：
+
+    一、它的失败是正常情形。没配 API key、网络不通、接口报错、返回不是
+        合法 JSON —— 这些都不该中断流水线。所以它永不抛异常，
+        只返回一个可能没有内容的 NarrativeResult，由报告层决定怎么呈现。
+
+    二、它不可复现。同样的输入两次跑出来的文字不会完全一样。所以把模型名、
+        提示词版本、温度、提示词与响应的哈希、token 用量、耗时全部记进
+        日志与产物清单 —— 报告正文没法复现，但「是哪一版写出来的」必须可查。
+
+    事实表（facts）在这里构造并传给大模型。它同时也是回来后做数字校验的
+    对照表：报告里凡是不在事实表上的数字，都会被挑出来。
+    """
+    started = time.perf_counter()
+    facts = build_fact_sheet(outputs, context=run_parameters)
+    result = write_narrative(facts, request, log_dir=trace.dir)
+    trace.record(
+        step="narrative",
+        tool="algorithm.output.narrative.write_narrative",
+        model=result.model,
+        prompt_version=result.prompt_version,
+        duration_s=time.perf_counter() - started,
+        extra={
+            "ok": result.ok,
+            "sections": sorted(result.sections),
+            "notes": result.notes,
+            "number_warnings": result.number_warnings[:10],
+            "usage": result.usage,
+            "prompt_sha256": result.prompt_sha256[:16],
+            "response_sha256": result.response_sha256[:16],
+        },
+    )
+    return result
+
+
 def _record_failure(trace: RunTrace, error: Exception) -> Path:
     """失败的运行也要留证据：记一笔失败，再写清单。
 
@@ -543,6 +613,8 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     sensitivity_params = load_sensitivity_params()
     target, peers = load_market_snapshot()
     peer_financials = load_peer_financials()
+    report_params = load_report_params()
+    evidence = load_evidence()
     trace.record(
         step="load_config",
         tool="pipeline.config",
@@ -593,6 +665,44 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 阶段九：足球场图
     field = stage_football_field(result, comps_result, grid, market.price, trace)
 
+    # 一次运行的完整产出。后面叙述阶段与落盘阶段都用这一份。
+    run_outputs = RunOutputs(
+        forecast=forecast,
+        validation=reports,
+        dcf=result,
+        tornado=tornado_rows,
+        grid=grid,
+        reverse=reverse_results,
+        comps=comps_result,
+        football_field=field,
+    )
+
+    # 清单里的参数快照。叙述阶段要拿它构造事实表，落盘阶段要写进清单，
+    # 所以在这里先组装好，两处共用同一份。
+    run_parameters = {
+        "company": {
+            "name": company.name,
+            "code": company.code,
+            "source": company.source,
+        },
+        "assumptions": asdict(drivers),
+        "opening_balance": asdict(opening),
+        "wacc": wacc_summary,
+        "sensitivity": asdict(sensitivity_params),
+        # 假设依据台账：通知把「假设依据」列为考察点，报告第 4 节要引用它
+        "evidence": evidence,
+        # 数据缺口与反解失败都记进清单 —— 缺什么比有什么更需要在报告里说明
+        "notes": {
+            "peers": peer_notes,
+            "reverse_skipped": reverse_notes,
+        },
+    }
+
+    # 阶段十：叙述生成（调用大模型写报告正文）
+    narrative = stage_narrative(
+        run_outputs, report_params, run_parameters, trace
+    )
+
     # 落盘：交给算法侧输出层的 export_run。
     #
     # 只传目前拿得到的结果 —— RunOutputs 里为 None 的字段不会生成文件。
@@ -604,18 +714,11 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 这批数字是哪版代码、读的哪份配置算出来的。
     started = time.perf_counter()
     artifacts = export_run(
-        RunOutputs(
-            forecast=forecast,
-            validation=reports,
-            dcf=result,
-            tornado=tornado_rows,
-            grid=grid,
-            reverse=reverse_results,
-            comps=comps_result,
-            football_field=field,
-        ),
+        run_outputs,
         root=OUTPUT_ROOT,
         run_id=run_id,
+        narrative=narrative,
+        report_meta={"as_of": market.as_of},
         meta={
             # ── 框架层独有的信息 ──────────────────────────────────
             # 哪一版代码算的
@@ -628,22 +731,8 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
             # 输出层的产物文件只放「结果」，不放假设。所以假设、基期数据、
             # WACC 的完整构成都记在这里 —— 报告里要引用假设和 WACC 构成时，
             # 从这一处拿，不用回去翻配置文件（配置文件日后会变）。
-            "run_parameters": {
-                "company": {
-                    "name": company.name,
-                    "code": company.code,
-                    "source": company.source,
-                },
-                "assumptions": asdict(drivers),
-                "opening_balance": asdict(opening),
-                "wacc": wacc_summary,
-                "sensitivity": asdict(sensitivity_params),
-                # 数据缺口与反解失败都记进清单 —— 缺什么比有什么更需要在报告里说明
-                "notes": {
-                    "peers": peer_notes,
-                    "reverse_skipped": reverse_notes,
-                },
-            },
+            # 叙述阶段也要用同一份，所以在上面先组装好了。
+            "run_parameters": run_parameters,
         },
     )
     trace.record(
@@ -768,11 +857,48 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     for note in field.warnings:
         print(f"    ⚠️ {note}")
 
+    print("\n报告叙述（大模型）")
+    if narrative.ok:
+        print(
+            f"    模型 {narrative.model}，写了 {narrative.section_count} 个章节，"
+            f"耗时 {narrative.elapsed_s:.1f} 秒"
+        )
+        usage = narrative.usage or {}
+        if usage:
+            print(
+                f"    token 用量：输入 {usage.get('prompt_tokens', '—')} / "
+                f"输出 {usage.get('completion_tokens', '—')}"
+            )
+        if narrative.number_warnings:
+            print(
+                f"    ⚠️ 数字校验发现 {len(narrative.number_warnings)} 处"
+                "事实表之外的数字："
+            )
+            for note in narrative.number_warnings[:5]:
+                print(f"        {note}")
+        else:
+            print("    数字校验：未发现事实表之外的数字")
+    else:
+        print("    未生成叙述（出数据版本报告）：" + "；".join(narrative.notes))
+
     # 产物列表由输出层的 summarize 打印（编号、文件名、字节数）
     print()
     print(summarize(artifacts))
     print(f"轨迹        {trace.trace_path}")
     print(f"运行记录    {manifest}")
+
+    # 缺图要吼一声。降级本身是对的（不该因为画不了图就中断），
+    # 但「悄悄交付一份没有图的报告」是错的 —— 报告是交付物，没图就是不合格。
+    if any("matplotlib" in item for item in artifacts.manifest.get("warnings", [])):
+        print(
+            "\n⚠️ 本次没有生成任何图表（当前解释器找不到 matplotlib），"
+            "所以报告里也不会有图。"
+        )
+        print(
+            "   报告没有图就不是合格交付物。换一个装了 matplotlib 的解释器重跑："
+            "make run PYTHON=/Library/Frameworks/Python.framework/Versions/3.14/bin/python3"
+        )
+        print("   想确认产物是否齐全，跑 make check。")
 
     if trace.git["dirty"]:
         print(

@@ -237,12 +237,18 @@ class TestExportRun(unittest.TestCase):
         self.assertTrue(expected.issubset(written), expected - written)
 
     def test_filenames_are_numbered_in_order(self):
-        """数据文件 01 到 10、图表 11 到 16，编号全局唯一且按顺序。"""
+        """数据文件 01-10、图表 11-16、报告 17-18，编号全局唯一且按顺序。
+
+        报告（17 报告 md、18 报告 html）总是生成；图表只在装了 matplotlib
+        时生成，所以中间会缺 11-16 这一段 —— 那是缺图，不是编号乱了。
+        """
         names = sorted(path.name for path in self.artifacts.files.values())
         numbers = [name[:2] for name in names if name[:2].isdigit()]
-        # 没装 matplotlib 时图表本来就不会生成，这时只要求数据文件 01 到 10 齐全
-        last = 17 if HAS_MATPLOTLIB else 11
-        self.assertEqual(numbers, [f"{index:02d}" for index in range(1, last)])
+        expected = [f"{index:02d}" for index in range(1, 11)]
+        if HAS_MATPLOTLIB:
+            expected += [f"{index:02d}" for index in range(11, 17)]
+        expected += ["17", "18"]
+        self.assertEqual(numbers, expected)
 
     def test_charts_go_into_subdirectory(self):
         for name, path in self.artifacts.files.items():
@@ -297,7 +303,12 @@ class TestExportRun(unittest.TestCase):
 
     def test_empty_run_still_writes_manifest(self):
         artifacts = export_run(RunOutputs(), root=self.root, run_id="empty")
-        self.assertEqual(set(artifacts.files), {"run_manifest"})
+        # 什么数据都没有时，报告仍然会生成 —— 它只有章节骨架和破折号，
+        # 正文里会写明哪些部分没有数据。这比「什么都不产出」更有用：
+        # 至少能看出流水线跑通了，且缺的是什么。
+        self.assertEqual(
+            set(artifacts.files), {"run_manifest", "report", "report_html"}
+        )
 
     def test_summarize_mentions_run_id_and_files(self):
         text = summarize(self.artifacts)
@@ -373,7 +384,12 @@ class TestRunFileNaming(unittest.TestCase):
     def test_numbers_are_unique_and_ordered(self):
         numbers = [number for number, _ in DATA_FILES.values()]
         self.assertEqual(len(numbers), len(set(numbers)))
-        self.assertEqual(sorted(numbers), [f"{index:02d}" for index in range(1, 11)])
+        # 01-10 是分析数据，17/18 是报告（md 与 html）。
+        # 11-16 留给图表，它们不在 DATA_FILES 里，见 CHART_FILES。
+        self.assertEqual(
+            sorted(numbers),
+            [f"{index:02d}" for index in range(1, 11)] + ["17", "18"],
+        )
 
     def test_unknown_name_raises(self):
         with self.assertRaises(KeyError):
