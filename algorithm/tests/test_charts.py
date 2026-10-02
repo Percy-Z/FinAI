@@ -27,8 +27,17 @@ HAS_MATPLOTLIB = charts.HAS_MATPLOTLIB
 # base.py 顶上是「import matplotlib」，没装 matplotlib 时连导入都会失败。
 # 放在条件里，是为了让没装 matplotlib 的机器也能跑这个模块——该跳过的跳过，
 # 而不是整份 import 失败、一条测试都跑不了。
+#
+# else 分支不是摆设：缺少它，类型检查器会认为 spread_end_labels 可能未绑定
+# （下面四个测试都用它），严格模式下会报 reportPossiblyUnboundVariable。
+# 运行期这个分支永远不会被执行 —— 没装 matplotlib 时整个测试类会被跳掉。
 if HAS_MATPLOTLIB:
     from algorithm.output.charts.base import spread_end_labels
+else:
+    def spread_end_labels(
+        values: list[float], span: float, gap_ratio: float = 0.05
+    ) -> list[float]:
+        raise RuntimeError("没有安装 matplotlib，spread_end_labels 不可用")
 
 
 class TestChartNumbering(unittest.TestCase):

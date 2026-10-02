@@ -1,18 +1,30 @@
-"""流水线主流程：读配置 → 三表预测 → 资本成本 → DCF 估值 → 落盘。
+"""流水线主流程：读配置 → 三表预测 → 勾稽校验 → 资本成本 → DCF 估值
+→ 敏感性分析 → 反向求解 → 相对估值 → 足球场图 → 落盘。
 
-当前接了四个阶段。每加一个算法模块，就在这条链上再接一段：
+九个阶段。每加一个算法模块，就在这条链上再接一段：
 
-    [config] → [forecast] → [wacc] → [valuation] → [落盘]
+    [config] → [forecast] → [validate] → [wacc] → [valuation]
+             → [sensitivity] → [reverse] → [comps] → [football_field]
+             → [落盘]
 
 运行：
     cd ~/Desktop/FinAI
     python3 -m pipeline.run
 
-产物：
-    runs/<run_id>/projections.json   三表预测
-    runs/<run_id>/valuation.json     DCF 估值结果与 WACC 的完整构成
-    logs/<run_id>/trace.jsonl           逐步执行轨迹
-    logs/<run_id>/run_manifest.json     本次运行总清单
+产物（编号由输出层固定，见 algorithm/output/README.md）：
+    runs/<run_id>/01_projections.json      三表预测
+    runs/<run_id>/02_validation_report.json 勾稽校验（逐年）
+    runs/<run_id>/03_valuation.json        DCF 估值与诊断
+    runs/<run_id>/04_tornado.csv           单因素敏感性排序
+    runs/<run_id>/05_sensitivity.csv       双因素网格
+    runs/<run_id>/06_reverse_dcf.json      反解出的市场隐含假设
+    runs/<run_id>/07_comps.csv             可比公司倍数表
+    runs/<run_id>/08_comps_implied.csv     隐含每股价值
+    runs/<run_id>/09_football_field.json   各方法估值区间
+    runs/<run_id>/10_run_manifest.json     本次运行的清单与哈希
+    runs/<run_id>/charts/*.png             11~16 号图表
+    logs/<run_id>/trace.jsonl              逐步执行轨迹
+    logs/<run_id>/run_manifest.json        本次运行总清单
 
 其中 run_id 是运行时刻的时间戳，例如 20260928T143012，
 这样今天跑的结果不会覆盖昨天结果。
@@ -28,13 +40,39 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from algorithm.finai.forecast import BalanceSheetState, ForecastDrivers, build_forecast
-from algorithm.finai.forecast import to_snapshots
-from algorithm.finai.dcf import value_dcf
+from algorithm.finai.comps import (
+    CompanyMetrics,
+    CompsResult,
+    FootballField,
+    comps_bands,
+    comps_valuation,
+    dcf_band,
+    football_field,
+)
+from algorithm.finai.dcf import DCFResult, value_dcf
+from algorithm.finai.forecast import (
+    BalanceSheetState,
+    ForecastDrivers,
+    ThreeStatementForecast,
+    build_forecast,
+    to_snapshots,
+)
+from algorithm.finai.reverse_dcf import (
+    DEFAULT_BOUNDS,
+    ReverseResult,
+    reverse_solve_many,
+)
+from algorithm.finai.sensitivity import (
+    GridResult,
+    TornadoRow,
+    Variable,
+    tornado,
+    two_way_grid,
+)
 from algorithm.finai.types import ForecastAssumptions, MarketData, WaccInputs
-from algorithm.finai.validate import run_checks
+from algorithm.finai.validate import ValidationReport, run_checks
 from algorithm.finai.wacc import (
     check_wacc_sanity,
     wacc_from_market,
@@ -42,14 +80,23 @@ from algorithm.finai.wacc import (
 )
 from algorithm.output import RunOutputs, export_run, summarize
 
-from .adapters import company_to_market_data, drivers_to_assumptions
+from .adapters import (
+    company_to_market_data,
+    drivers_to_assumptions,
+    fill_peers_from_financials,
+    fill_target_from_forecast,
+)
 from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MARKET_PATH,
+    DEFAULT_PEER_PATH,
     ConfigError,
+    SensitivityParams,
     WaccParams,
     load_case,
     load_market_snapshot,
+    load_peer_financials,
+    load_sensitivity_params,
     load_terminal_params,
     load_wacc_params,
 )
@@ -60,6 +107,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = REPO_ROOT / "runs"
 CONFIG_PATH = DEFAULT_CONFIG_PATH
 MARKET_PATH = DEFAULT_MARKET_PATH
+PEER_PATH = DEFAULT_PEER_PATH
 
 
 def new_run_id() -> str:
@@ -79,7 +127,7 @@ def stage_forecast(
     opening: BalanceSheetState,
     source: str,
     trace: RunTrace,
-):
+) -> ThreeStatementForecast:
     """阶段：三表联动预测。
 
     每个阶段都是一个「薄封装」：只做一件事，把算法模块的函数接进来。
@@ -101,7 +149,7 @@ def stage_forecast(
     return result
 
 
-def validation_totals(reports) -> dict[str, int]:
+def validation_totals(reports: Sequence[ValidationReport]) -> dict[str, int]:
     """把各年的校验结论汇总成四个计数。
 
     四种结论的含义不同，不能混为一谈：
@@ -117,7 +165,9 @@ def validation_totals(reports) -> dict[str, int]:
     return totals
 
 
-def stage_validate(forecast, trace: RunTrace) -> list:
+def stage_validate(
+    forecast: ThreeStatementForecast, trace: RunTrace
+) -> list[ValidationReport]:
     """阶段：勾稽校验。把算出来的三张表反过来验一遍。
 
     校验的是「报表内部自不自洽」——资产 = 负债 + 权益、现金滚动、
@@ -208,7 +258,7 @@ def stage_valuation(
     wacc: float,
     base_year: int,
     trace: RunTrace,
-):
+) -> DCFResult:
     """阶段：DCF 估值。
 
     base_year 要单独传进来：估值路径的假设集（ForecastAssumptions）里
@@ -230,6 +280,237 @@ def stage_valuation(
         },
     )
     return result
+
+
+def sensitivity_variables(
+    assumptions: ForecastAssumptions, wacc: float, params: SensitivityParams
+) -> list[Variable]:
+    """构造龙卷风图要考察的参数列表。
+
+    每个参数的基准值都取自当前生效的假设，浮动幅度来自 [sensitivity]。
+    两者分开：基准值只有一个来源（[drivers] / [wacc] / [terminal]），
+    幅度是另一个判断，写在配置里以便报告引用。
+
+    ⚠️ 两个逐年字段（收入增速、EBIT 利润率）的基准取第一年的值，而且
+    改这两个参数时，apply_variable 是**把整条路径拉平成一个值**再算，
+    不是只改第一年。这是估值引擎的广播语义，报告里要写明这一点，
+    否则「收入增速 ±3pp」这句话会产生歧义。
+    """
+    return [
+        Variable.absolute("WACC", "wacc", base=wacc, delta=params.wacc_delta),
+        Variable.absolute(
+            "永续增长率",
+            "terminal_growth",
+            base=assumptions.terminal_growth,
+            delta=params.terminal_growth_delta,
+        ),
+        Variable.absolute(
+            "收入增速",
+            "revenue_growth",
+            base=assumptions.revenue_growth[0],
+            delta=params.revenue_growth_delta,
+        ),
+        Variable.absolute(
+            "EBIT 利润率",
+            "ebit_margin",
+            base=assumptions.ebit_margin[0],
+            delta=params.ebit_margin_delta,
+        ),
+        Variable.absolute(
+            "税率",
+            "tax_rate",
+            base=assumptions.tax_rate,
+            delta=params.tax_rate_delta,
+        ),
+    ]
+
+
+def stage_sensitivity(
+    assumptions: ForecastAssumptions,
+    market: MarketData,
+    wacc: float,
+    params: SensitivityParams,
+    trace: RunTrace,
+) -> tuple[list[TornadoRow], GridResult]:
+    """阶段：敏感性分析。龙卷风图 + 双因素网格。
+
+    网格固定选「永续增长率 × WACC」，因为这两个参数共同决定终值那部分价值，
+    是「这个估值里有多少是赌最后一年」这个问题的标准问法。
+    想换成「收入增速 × EBIT 利润率」（回答「价值在增长还是在经营杠杆」）
+    只需要改下面两行。
+    """
+    started = time.perf_counter()
+
+    variables = sensitivity_variables(assumptions, wacc, params)
+    rows = tornado(assumptions, market, wacc, variables)
+
+    row_variable = Variable.absolute(
+        "永续增长率",
+        "terminal_growth",
+        base=assumptions.terminal_growth,
+        delta=params.terminal_growth_delta,
+    )
+    col_variable = Variable.absolute(
+        "WACC", "wacc", base=wacc, delta=params.wacc_delta
+    )
+    grid = two_way_grid(
+        assumptions, market, wacc, row_variable, col_variable, points=params.grid_points
+    )
+
+    low, high = grid.value_range
+    trace.record(
+        step="sensitivity",
+        tool="algorithm.finai.sensitivity.tornado + two_way_grid",
+        duration_s=time.perf_counter() - started,
+        extra={
+            "most_sensitive": rows[0].name if rows else None,
+            "swings": {row.name: row.swing for row in rows},
+            "grid": f"{grid.row_name} × {grid.col_name}",
+            "grid_shape": [len(grid.row_values), len(grid.col_values)],
+            "grid_range": [low, high],
+        },
+    )
+    return rows, grid
+
+
+def reverse_variables(
+    assumptions: ForecastAssumptions, wacc: float
+) -> list[Variable]:
+    """构造要反解的四个参数。
+
+    搜索区间直接用算法模块给的 DEFAULT_BOUNDS，不另设一套 ——
+    反解区间如果和模块默认值不一致，同一个问题会有两个答案。
+    """
+    specs = [
+        ("永续增长率", "terminal_growth", assumptions.terminal_growth),
+        ("WACC", "wacc", wacc),
+        ("收入增速", "revenue_growth", assumptions.revenue_growth[0]),
+        ("EBIT 利润率", "ebit_margin", assumptions.ebit_margin[0]),
+    ]
+    return [
+        Variable.bounds(name, field, *DEFAULT_BOUNDS[field], base=base)
+        for name, field, base in specs
+    ]
+
+
+def stage_reverse(
+    assumptions: ForecastAssumptions,
+    market: MarketData,
+    wacc: float,
+    trace: RunTrace,
+) -> tuple[list[ReverseResult], list[str]]:
+    """阶段：反向求解。反解「要让每股价值等于现价，各参数得是多少」。
+
+    单个参数解不出来不中断整个流水线：目标价可能落在任何合理区间之外
+    （比如股价高到连 50% 的年增速都撑不住）。这时记一条提示、跳过这个
+    参数，其余三个照常给结果。整条流水线因为一个参数无解就全废，
+    比少一个参数糟糕得多。
+    """
+    started = time.perf_counter()
+    results: list[ReverseResult] = []
+    notes: list[str] = []
+
+    for variable in reverse_variables(assumptions, wacc):
+        try:
+            solved = reverse_solve_many(
+                assumptions, market, wacc, [variable]
+            )
+        except ValueError as err:
+            notes.append(f"{variable.name} 无法反解：{err}")
+            continue
+        results.extend(solved)
+
+    trace.record(
+        step="reverse_dcf",
+        tool="algorithm.finai.reverse_dcf.reverse_solve_many",
+        duration_s=time.perf_counter() - started,
+        extra={
+            "solved": {
+                item.field: {
+                    "implied": item.implied_value,
+                    "base": item.base_value,
+                    "direction": item.direction,
+                }
+                for item in results
+            },
+            "skipped": notes,
+        },
+    )
+    return results, notes
+
+
+def stage_comps(
+    target: CompanyMetrics,
+    peers: Sequence[CompanyMetrics],
+    trace: RunTrace,
+) -> CompsResult:
+    """阶段：相对估值。
+
+    传进来的 target 与 peers 必须是「财务指标已经填好」的对象：
+    目标公司的利润指标来自三表预测（前瞻口径），可比公司来自 peers.csv。
+    这一步本身不再补数据，只负责算倍数 —— 补数据是适配层的活。
+    """
+    started = time.perf_counter()
+    result = comps_valuation(target, peers)
+
+    usable = {name: stat.median for name, stat in result.stats.items() if stat.count}
+    central = result.central_value if result.medians else None
+    trace.record(
+        step="comps",
+        tool="algorithm.finai.comps.comps_valuation",
+        duration_s=time.perf_counter() - started,
+        extra={
+            "peers": [peer.code for peer in result.peers],
+            "median_multiples": usable,
+            "central_value": central,
+            "implied_return": result.implied_return if central is not None else None,
+            "warnings": result.warnings,
+        },
+    )
+    return result
+
+
+def stage_football_field(
+    dcf: DCFResult,
+    comps: CompsResult,
+    grid: GridResult,
+    price: float,
+    trace: RunTrace,
+) -> FootballField:
+    """阶段：足球场图。把各方法的估值区间画在同一张图上。
+
+    DCF 那条横条不是单点，而是取自敏感性网格的上下界 ——
+    否则一条线跟另一个点比大小，看不出「区间有没有重叠」这件事。
+
+    重叠检查只做「DCF 对各个可比倍数」。可比倍数之间不互相检查：
+    它们本来就是同一类方法，彼此矛盾是常态，不是发现。
+    """
+    started = time.perf_counter()
+
+    low, high = grid.value_range
+    peer_bands = comps_bands(comps)
+    bands = [dcf_band(dcf, low=low, high=high)]
+    bands.extend(peer_bands)
+
+    field = football_field(
+        bands,
+        price=price,
+        check_pairs=[("DCF", band.name) for band in peer_bands],
+    )
+    trace.record(
+        step="football_field",
+        tool="algorithm.finai.comps.football_field",
+        duration_s=time.perf_counter() - started,
+        extra={
+            "bands": {
+                band.name: [band.low, band.central, band.high]
+                for band in field.bands
+            },
+            "overall": [field.overall_low, field.overall_high],
+            "warnings": field.warnings,
+        },
+    )
+    return field
 
 
 def _record_failure(trace: RunTrace, error: Exception) -> Path:
@@ -259,12 +540,14 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     company, drivers, opening = load_case()
     terminal = load_terminal_params()
     params = load_wacc_params()
-    target, peers = load_market_snapshot()  # peers 留给后面的相对估值阶段
+    sensitivity_params = load_sensitivity_params()
+    target, peers = load_market_snapshot()
+    peer_financials = load_peer_financials()
     trace.record(
         step="load_config",
         tool="pipeline.config",
         duration_s=time.perf_counter() - started,
-        inputs=[CONFIG_PATH, MARKET_PATH],
+        inputs=[CONFIG_PATH, MARKET_PATH, PEER_PATH],
     )
 
     # 适配：把三表路径的假设翻译成估值路径的假设。
@@ -287,6 +570,29 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         assumptions, market, wacc_summary["value"], drivers.base_year, trace
     )
 
+    # 阶段六：敏感性分析
+    tornado_rows, grid = stage_sensitivity(
+        assumptions, market, wacc_summary["value"], sensitivity_params, trace
+    )
+
+    # 阶段七：反向求解
+    reverse_results, reverse_notes = stage_reverse(
+        assumptions, market, wacc_summary["value"], trace
+    )
+
+    # 阶段八：相对估值
+    #
+    # 先把财务指标填进去 —— 这一步不能省：
+    #   目标公司  利润类指标取自三表预测第一年（前瞻口径），净资产取基期
+    #   可比公司  取自 peers.csv（最近一个完整年度）
+    # 市场快照里只有股价股数债务，没有这些，PE / PB / EV-EBITDA 都算不出来。
+    filled_target = fill_target_from_forecast(target, forecast)
+    filled_peers, peer_notes = fill_peers_from_financials(peers, peer_financials)
+    comps_result = stage_comps(filled_target, filled_peers, trace)
+
+    # 阶段九：足球场图
+    field = stage_football_field(result, comps_result, grid, market.price, trace)
+
     # 落盘：交给算法侧输出层的 export_run。
     #
     # 只传目前拿得到的结果 —— RunOutputs 里为 None 的字段不会生成文件。
@@ -298,7 +604,16 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 这批数字是哪版代码、读的哪份配置算出来的。
     started = time.perf_counter()
     artifacts = export_run(
-        RunOutputs(forecast=forecast, validation=reports, dcf=result),
+        RunOutputs(
+            forecast=forecast,
+            validation=reports,
+            dcf=result,
+            tornado=tornado_rows,
+            grid=grid,
+            reverse=reverse_results,
+            comps=comps_result,
+            football_field=field,
+        ),
         root=OUTPUT_ROOT,
         run_id=run_id,
         meta={
@@ -322,6 +637,12 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
                 "assumptions": asdict(drivers),
                 "opening_balance": asdict(opening),
                 "wacc": wacc_summary,
+                "sensitivity": asdict(sensitivity_params),
+                # 数据缺口与反解失败都记进清单 —— 缺什么比有什么更需要在报告里说明
+                "notes": {
+                    "peers": peer_notes,
+                    "reverse_skipped": reverse_notes,
+                },
             },
         },
     )
@@ -390,6 +711,62 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     print("\nFCFF 逐年：" + "   ".join(
         f"{year.year} {year.fcff:,.2f}" for year in forecast.years
     ))
+
+    print("\n敏感性分析（龙卷风图按影响幅度排序，取前三）")
+    for row in tornado_rows[:3]:
+        print(
+            f"    {row.name:<12}幅度 {row.swing:>7.2f} 元   "
+            f"（{row.low:>7.4f} → {row.per_share_at_low:>6.2f}，"
+            f"{row.high:>7.4f} → {row.per_share_at_high:>6.2f}）"
+        )
+    grid_low, grid_high = grid.value_range
+    print(
+        f"    双因素网格 {grid.row_name} × {grid.col_name}："
+        f"估值区间 [{grid_low:,.2f}, {grid_high:,.2f}]"
+    )
+
+    print("\n反向 DCF（要让每股价值等于现价，参数得是多少）")
+    for item in reverse_results:
+        print(
+            f"    {item.name:<12}基准 {item.base_value:>8.4f}   "
+            f"市场隐含 {item.implied_value:>8.4f}   方向 {item.direction}"
+        )
+    for note in reverse_notes:
+        print(f"    ⚠️ {note}")
+
+    print("\n相对估值（可比公司倍数）")
+    for stat in comps_result.stats.values():
+        if stat.count == 0:
+            print(f"    {stat.label:<12}没有可用样本，跳过")
+            continue
+        print(
+            f"    {stat.label:<12}中位数 {stat.median:>7.2f}   "
+            f"（{stat.count} 家，四分位 {stat.q1:.2f} ~ {stat.q3:.2f}）"
+        )
+    if comps_result.medians:
+        comps_low, comps_high = comps_result.value_range
+        print(
+            f"    隐含区间 [{comps_low:,.2f}, {comps_high:,.2f}]，"
+            f"中心值 {comps_result.central_value:,.2f}，"
+            f"隐含回报 {comps_result.implied_return:+.2%}"
+        )
+    for note in peer_notes:
+        print(f"    ⚠️ {note}")
+    for note in comps_result.warnings:
+        print(f"    ⚠️ {note}")
+
+    print("\n足球场图（各方法的估值区间）")
+    for band in field.bands:
+        print(
+            f"    {band.name:<12}[{band.low:>7.2f}, {band.high:>7.2f}]"
+            f"   中位 {band.central:>7.2f}"
+        )
+    print(
+        f"    {'总区间':<12}[{field.overall_low:>7.2f}, "
+        f"{field.overall_high:>7.2f}]   现价 {field.price:.2f}"
+    )
+    for note in field.warnings:
+        print(f"    ⚠️ {note}")
 
     # 产物列表由输出层的 summarize 打印（编号、文件名、字节数）
     print()
