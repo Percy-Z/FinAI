@@ -33,6 +33,7 @@ from typing import Any
 from algorithm.finai.forecast import BalanceSheetState, ForecastDrivers, build_forecast
 from algorithm.finai.forecast import to_snapshots
 from algorithm.finai.dcf import value_dcf
+from algorithm.finai.sensitivity import attribute, tornado, two_way_grid
 from algorithm.finai.types import ForecastAssumptions, MarketData, WaccInputs
 from algorithm.finai.validate import run_checks
 from algorithm.finai.wacc import (
@@ -42,14 +43,20 @@ from algorithm.finai.wacc import (
 )
 from algorithm.output import RunOutputs, export_run, summarize
 
-from .adapters import company_to_market_data, drivers_to_assumptions
+from .adapters import (
+    company_to_market_data,
+    drivers_to_assumptions,
+    to_sensitivity_variables,
+)
 from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MARKET_PATH,
     ConfigError,
+    SensitivityConfig,
     WaccParams,
     load_case,
     load_market_snapshot,
+    load_sensitivity,
     load_terminal_params,
     load_wacc_params,
 )
@@ -232,6 +239,55 @@ def stage_valuation(
     return result
 
 
+def stage_sensitivity(
+    assumptions: ForecastAssumptions,
+    market: MarketData,
+    wacc: float,
+    sensitivity_config: SensitivityConfig,
+    trace: RunTrace,
+):
+    """阶段：敏感性分析。回答「哪个假设最要紧」。
+
+    三块结果：
+        rows    单因素：每个变量在上下界之间变动时，估值的变化范围（按幅度降序）
+        grid    双因素：两个关键变量组合下的估值矩阵
+        shares  区间归因：各变量各贡献了区间宽度的百分之多少
+
+    变量表来自配置（[sensitivity]），不写死在代码里 ——
+    否则「敏感性分析」就变成「演示几个我挑好的参数」。
+    """
+    started = time.perf_counter()
+    variables = to_sensitivity_variables(sensitivity_config, assumptions, wacc)
+
+    rows = tornado(assumptions, market, wacc, variables.values())
+    shares = attribute(rows)
+
+    grid = None
+    if sensitivity_config.grid_row and sensitivity_config.grid_col:
+        grid = two_way_grid(
+            assumptions,
+            market,
+            wacc,
+            variables[sensitivity_config.grid_row],
+            variables[sensitivity_config.grid_col],
+            points=sensitivity_config.grid_points,
+        )
+
+    trace.record(
+        step="sensitivity",
+        tool="algorithm.finai.sensitivity.tornado",
+        duration_s=time.perf_counter() - started,
+        extra={
+            "variables": len(rows),
+            "most_sensitive": rows[0].name if rows else None,
+            "attribution": [
+                {"name": row.name, "share": round(row.share, 4)} for row in shares
+            ],
+        },
+    )
+    return rows, grid, shares
+
+
 def _record_failure(trace: RunTrace, error: Exception) -> Path:
     """失败的运行也要留证据：记一笔失败，再写清单。
 
@@ -259,6 +315,7 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     company, drivers, opening = load_case()
     terminal = load_terminal_params()
     params = load_wacc_params()
+    sensitivity_config = load_sensitivity()
     target, peers = load_market_snapshot()  # peers 留给后面的相对估值阶段
     trace.record(
         step="load_config",
@@ -287,6 +344,11 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         assumptions, market, wacc_summary["value"], drivers.base_year, trace
     )
 
+    # 阶段六：敏感性分析
+    sensitivity_rows, sensitivity_grid, sensitivity_shares = stage_sensitivity(
+        assumptions, market, wacc_summary["value"], sensitivity_config, trace
+    )
+
     # 落盘：交给算法侧输出层的 export_run。
     #
     # 只传目前拿得到的结果 —— RunOutputs 里为 None 的字段不会生成文件。
@@ -298,7 +360,13 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 这批数字是哪版代码、读的哪份配置算出来的。
     started = time.perf_counter()
     artifacts = export_run(
-        RunOutputs(forecast=forecast, validation=reports, dcf=result),
+        RunOutputs(
+            forecast=forecast,
+            validation=reports,
+            dcf=result,
+            tornado=sensitivity_rows,
+            grid=sensitivity_grid,
+        ),
         root=OUTPUT_ROOT,
         run_id=run_id,
         meta={
@@ -322,6 +390,13 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
                 "assumptions": asdict(drivers),
                 "opening_balance": asdict(opening),
                 "wacc": wacc_summary,
+                # 敏感性分析的区间归因：各变量贡献了区间宽度的百分之多少。
+                # 报告里要引用它 —— 比如「WACC 贡献了 42% 的区间宽度，
+                # 所以必须解释为什么这个折现率是可靠的」。
+                "attribution": [
+                    {"name": row.name, "share": round(row.share, 6)}
+                    for row in sensitivity_shares
+                ],
             },
         },
     )
@@ -386,6 +461,32 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     print(f"    隐含退出倍数  {result.implied_exit_multiple:>16.2f}x")
     for note in result.diagnostics:
         print(f"    ⚠️ {note}")
+
+    print("\n敏感性分析（单因素，按波动幅度降序）")
+    print(
+        f"    {'变量':<12}{'下界':>9}{'基准':>9}{'上界':>9}"
+        f"{'估值低':>9}{'估值高':>9}{'幅度':>8}"
+    )
+    for row in sensitivity_rows:
+        print(
+            f"    {row.name:<12}{row.low:>9.4f}{row.base:>9.4f}{row.high:>9.4f}"
+            f"{row.per_share_at_low:>9.2f}{row.per_share_at_high:>9.2f}"
+            f"{row.swing:>8.2f}"
+        )
+    print(f"    基准每股价值 {sensitivity_rows[0].per_share_base:,.2f} 元")
+    print(
+        "    区间归因： "
+        + "   ".join(f"{row.name} {row.share:.1%}" for row in sensitivity_shares)
+    )
+
+    if sensitivity_grid is not None:
+        grid_low, grid_high = sensitivity_grid.value_range
+        print(
+            f"\n    双因素网格：{sensitivity_grid.row_name} × "
+            f"{sensitivity_grid.col_name}（{sensitivity_config.grid_points}"
+            f"×{sensitivity_config.grid_points} 个组合）"
+        )
+        print(f"    估值区间 [{grid_low:,.2f}, {grid_high:,.2f}] 元")
 
     print("\nFCFF 逐年：" + "   ".join(
         f"{year.year} {year.fcff:,.2f}" for year in forecast.years

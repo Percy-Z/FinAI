@@ -135,6 +135,61 @@ mid_year        = false
 
 
 # ---------------------------------------------------------------------------
+# 二之四、敏感性分析：考察哪些假设、各浮动多少
+#
+# 为什么变量表要放在这里而不是写死在代码里：
+#   写死在代码里，「敏感性分析」就变成了「演示几个我挑好的参数」。
+#   放在配置里，换了公司、换了假设，变量表跟着一起改。
+#
+# 每个变量只写「名字 + 字段 + 浮动量」，**基准值不用写** —— 它有唯一来源：
+#     field = "wacc"            基准 = 这次运行算出来的 WACC
+#     逐年字段（如收入增速）      基准 = 各年的平均值
+#     其余标量字段               基准 = 该字段的值
+# 这样就不会出现「配置里写 20%、假设里算出来 25%」这种自相矛盾。
+#
+# 字段名必须是估值模块 ForecastAssumptions 上的字段，或者是 "wacc"。
+# 可用的字段：revenue_base, revenue_growth, ebit_margin, tax_rate,
+#             da_pct_revenue, capex_pct_revenue, nwc_pct_revenue,
+#             terminal_method, terminal_growth, exit_multiple, mid_year
+#
+# 注意「逐年字段」的语义：浮到某个值时，会把**每一年**都设成那个值，
+# 也就是问「如果未来每年增速都是 X，估值是多少」。
+#
+# grid_row / grid_col 是双因素网格用的两个变量，按上面的 name 引用。
+# ---------------------------------------------------------------------------
+
+[sensitivity]
+grid_row    = "永续增长率"    # 网格的纵轴
+grid_col    = "WACC"         # 网格的横轴
+grid_points = 5              # 每个轴取几个点
+
+[[sensitivity.variables]]
+name  = "EBIT 利润率"
+field = "ebit_margin"
+delta = 0.03                 # 上下各浮动 3 个百分点
+
+[[sensitivity.variables]]
+name  = "WACC"
+field = "wacc"
+delta = 0.01
+
+[[sensitivity.variables]]
+name  = "收入增速"
+field = "revenue_growth"
+delta = 0.03
+
+[[sensitivity.variables]]
+name  = "永续增长率"
+field = "terminal_growth"
+delta = 0.01
+
+[[sensitivity.variables]]
+name  = "资本开支占比"
+field = "capex_pct_revenue"
+delta = 0.02
+
+
+# ---------------------------------------------------------------------------
 # 三、基期资产负债表（对应 BalanceSheetState）
 #
 # 这是预测的起点。三个恒等式必须成立，否则 build_forecast 会直接报错：

@@ -156,6 +156,90 @@ class TerminalParams:
             )
 
 
+# 敏感性分析里可以调节的字段。
+# 白名单放在这里，是为了让「字段名拼错」在配置阶段就被挡住 ——
+# 否则要等到算法模块里 replace() 才发现，报错还看不出是配置写错了。
+#
+# 刻意不放进来的：
+#   terminal_method   字符串，不是数字
+#   mid_year          开关，只有真假两个取值，做敏感性没意义
+SENSITIVITY_FIELDS = frozenset(
+    {
+        "wacc",              # 不是假设字段，是算出来的折现率
+        "revenue_base",
+        "revenue_growth",
+        "ebit_margin",
+        "tax_rate",
+        "da_pct_revenue",
+        "capex_pct_revenue",
+        "nwc_pct_revenue",
+        "terminal_growth",
+        "exit_multiple",
+    }
+)
+
+
+@dataclass(frozen=True)
+class SensitivityVariable:
+    """敏感性分析里的一个待考察参数。
+
+    只写「名字 + 字段 + 浮动量」，**基准值不写** —— 基准有唯一来源，
+    由适配层推导（见 adapters.to_sensitivity_variables）：
+        wacc          → 这次运行算出来的 WACC
+        逐年字段       → 各年平均值
+        其余标量字段   → 该字段的值
+    配置里不再重复写基准，就不会出现「配置写 20%、假设算出来 25%」的矛盾。
+
+    浮动的上下界有两种给法，二选一：
+        delta          基准值上下各浮动 delta
+        low + high     直接给区间（此时基准取中点）
+    """
+
+    name: str
+    field: str
+    delta: float | None = None
+    low: float | None = None
+    high: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("name 不能为空")
+        if self.field not in SENSITIVITY_FIELDS:
+            raise ValueError(
+                f"field={self.field!r} 不是可调节的字段。"
+                f"可用的是：{sorted(SENSITIVITY_FIELDS)}"
+            )
+
+        has_delta = self.delta is not None
+        has_bounds = self.low is not None and self.high is not None
+        if has_delta and has_bounds:
+            raise ValueError("delta 与 low/high 只能给一种，不要都给")
+        if not has_delta and not has_bounds:
+            raise ValueError("必须给 delta，或者同时给 low 和 high")
+        if has_delta and self.delta <= 0:
+            raise ValueError(f"delta 必须为正数，收到 {self.delta}")
+        if has_bounds and self.low >= self.high:
+            raise ValueError(f"low 必须小于 high，收到 low={self.low}, high={self.high}")
+
+
+@dataclass(frozen=True)
+class SensitivityConfig:
+    """敏感性分析的配置：考察哪些变量，双因素网格用哪两个。"""
+
+    variables: tuple[SensitivityVariable, ...] = ()
+    grid_row: str = ""
+    grid_col: str = ""
+    grid_points: int = 5
+
+    def __post_init__(self) -> None:
+        if not self.variables:
+            raise ValueError("变量表不能为空，至少要有一个待考察的参数")
+        if self.grid_points < 2:
+            raise ValueError(f"grid_points 至少为 2，收到 {self.grid_points}")
+        if bool(self.grid_row) != bool(self.grid_col):
+            raise ValueError("grid_row 与 grid_col 要么都给，要么都不给")
+
+
 def read_toml(path: str | Path) -> dict[str, Any]:
     """读一个 TOML 文件，返回普通字典。
 
@@ -270,6 +354,55 @@ def load_terminal_params(path: str | Path = DEFAULT_CONFIG_PATH) -> TerminalPara
     return _build(
         TerminalParams, _section(cfg, "terminal", path), path, "terminal"
     )
+
+
+def load_sensitivity(path: str | Path = DEFAULT_CONFIG_PATH) -> SensitivityConfig:
+    """读 [sensitivity] 小节 —— 敏感性分析考察哪些假设。
+
+    这一节用了 TOML 的「数组表」（[[sensitivity.variables]]），读出来是一个
+    列表，所以要逐个构造成 SensitivityVariable，不能像别的节那样整个字典展开。
+    """
+    cfg = read_toml(path)
+    section = _section(cfg, "sensitivity", path)
+
+    raw = section.get("variables")
+    if not raw:
+        raise ConfigError(
+            f"{path} 的 [sensitivity] 里没有任何变量。"
+            "至少要写一个 [[sensitivity.variables]]，例如：\n"
+            '    [[sensitivity.variables]]\n'
+            '    name  = "EBIT 利润率"\n'
+            '    field = "ebit_margin"\n'
+            "    delta = 0.03"
+        )
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"{path} 的 variables 写法不对 —— 应该用数组表 [[sensitivity.variables]]"
+        )
+
+    variables = tuple(
+        _build(
+            SensitivityVariable,
+            item,
+            path,
+            f"sensitivity.variables[{index}]",
+        )
+        for index, item in enumerate(raw, start=1)
+    )
+
+    payload = {key: value for key, value in section.items() if key != "variables"}
+    payload["variables"] = variables
+    config = _build(SensitivityConfig, payload, path, "sensitivity")
+
+    # 网格引用的两个变量必须真的在变量表里 —— 名字打错了要立刻说清楚
+    names = {variable.name for variable in config.variables}
+    for role, name in (("grid_row", config.grid_row), ("grid_col", config.grid_col)):
+        if name and name not in names:
+            raise ConfigError(
+                f"{path} 的 {role} = {name!r} 不在变量表里。"
+                f"变量表里的名字是：{sorted(names)}"
+            )
+    return config
 
 
 def read_csv(path: str | Path) -> list[dict[str, str]]:

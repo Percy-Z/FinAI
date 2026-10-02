@@ -19,9 +19,10 @@ from dataclasses import replace
 
 from algorithm.finai.comps import CompanyMetrics
 from algorithm.finai.forecast import ForecastDrivers, ThreeStatementForecast
+from algorithm.finai.sensitivity import Variable
 from algorithm.finai.types import ForecastAssumptions, MarketData
 
-from .config import ConfigError, TerminalParams
+from .config import ConfigError, SensitivityConfig, TerminalParams
 
 
 def _single_ratio(series, field: str) -> float:
@@ -42,6 +43,91 @@ def _single_ratio(series, field: str) -> float:
             "② 或者暂时不做估值（三表预测和勾稽校验不受影响）。"
         )
     return values.pop()
+
+
+def _base_value(field: str, assumptions: ForecastAssumptions, wacc: float) -> float:
+    """取某个字段的基准值。
+
+    规则（配置里不重复写基准，就是为了这一处是唯一来源）：
+        wacc          → 这次运行算出来的 WACC
+        逐年字段       → 各年平均值
+        其余标量字段   → 该字段的值
+    """
+    if field == "wacc":
+        return float(wacc)
+
+    value = getattr(assumptions, field, None)
+    if isinstance(value, (tuple, list)):
+        numbers = [float(item) for item in value]
+        if not numbers:
+            raise ConfigError(f"[sensitivity] 里的字段 {field!r} 是空的，取不出基准值")
+        # 逐年字段取平均：算法模块对这类字段的语义是「把每一年都设成同一个值」，
+        # 所以基准应该是当前假设的平均水平。
+        return sum(numbers) / len(numbers)
+    if isinstance(value, bool):
+        raise ConfigError(
+            f"[sensitivity] 里的字段 {field!r} 是开关，只有真假两个取值，"
+            "不适合做敏感性分析"
+        )
+    if not isinstance(value, (int, float)):
+        raise ConfigError(
+            f"[sensitivity] 里的字段 {field!r} 不是数字，做不了敏感性分析"
+        )
+    return float(value)
+
+
+def to_sensitivity_variables(
+    config: SensitivityConfig,
+    assumptions: ForecastAssumptions,
+    wacc: float,
+) -> dict[str, Variable]:
+    """把配置里的变量表变成算法模块认识的 Variable 对象。
+
+    返回 {变量名: Variable} —— 双因素网格要按名字取其中两个。
+
+    三处检查都在这里做，因为它们都要拿「当前的假设」来判断：
+        1. 终值方法要对得上：用永续增长法就不能调 exit_multiple，反之亦然
+           （算法模块也会拦，但报错看不出是配置的问题）
+        2. 显式给区间时，区间必须包含当前的基准值 —— 否则看不出「相对当前假设」
+           的变化，敏感性分析就白做了
+    """
+    result: dict[str, Variable] = {}
+
+    for item in config.variables:
+        # 检查 1：字段与终值方法是否匹配
+        if item.field == "terminal_growth" and assumptions.terminal_method != "perpetuity":
+            raise ConfigError(
+                f"[sensitivity] 里有 {item.name}（terminal_growth），"
+                f"但 [terminal].terminal_method = {assumptions.terminal_method!r}。\n"
+                "    只有用永续增长法时，调终值增长率才会影响结果。"
+            )
+        if item.field == "exit_multiple" and assumptions.terminal_method != "exit_multiple":
+            raise ConfigError(
+                f"[sensitivity] 里有 {item.name}（exit_multiple），"
+                f"但 [terminal].terminal_method = {assumptions.terminal_method!r}。\n"
+                "    只有用退出倍数法时，调退出倍数才会影响结果。"
+            )
+
+        base = _base_value(item.field, assumptions, wacc)
+
+        if item.delta is not None:
+            result[item.name] = Variable.absolute(
+                item.name, item.field, base=base, delta=item.delta
+            )
+            continue
+
+        # 检查 2：显式区间必须覆盖当前基准值
+        if not item.low <= base <= item.high:
+            raise ConfigError(
+                f"[sensitivity] 里 {item.name} 的区间 "
+                f"[{item.low}, {item.high}] 不包含当前的基准值 {base:.6f}。\n"
+                "    敏感性分析要覆盖基准情形，否则看不出相对当前假设的变化。"
+            )
+        result[item.name] = Variable.bounds(
+            item.name, item.field, item.low, item.high, base=base
+        )
+
+    return result
 
 
 def drivers_to_assumptions(

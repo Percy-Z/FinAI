@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import sys
@@ -33,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from algorithm.finai.dcf import project, value_dcf  # noqa: E402
 from algorithm.finai.forecast import build_forecast, to_snapshots  # noqa: E402
+from algorithm.finai.sensitivity import tornado  # noqa: E402
 from algorithm.finai.types import ForecastAssumptions  # noqa: E402
 from algorithm.finai.validate import run_checks  # noqa: E402
 from algorithm.finai.wacc import weights_from_market, wacc_from_market  # noqa: E402
@@ -41,6 +43,7 @@ from pipeline.adapters import (  # noqa: E402
     company_to_market_data,
     drivers_to_assumptions,
     fill_target_from_forecast,
+    to_sensitivity_variables,
 )
 
 
@@ -283,6 +286,45 @@ class TestConfigRejectsBadToml(unittest.TestCase):
             config.load_case(Path("/tmp/绝对不存在的配置文件.toml"))
         self.assertIn("不存在", str(ctx.exception))
 
+    def test_敏感性变量字段名拼错要报错(self):
+        """字段白名单的意义：拼错在这里就挡住，不用等到算法模块报错。"""
+        broken = self.toml_text().replace(
+            'field = "ebit_margin"', 'field = "ebit_margins"'
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_sensitivity(self.write_temp_toml(broken))
+        message = str(ctx.exception)
+        self.assertIn("ebit_margins", message)
+        self.assertIn("不是可调节的字段", message)
+
+    def test_敏感性delta和区间不能同时给(self):
+        broken = self.toml_text().replace(
+            'field = "ebit_margin"\ndelta = 0.03',
+            'field = "ebit_margin"\ndelta = 0.03\nlow = 0.15\nhigh = 0.25',
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_sensitivity(self.write_temp_toml(broken))
+        self.assertIn("只能给一种", str(ctx.exception))
+
+    def test_敏感性网格引用的变量名不存在要报错(self):
+        broken = self.toml_text().replace(
+            'grid_row    = "永续增长率"', 'grid_row    = "这个变量不存在"'
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_sensitivity(self.write_temp_toml(broken))
+        message = str(ctx.exception)
+        self.assertIn("不在变量表里", message)
+        self.assertIn("这个变量不存在", message)
+
+    def test_敏感性没有变量要报错(self):
+        """只写了 [sensitivity] 却没有变量表 —— 报错要给出正确写法。"""
+        minimal = '[sensitivity]\ngrid_row = "a"\ngrid_col = "b"\n'
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load_sensitivity(self.write_temp_toml(minimal))
+        message = str(ctx.exception)
+        self.assertIn("没有任何变量", message)
+        self.assertIn("[[sensitivity.variables]]", message)  # 报错里带正确写法
+
 
 # ---------------------------------------------------------------------------
 # 三、两条预测路径必须一致（回归测试：防止漏减折旧率）
@@ -482,6 +524,60 @@ class TestAdapters(unittest.TestCase):
         self.assertIsNotNone(filled.eps)
         self.assertGreater(filled.eps, 0)
 
+    def test_敏感性变量的基准值自动推导(self):
+        """基准值不写在配置里，由适配层推导 —— 这是本阶段的核心设计。
+
+        规则：wacc 用算出来的；逐年字段取各年平均；其余标量字段取值。
+        """
+        sensitivity = config.load_sensitivity()
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        wacc = 0.0946  # 随便给一个，只要和推导出来的对得上
+        variables = to_sensitivity_variables(sensitivity, assumptions, wacc)
+
+        self.assertEqual(len(variables), len(sensitivity.variables))
+
+        # wacc 的基准来自传进来的值
+        self.assertAlmostEqual(variables["WACC"].base, wacc)
+        # 逐年字段取各年平均：(0.10+0.09+0.08+0.07+0.06)/5 = 0.08
+        self.assertAlmostEqual(variables["收入增速"].base, 0.08)
+        # 标量字段取该值
+        self.assertAlmostEqual(
+            variables["永续增长率"].base, assumptions.terminal_growth
+        )
+        # EBIT 利润率也是逐年字段，各年都是 0.20
+        self.assertAlmostEqual(variables["EBIT 利润率"].base, 0.20)
+
+        # 上下界 = 基准 ± delta
+        row = variables["EBIT 利润率"]
+        self.assertAlmostEqual(row.low, 0.20 - 0.03)
+        self.assertAlmostEqual(row.high, 0.20 + 0.03)
+
+    def test_终值方法与变量表不匹配要报错(self):
+        """用永续增长法时调退出倍数是没意义的，要在配置阶段就挡住。"""
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        # 当前是永续增长法，硬塞一个 exit_multiple 变量进去
+        bad = config.SensitivityConfig(
+            variables=(config.SensitivityVariable(
+                name="退出倍数", field="exit_multiple", delta=1.0
+            ),)
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            to_sensitivity_variables(bad, assumptions, 0.0946)
+        self.assertIn("exit_multiple", str(ctx.exception))
+        self.assertIn("退出倍数", str(ctx.exception))
+
+    def test_显式区间不覆盖基准值要报错(self):
+        """区间必须包含当前假设 —— 否则看不出相对当前假设的变化。"""
+        assumptions = drivers_to_assumptions(self.drivers, self.terminal)
+        bad = config.SensitivityConfig(
+            variables=(config.SensitivityVariable(
+                name="EBIT 利润率", field="ebit_margin", low=0.30, high=0.40
+            ),)
+        )
+        with self.assertRaises(config.ConfigError) as ctx:
+            to_sensitivity_variables(bad, assumptions, 0.0946)
+        self.assertIn("不包含当前的基准值", str(ctx.exception))
+
 
 # ---------------------------------------------------------------------------
 # 四、端到端：跑一整遍
@@ -613,6 +709,59 @@ class TestEndToEnd(unittest.TestCase):
             self.assertEqual(
                 [c["status"] for c in got["checks"]],
                 [c.status for c in want.checks],
+            )
+
+    def test_敏感性产物写出来了且结构对(self):
+        """两块产物：单因素（龙卷风）与双因素（网格）。"""
+        _, root = self.run_pipeline()
+        sensitivity_config = config.load_sensitivity()
+
+        # 单因素：一行一个变量
+        tornado_file = next((root / "runs").glob("*/04_tornado.csv"))
+        tornado_text = tornado_file.read_text(encoding="utf-8-sig")
+        tornado_rows = [line for line in tornado_text.splitlines() if line.strip()]
+        self.assertEqual(len(tornado_rows), 1 + len(sensitivity_config.variables))
+        self.assertIn("波动幅度", tornado_rows[0])
+
+        # 双因素：网格点数 × 网格点数
+        grid_file = next((root / "runs").glob("*/05_sensitivity.csv"))
+        grid_rows = [
+            line
+            for line in grid_file.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip()
+        ]
+        points = sensitivity_config.grid_points
+        self.assertEqual(len(grid_rows), 1 + points)  # 一行表头 + 每行一个纵轴取值
+
+    def test_敏感性结论与算法层一致(self):
+        """框架不改变任何数字 —— 与估值、勾稽校验同一个思路。"""
+        _, root = self.run_pipeline()
+        tornado_file = next((root / "runs").glob("*/04_tornado.csv"))
+        rows = list(csv.DictReader(tornado_file.read_text(encoding="utf-8-sig").splitlines()))
+
+        # 直接调算法模块算一遍，逐行对照波动幅度
+        _, drivers, _ = config.load_case()
+        assumptions = drivers_to_assumptions(drivers, config.load_terminal_params())
+        target, _ = config.load_market_snapshot()
+        market = company_to_market_data(target)
+        wacc = float(
+            json.loads(
+                next((root / "runs").glob("*/03_valuation.json")).read_text("utf-8")
+            )["wacc"]
+        )
+        variables = to_sensitivity_variables(
+            config.load_sensitivity(), assumptions, wacc
+        )
+        expected = tornado(assumptions, market, wacc, variables.values())
+
+        self.assertEqual(len(rows), len(expected))
+        for got, want in zip(rows, expected):
+            self.assertEqual(got["变量"], want.name)
+            # CSV 里的数值是四舍五入到 2 位小数的展示格式（输出层定的），
+            # 所以这里比到小数点后 2 位就够 —— 比的是「有没有算错」，不是精度。
+            self.assertAlmostEqual(
+                float(got["波动幅度"]), want.swing, places=2,
+                msg=f"{want.name} 的波动幅度与算法层不一致",
             )
 
     def test_同一编号跑两次会被明确拒绝(self):
@@ -797,7 +946,7 @@ class TestTracing(unittest.TestCase):
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 7)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -815,6 +964,7 @@ class TestTracing(unittest.TestCase):
                 "validate",
                 "wacc",
                 "valuation",
+                "sensitivity",
                 "write_outputs",
             ],
         )
