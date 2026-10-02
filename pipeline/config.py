@@ -39,16 +39,42 @@ import csv
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from algorithm.finai.comps import CompanyMetrics
-from algorithm.finai.forecast import BalanceSheetState, ForecastDrivers
+from algorithm.finai.forecast import (
+    BalanceSheetState,
+    ForecastDrivers,
+    as_series,
+)
 
 # 默认配置路径。用 __file__ 往上退两级定位仓库根目录，
 # 这样不管当前工作目录在哪都能找对文件。
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DEFAULT_CONFIG_PATH = DATA_DIR / "assumptions.toml"
 DEFAULT_MARKET_PATH = DATA_DIR / "market.csv"
+DEFAULT_PEER_PATH = DATA_DIR / "peers.csv"
+
+# 可比公司财务文件允许出现的列。多出别的列就报错，能挡住表头拼错。
+PEER_FIELDS = frozenset(
+    {
+        "code",
+        "revenue",
+        "net_profit_attributable",
+        "book_equity_attributable",
+        "ebit",
+        "ebitda",
+        "as_of",
+    }
+)
+
+PEER_FLOAT_FIELDS = (
+    "revenue",
+    "net_profit_attributable",
+    "book_equity_attributable",
+    "ebit",
+    "ebitda",
+)
 
 # 市场快照允许出现的列。多出别的列就报错 —— 这能挡住表头拼错。
 MARKET_FIELDS = frozenset(
@@ -241,6 +267,24 @@ class SensitivityConfig:
             raise ValueError("grid_row 与 grid_col 要么都给，要么都不给")
 
 
+
+@dataclass(frozen=True)
+class PeerFinancials:
+    """一家可比公司的年度财务数据。
+
+    性质和 [opening_balance] 一样属于「历史事实」，不是我们的假设。
+    现在手填，将来由抽取层从可比公司年报生成。
+    """
+
+    code: str
+    revenue: float
+    net_profit_attributable: float
+    book_equity_attributable: float
+    ebit: float
+    ebitda: float
+    as_of: str = ""
+
+
 def read_toml(path: str | Path) -> dict[str, Any]:
     """读一个 TOML 文件，返回普通字典。
 
@@ -406,6 +450,47 @@ def load_sensitivity(path: str | Path = DEFAULT_CONFIG_PATH) -> SensitivityConfi
     return config
 
 
+
+def load_peer_financials(
+    path: str | Path = DEFAULT_PEER_PATH,
+) -> dict[str, PeerFinancials]:
+    """读可比公司财务数据，返回 {代码: PeerFinancials}。
+
+    与 load_market_snapshot 分开读，因为两个文件的基准日不同：
+    市场快照是估值基准日的，这份是最近一个完整年度的。
+    合并时按 code 对齐，对不上的公司由适配层提示出来，不在这里报错。
+    """
+    rows = read_csv(path)
+    if not rows:
+        raise ConfigError(f"{path} 里没有任何数据行")
+
+    unknown = set(rows[0]) - PEER_FIELDS
+    if unknown:
+        raise ConfigError(
+            f"{path} 的表头里有无法识别的列：{sorted(unknown)}\n"
+            f"    可用的列是：{sorted(PEER_FIELDS)}"
+        )
+
+    result: dict[str, PeerFinancials] = {}
+    for row_number, row in enumerate(rows, start=2):
+        code = (row.get("code") or "").strip()
+        if not code:
+            raise ConfigError(f"{path} 第 {row_number} 行缺少 code")
+        if code in result:
+            raise ConfigError(
+                f"{path} 第 {row_number} 行的 code={code!r} 重复，"
+                "一家公司只能出现一次"
+            )
+        payload: dict[str, Any] = {
+            "code": code,
+            "as_of": (row.get("as_of") or "").strip(),
+        }
+        for field in PEER_FLOAT_FIELDS:
+            payload[field] = _to_float(row.get(field), field, row_number, path)
+        result[code] = _build(PeerFinancials, payload, path, f"第 {row_number} 行")
+    return result
+
+
 def read_csv(path: str | Path) -> list[dict[str, str]]:
     """读一个 CSV，返回「每行一个字典」的列表。第一行是表头。
 
@@ -515,15 +600,17 @@ def load_market_snapshot(
     return targets[0], peers
 
 
-def _describe_series(values: tuple[float, ...]) -> str:
+def _describe_series(values: Sequence[float] | float) -> str:
     """把逐年字段打印成人看得懂的样子。
 
-    单个数字会被 ForecastDrivers 广播成等长的元组，所以这里判断
-    「每年都一样」时只显示一个数，避免刷出一串重复值。
+    入参可能是标量（配置文件里写单个数字，会被广播到每一年），
+    所以先用 as_series 统一成序列再判断。
+    这里判断「每年都一样」时只显示一个数，避免刷出一串重复值。
     """
-    if len(set(values)) == 1:
-        return f"{values[0]:.4f}（每年相同）"
-    return "(" + ", ".join(f"{v:.4f}" for v in values) + ")"
+    series = as_series(values)
+    if len(set(series)) == 1:
+        return f"{series[0]:.4f}（每年相同）"
+    return "(" + ", ".join(f"{v:.4f}" for v in series) + ")"
 
 
 def _demo() -> None:
@@ -543,7 +630,9 @@ def _demo() -> None:
     print("\n[drivers] 经营假设")
     print(f"    收入基数 {drivers.revenue_base:,.0f} 元，基期 {drivers.base_year}，"
           f"预测 {drivers.years} 年")
-    print(f"    收入增速 {tuple(round(g, 4) for g in drivers.revenue_growth)}")
+    print(
+        f"    收入增速 {tuple(round(g, 4) for g in as_series(drivers.revenue_growth))}"
+    )
     print(f"    毛利率 {_describe_series(drivers.gross_margin)}，"
           f"费用率 {_describe_series(drivers.opex_pct_revenue)}")
     print(f"    折旧摊销率 {_describe_series(drivers.da_pct_revenue)}，"
@@ -576,8 +665,24 @@ def _demo() -> None:
     print(f"    利润类指标留空：净利润={target.net_profit_attributable}，"
           f"净资产={target.book_equity_attributable}")
 
+    peer_financials = load_peer_financials()
+    print("\n[peers.csv] 可比公司财务数据")
+    for code, data in peer_financials.items():
+        print(
+            f"    {code}  收入 {data.revenue:,.2f}  "
+            f"归母净利润 {data.net_profit_attributable:,.2f}  "
+            f"归母净资产 {data.book_equity_attributable:,.2f}  "
+            f"EBITDA {data.ebitda:,.2f}  口径 {data.as_of}"
+        )
+    # 对不上的公司要在这里就发现，而不是等跑到相对估值阶段才发现倍数一片空白
+    missing = [peer.code for peer in peers if peer.code not in peer_financials]
+    if missing:
+        print(f"    ⚠️ 以下可比公司在 peers.csv 里没有财务数据，倍数会算不出来：{missing}")
+
     # 数组长度与预测期年数必须一致，这里顺带验一下
-    assert len(drivers.revenue_growth) == drivers.years, "收入增速的个数与 years 不一致"
+    assert len(as_series(drivers.revenue_growth)) == drivers.years, (
+        "收入增速的个数与 years 不一致"
+    )
     assert abs(opening.balance_gap) < 1e-6, "基期资产负债表不平"
     print("\n自检通过。")
 

@@ -54,6 +54,22 @@ def _as_tuple(value: Sequence[float] | float, years: int, name: str) -> tuple[fl
     return values
 
 
+def as_series(value: Sequence[float] | float) -> tuple[float, ...]:
+    """把驱动字段读成序列。
+
+    为什么需要这个函数：ForecastDrivers 的序列字段允许两种入参形状 ——
+    标量（会被广播到每一年）或序列。__post_init__ 在运行时已经把两者
+    统一成元组，但**类型标注必须同时容下两种入参形状**，所以类型检查器
+    看到的仍然是 ``Sequence[float] | float``，不能直接当序列用。
+
+    读取这些字段时走这个函数，既让类型检查器能确定形状，也把「标量广播」
+    这条规则集中在一处 —— 而不是散在各个调用点各判一次。
+    """
+    if isinstance(value, (int, float)):
+        return (float(value),)
+    return tuple(float(item) for item in value)
+
+
 @dataclass(frozen=True)
 class BalanceSheetState:
     """某一期末的资产负债表科目。金额单位为元。"""

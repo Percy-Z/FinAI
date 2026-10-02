@@ -22,9 +22,11 @@ import json
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, TypeVar, cast
 from unittest import mock
 
 # 让测试可以从任何目录运行
@@ -33,7 +35,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from algorithm.finai.dcf import project, value_dcf  # noqa: E402
-from algorithm.finai.forecast import build_forecast, to_snapshots  # noqa: E402
+from algorithm.finai.forecast import (  # noqa: E402
+    as_series,
+    build_forecast,
+    to_snapshots,
+)
 from algorithm.finai.sensitivity import tornado  # noqa: E402
 from algorithm.finai.types import ForecastAssumptions  # noqa: E402
 from algorithm.finai.validate import run_checks  # noqa: E402
@@ -42,6 +48,7 @@ from pipeline import config, run, tracing  # noqa: E402
 from pipeline.adapters import (  # noqa: E402
     company_to_market_data,
     drivers_to_assumptions,
+    fill_peers_from_financials,
     fill_target_from_forecast,
     to_sensitivity_variables,
 )
@@ -50,6 +57,36 @@ from pipeline.adapters import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # 辅助工具
 # ---------------------------------------------------------------------------
+
+
+T = TypeVar("T")
+
+
+def require(value: T | None, what: str = "值") -> T:
+    """断言不为 None 并把值返回，好让类型检查器也能确定类型。
+
+    CompanyMetrics 的利润类指标都是 float | None —— 市场快照里本来没有这些数，
+    要等适配层从三表预测或 peers.csv 填进去。测试里大量出现「先断言填好了、
+    再拿它去算」的写法，而 unittest 的 assertIsNotNone 不会让类型检查器
+    收窄类型，所以统一走这个函数。
+    """
+    if value is None:
+        raise AssertionError(f"{what} 不该是 None")
+    return value
+
+
+def trace_factory(log_root: Path) -> Callable[[str], tracing.RunTrace]:
+    """造一个替代 RunTrace 的工厂，供 mock.patch.object 使用。
+
+    为什么不直接写 lambda：lambda 的参数没法标类型，严格模式下类型检查器
+    会报 reportUnknownLambdaType。换成带注解的内层函数即可，
+    顺便把「日志目录」收进闭包 —— 原先七个调用点各写一遍。
+    """
+
+    def make(run_id: str) -> tracing.RunTrace:
+        return tracing.RunTrace(run_id, log_root=log_root)
+
+    return make
 
 
 def read_real_config():
@@ -103,15 +140,15 @@ class TestConfigLoads(unittest.TestCase):
 
     def test_逐年假设的个数必须等于预测期年数(self):
         drivers = config.load_case()[1]
-        self.assertEqual(len(drivers.revenue_growth), drivers.years)
+        self.assertEqual(len(as_series(drivers.revenue_growth)), drivers.years)
         # 注意：ForecastDrivers 里没有 ebit_margin 这个字段 ——
         # EBIT 利润率是「毛利 - 费用 - 折旧」推出来的，只在 ForecastAssumptions
         # （估值路径）里才作为一个独立假设存在。两个栈的字段并不一样。
-        self.assertEqual(len(drivers.gross_margin), drivers.years)
-        self.assertEqual(len(drivers.opex_pct_revenue), drivers.years)
+        self.assertEqual(len(as_series(drivers.gross_margin)), drivers.years)
+        self.assertEqual(len(as_series(drivers.opex_pct_revenue)), drivers.years)
         # 这几个「占收入比」虽然不是数组字段，但数据类会把它们广播成年数组
-        self.assertEqual(len(drivers.da_pct_revenue), drivers.years)
-        self.assertEqual(len(drivers.ar_pct_revenue), drivers.years)
+        self.assertEqual(len(as_series(drivers.da_pct_revenue)), drivers.years)
+        self.assertEqual(len(as_series(drivers.ar_pct_revenue)), drivers.years)
 
     def test_市场快照里目标公司正好一家(self):
         target, peers = config.load_market_snapshot()
@@ -398,7 +435,9 @@ class TestTwoStackReconcile(unittest.TestCase):
                 ebit_margin=(0.2,) * 5,
                 tax_rate=0.25,
                 da_pct_revenue=0.05,
-                capex_pct_revenue=varying,  # 估值模块只接受单个数字
+                # 估值模块只接受单个数字，这里故意传数组 —— 验的就是运行时那道
+                # 拦截。cast 是写给类型检查器的：这个类型错误是「故意犯」的。
+                capex_pct_revenue=cast(Any, varying),
                 nwc_pct_revenue=0.15,
             )
 
@@ -414,7 +453,8 @@ class TestTwoStackReconcile(unittest.TestCase):
             ebit_margin=[
                 gross - opex
                 for gross, opex in zip(
-                    self.drivers.gross_margin, self.drivers.opex_pct_revenue
+                    as_series(self.drivers.gross_margin),
+                    as_series(self.drivers.opex_pct_revenue),
                 )
             ],
         )
@@ -504,14 +544,14 @@ class TestAdapters(unittest.TestCase):
         first = forecast.years[0].income
 
         self.assertAlmostEqual(
-            filled.net_profit_attributable, first.net_profit_attributable
+            require(filled.net_profit_attributable), first.net_profit_attributable
         )
-        self.assertAlmostEqual(filled.revenue, first.revenue)
-        self.assertAlmostEqual(filled.ebit, first.ebit)
-        self.assertAlmostEqual(filled.ebitda, first.ebitda)
+        self.assertAlmostEqual(require(filled.revenue), first.revenue)
+        self.assertAlmostEqual(require(filled.ebit), first.ebit)
+        self.assertAlmostEqual(require(filled.ebitda), first.ebitda)
         # 净资产取基期（抽取层就绪前是暂时的口径）
         self.assertAlmostEqual(
-            filled.book_equity_attributable, self.opening.equity_attributable
+            require(filled.book_equity_attributable), self.opening.equity_attributable
         )
         # 市场数据没被动过
         self.assertEqual(filled.price, target.price)
@@ -521,8 +561,37 @@ class TestAdapters(unittest.TestCase):
         target, _ = config.load_market_snapshot()
         forecast = build_forecast(self.opening, self.drivers)
         filled = fill_target_from_forecast(target, forecast)
-        self.assertIsNotNone(filled.eps)
-        self.assertGreater(filled.eps, 0)
+        self.assertGreater(require(filled.eps, "目标公司的 EPS"), 0)
+
+    def test_可比公司填进财务数据后能算出倍数(self):
+        """市场快照只有股价股数债务，PE / PB 需要的分母来自 peers.csv。"""
+        _, peers = config.load_market_snapshot()
+        financials = config.load_peer_financials()
+        filled, notes = fill_peers_from_financials(peers, financials)
+
+        self.assertEqual(len(filled), len(peers))
+        self.assertEqual(notes, [], "三家可比公司都应该在 peers.csv 里找到")
+        for peer in filled:
+            self.assertGreater(require(peer.eps, f"{peer.code} 的 EPS"), 0)
+            self.assertGreater(
+                require(peer.book_value_per_share, f"{peer.code} 的每股净资产"), 0
+            )
+
+    def test_缺财务数据的可比公司只提示不中断(self):
+        """少一家公司的财务数据不该让整条流水线跑不下去。"""
+        _, peers = config.load_market_snapshot()
+        financials = config.load_peer_financials()
+        missing_code = peers[0].code
+        financials.pop(missing_code)
+
+        filled, notes = fill_peers_from_financials(peers, financials)
+
+        self.assertEqual(len(filled), len(peers), "缺数据也要保留，只是算不出倍数")
+        self.assertEqual(len(notes), 1)
+        self.assertIn(missing_code, notes[0])
+        # 缺的那家算不出 EPS，其余的照常
+        self.assertIsNone(filled[0].eps)
+        self.assertIsNotNone(filled[1].eps)
 
     def test_敏感性变量的基准值自动推导(self):
         """基准值不写在配置里，由适配层推导 —— 这是本阶段的核心设计。
@@ -594,7 +663,7 @@ class TestEndToEnd(unittest.TestCase):
         logs = root / "logs"
 
         with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
-            run, "RunTrace", lambda run_id: tracing.RunTrace(run_id, log_root=logs)
+            run, "RunTrace", trace_factory(logs)
         ):
             with redirect_stdout(io.StringIO()):
                 exit_code = run.main()
@@ -782,7 +851,7 @@ class TestEndToEnd(unittest.TestCase):
             ), mock.patch.object(
                 run,
                 "RunTrace",
-                lambda rid: tracing.RunTrace(rid, log_root=root / "logs"),
+                trace_factory(root / "logs"),
             ):
                 with redirect_stdout(io.StringIO()):
                     return run.main()
@@ -838,7 +907,7 @@ class TestEndToEnd(unittest.TestCase):
         produced = next((root / "runs").glob("*/03_valuation.json"))
         payload = json.loads(produced.read_text(encoding="utf-8"))
 
-        _, drivers, opening = config.load_case()
+        _, drivers, _ = config.load_case()
         assumptions = drivers_to_assumptions(drivers, config.load_terminal_params())
         target, _ = config.load_market_snapshot()
         expected = value_dcf(
@@ -874,7 +943,7 @@ class TestEndToEnd(unittest.TestCase):
             ), mock.patch.object(
                 run,
                 "RunTrace",
-                lambda rid: tracing.RunTrace(rid, log_root=root / "logs"),
+                trace_factory(root / "logs"),
             ):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(run.main(), 0, msg=f"以 {run_id} 为标识的运行失败")
@@ -899,7 +968,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(first_manifest["run_id"], "第一次")
         self.assertEqual(second_manifest["run_id"], "第二次")
 
-        def reproducible_part(manifest: dict) -> dict:
+        def reproducible_part(manifest: dict[str, Any]) -> dict[str, Any]:
             """清单里「应该可复现」的部分。
 
             排除三样必然不同的：run_id（运行标识）、created_at（时刻）、
@@ -925,6 +994,145 @@ class TestEndToEnd(unittest.TestCase):
             msg="清单里除了运行标识、时刻、步骤耗时之外，还有不一致的地方",
         )
 
+    # ── 后半段四个阶段：敏感性 / 反向 / 相对估值 / 足球场图 ──────────
+
+    def artifact(self, root: Path, name: str) -> Path:
+        """取本次运行产出的某个文件。"""
+        return next((root / "runs").glob(f"*/{name}"))
+
+    def test_十个数据文件与六张图全部产出(self):
+        """锁住「九个阶段都接上了」——少接一个阶段就会少几个文件。"""
+        _, root = self.run_pipeline()
+        directory = next((root / "runs").iterdir())
+
+        data_files = sorted(
+            path.name for path in directory.glob("[0-9][0-9]_*") if path.is_file()
+        )
+        self.assertEqual(
+            data_files,
+            [
+                "01_projections.json",
+                "02_validation_report.json",
+                "03_valuation.json",
+                "04_tornado.csv",
+                "05_sensitivity.csv",
+                "06_reverse_dcf.json",
+                "07_comps.csv",
+                "08_comps_implied.csv",
+                "09_football_field.json",
+                "10_run_manifest.json",
+            ],
+        )
+
+        # 没装 matplotlib 时输出层会跳过全部图表，并在清单的 warnings 里记一笔 ——
+        # 注意此时 charts/ 目录**根本不会被创建**，所以要先判断存在性
+        charts_dir = directory / "charts"
+        charts = (
+            sorted(path.name for path in charts_dir.iterdir())
+            if charts_dir.exists()
+            else []
+        )
+        self.assertIn(len(charts), (0, 6))
+
+    def test_龙卷风图按幅度降序(self):
+        _, root = self.run_pipeline()
+        with self.artifact(root, "04_tornado.csv").open(
+            encoding="utf-8-sig"
+        ) as handle:
+            rows = list(csv.DictReader(handle))
+
+        # 行数 = 配置里考察的变量数，以配置为准（现在是 6 个，不是写死的 5 个）
+        self.assertEqual(len(rows), len(config.load_sensitivity().variables))
+        names = [row["变量"] for row in rows]
+        self.assertIn("WACC", names)
+        self.assertIn("永续增长率", names)
+        self.assertIn("税率", names)
+
+        swings = [float(row["波动幅度"]) for row in rows]
+        self.assertEqual(swings, sorted(swings, reverse=True))
+        self.assertTrue(all(swing >= 0 for swing in swings))
+
+    def test_双因素网格点数与配置一致(self):
+        _, root = self.run_pipeline()
+        points = config.load_sensitivity().grid_points
+
+        with self.artifact(root, "05_sensitivity.csv").open(
+            encoding="utf-8-sig"
+        ) as handle:
+            table = list(csv.reader(handle))
+
+        self.assertEqual(len(table), points + 1, "表头 + 每轴点数的行")
+        self.assertEqual(len(table[0]), points + 1, "行标签 + 每轴点数的列")
+
+    def test_反向求解的每个结果都命中现价(self):
+        """反解出的隐含参数代回模型，算出的每股价值必须等于目标价。"""
+        _, root = self.run_pipeline()
+        payload = json.loads(
+            self.artifact(root, "06_reverse_dcf.json").read_text("utf-8")
+        )
+        price = config.load_market_snapshot()[0].price
+
+        results = payload["results"]
+        self.assertEqual(len(results), 4)
+        for item in results:
+            self.assertAlmostEqual(item["target_per_share"], price)
+            self.assertAlmostEqual(
+                item["achieved_per_share"], item["target_per_share"], places=6
+            )
+            self.assertIn(item["direction"], ("higher", "lower", "same"))
+
+    def test_可比公司倍数算出来了(self):
+        """四家公司的 PE 都不为空，说明财务数据确实填进去了。"""
+        _, root = self.run_pipeline()
+        with self.artifact(root, "07_comps.csv").open(
+            encoding="utf-8-sig"
+        ) as handle:
+            rows = list(csv.reader(handle))
+
+        pe_index = rows[0].index("PE")
+        target_row = next(row for row in rows if row and row[0] == "目标")
+        peer_rows = [row for row in rows if row and row[0] == "可比"]
+
+        self.assertEqual(len(peer_rows), 3)
+        for row in [target_row, *peer_rows]:
+            self.assertNotEqual(row[pe_index], "")
+            self.assertGreater(float(row[pe_index]), 0)
+
+    def test_足球场图包含_DCF_与三个倍数区间(self):
+        _, root = self.run_pipeline()
+        payload = json.loads(
+            self.artifact(root, "09_football_field.json").read_text("utf-8")
+        )
+        bands = payload["bands"]
+
+        self.assertEqual(bands[0]["name"], "DCF")
+        names = [band["name"] for band in bands]
+        for expected in ("PE", "PB", "EV/EBITDA"):
+            self.assertIn(expected, names)
+
+        for band in bands:
+            self.assertLessEqual(band["low"], band["central"])
+            self.assertLessEqual(band["central"], band["high"])
+
+    def test_足球场图里_DCF_区间来自敏感性网格(self):
+        """DCF 那条横条不是单点，而是网格里的最小值和最大值。"""
+        _, root = self.run_pipeline()
+        payload = json.loads(
+            self.artifact(root, "09_football_field.json").read_text("utf-8")
+        )
+        dcf_band = next(band for band in payload["bands"] if band["name"] == "DCF")
+
+        with self.artifact(root, "05_sensitivity.csv").open(
+            encoding="utf-8-sig"
+        ) as handle:
+            table = list(csv.reader(handle))
+        cell_values = [float(cell) for row in table[1:] for cell in row[1:]]
+
+        # CSV 里的数字只保留两位小数，所以这里按两位小数的精度比 ——
+        # 比的是「两张产物说的是不是同一件事」，不是浮点完全相等。
+        self.assertAlmostEqual(dcf_band["low"], min(cell_values), delta=0.01)
+        self.assertAlmostEqual(dcf_band["high"], max(cell_values), delta=0.01)
+
 
 # ---------------------------------------------------------------------------
 # 五、日志层
@@ -939,14 +1147,14 @@ class TestTracing(unittest.TestCase):
         with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
             run,
             "RunTrace",
-            lambda run_id: tracing.RunTrace(run_id, log_root=root / "logs"),
+            trace_factory(root / "logs"),
         ):
             with redirect_stdout(io.StringIO()):
                 run.main()
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(lines), 10)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -965,6 +1173,9 @@ class TestTracing(unittest.TestCase):
                 "wacc",
                 "valuation",
                 "sensitivity",
+                "reverse_dcf",
+                "comps",
+                "football_field",
                 "write_outputs",
             ],
         )
@@ -976,7 +1187,7 @@ class TestTracing(unittest.TestCase):
         with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
             run,
             "RunTrace",
-            lambda run_id: tracing.RunTrace(run_id, log_root=root / "logs"),
+            trace_factory(root / "logs"),
         ):
             with redirect_stdout(io.StringIO()):
                 run.main()
@@ -1004,7 +1215,7 @@ class TestFailurePath(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
 
-        def boom(*_args, **_kwargs):
+        def boom(*_args: object, **_kwargs: object) -> None:
             raise config.ConfigError("模拟的配置错误：税率写成了 0.9")
 
         with mock.patch.object(run, "load_case", boom), mock.patch.object(
@@ -1012,7 +1223,7 @@ class TestFailurePath(unittest.TestCase):
         ), mock.patch.object(
             run,
             "RunTrace",
-            lambda run_id: tracing.RunTrace(run_id, log_root=root / "logs"),
+            trace_factory(root / "logs"),
         ):
             with redirect_stdout(io.StringIO()):
                 exit_code = run.main()
@@ -1045,7 +1256,7 @@ class TestFailurePath(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
 
-        def boom(*_args, **_kwargs):
+        def boom(*_args: object, **_kwargs: object) -> None:
             raise RuntimeError("模拟的代码 bug")
 
         with mock.patch.object(run, "load_case", boom), mock.patch.object(
@@ -1053,7 +1264,7 @@ class TestFailurePath(unittest.TestCase):
         ), mock.patch.object(
             run,
             "RunTrace",
-            lambda rid: tracing.RunTrace(rid, log_root=root / "logs"),
+            trace_factory(root / "logs"),
         ):
             with redirect_stdout(io.StringIO()):
                 # 异常必须继续往外抛 —— 掩盖 bug 比丢记录更糟

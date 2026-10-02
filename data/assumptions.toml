@@ -152,8 +152,15 @@ mid_year        = false
 #             da_pct_revenue, capex_pct_revenue, nwc_pct_revenue,
 #             terminal_method, terminal_growth, exit_multiple, mid_year
 #
-# 注意「逐年字段」的语义：浮到某个值时，会把**每一年**都设成那个值，
-# 也就是问「如果未来每年增速都是 X，估值是多少」。
+# ⚠️ 注意「逐年字段」的语义：浮到某个值时，会把**每一年**都设成那个值，
+# 也就是问「如果未来每年增速都是 X，估值是多少」，而不是只改第一年。
+# 这是估值引擎的广播语义，报告里要写明，否则「收入增速 ±3pp」会产生歧义。
+#
+# 为什么浮动幅度也算「假设」、也要写在配置里：
+#   龙卷风图的排序不只取决于模型，也取决于你给每个参数定了多宽的上下界。
+#   把 A 的幅度放宽一倍，A 就会爬到榜首。所以幅度本身是一个判断，
+#   报告里要能解释「为什么永续增长率取 ±1 个百分点而不是 ±0.5」。
+#   每个 delta 后面的注释就是那个解释。
 #
 # grid_row / grid_col 是双因素网格用的两个变量，按上面的 name 引用。
 # ---------------------------------------------------------------------------
@@ -166,27 +173,33 @@ grid_points = 5              # 每个轴取几个点
 [[sensitivity.variables]]
 name  = "EBIT 利润率"
 field = "ebit_margin"
-delta = 0.03                 # 上下各浮动 3 个百分点
+delta = 0.03                 # ±3pp ≈ 毛利率或费用率各让一步
 
 [[sensitivity.variables]]
 name  = "WACC"
 field = "wacc"
-delta = 0.01
+delta = 0.01                 # ±1pp ≈ beta 或风险溢价有 ±15% 的偏差
 
 [[sensitivity.variables]]
 name  = "收入增速"
 field = "revenue_growth"
-delta = 0.03
+delta = 0.03                 # ±3pp ≈ 增速预测的合理分歧区间
 
 [[sensitivity.variables]]
 name  = "永续增长率"
 field = "terminal_growth"
-delta = 0.01
+delta = 0.01                 # ±1pp ≈ 长期 GDP 增速上浮或下修一个档
 
 [[sensitivity.variables]]
 name  = "资本开支占比"
 field = "capex_pct_revenue"
-delta = 0.02
+delta = 0.02                 # ⚠️ 依据待补：这个幅度还没有可引用的说法
+
+[[sensitivity.variables]]
+name  = "税率"
+field = "tax_rate"
+delta = 0.05                 # ±5pp ≈ 优惠税率到期 / 高新资格变化
+
 
 
 # ---------------------------------------------------------------------------

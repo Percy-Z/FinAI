@@ -158,7 +158,9 @@ def save(figure: Figure, path: str | Path) -> Path:
     return target
 
 
-def spread_end_labels(values: "list[float]", span: float, gap_ratio: float = 0.05):
+def spread_end_labels(
+    values: list[float], span: float, gap_ratio: float = 0.05
+) -> list[float]:
     """把靠得太近的端点标签上下错开，返回调整后的位置。
 
     折线图在最后一个点上标数值时，几条线常常挤在一起，直接标会叠成一团。

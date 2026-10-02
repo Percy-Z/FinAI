@@ -9,6 +9,7 @@
     drivers_to_assumptions      三表路径的驱动假设 → 估值路径的假设
     company_to_market_data      市场快照的公司 → 估值桥要的市场数据
     fill_target_from_forecast   把三表预测填进目标公司（相对估值用）
+    fill_peers_from_financials  把财务数据填进可比公司（相对估值用）
 
 ⚠️ 第一个是整个框架里最容易写错的一段，详见它的文档字符串。
 """
@@ -16,16 +17,26 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Sequence
 
 from algorithm.finai.comps import CompanyMetrics
-from algorithm.finai.forecast import ForecastDrivers, ThreeStatementForecast
+from algorithm.finai.forecast import (
+    ForecastDrivers,
+    ThreeStatementForecast,
+    as_series,
+)
 from algorithm.finai.sensitivity import Variable
 from algorithm.finai.types import ForecastAssumptions, MarketData
 
-from .config import ConfigError, SensitivityConfig, TerminalParams
+from .config import (
+    ConfigError,
+    PeerFinancials,
+    SensitivityConfig,
+    TerminalParams,
+)
 
 
-def _single_ratio(series, field: str) -> float:
+def _single_ratio(series: Sequence[float] | float, field: str) -> float:
     """把「逐年比率」取成单个数字，逐年不同就报错。
 
     估值引擎（ForecastAssumptions）只接受单一比率，而三表路径的驱动允许
@@ -33,8 +44,11 @@ def _single_ratio(series, field: str) -> float:
     否则会一路走到 dcf.project() 里才炸，报错是
     「can't multiply sequence by non-int of type 'float'」，
     完全看不出是哪个字段的问题。
+
+    入参可能是标量（配置文件里写单个数字，会被广播到每一年），
+    所以先用 as_series 统一成序列再判。
     """
-    values = {float(value) for value in series}
+    values = set(as_series(series))
     if len(values) != 1:
         raise ConfigError(
             f"配置里的 [drivers].{field} 逐年不同（{sorted(values)}），"
@@ -162,15 +176,15 @@ def drivers_to_assumptions(
     ebit_margin = [
         gross - opex - da
         for gross, opex, da in zip(
-            drivers.gross_margin,
-            drivers.opex_pct_revenue,
-            drivers.da_pct_revenue,
+            as_series(drivers.gross_margin),
+            as_series(drivers.opex_pct_revenue),
+            as_series(drivers.da_pct_revenue),
         )
     ]
 
     return ForecastAssumptions(
         revenue_base=drivers.revenue_base,
-        revenue_growth=drivers.revenue_growth,
+        revenue_growth=as_series(drivers.revenue_growth),
         ebit_margin=ebit_margin,
         tax_rate=drivers.tax_rate,
         da_pct_revenue=_single_ratio(drivers.da_pct_revenue, "da_pct_revenue"),
@@ -231,6 +245,48 @@ def fill_target_from_forecast(
     )
 
 
+def fill_peers_from_financials(
+    peers: list[CompanyMetrics],
+    financials: dict[str, PeerFinancials],
+) -> tuple[list[CompanyMetrics], list[str]]:
+    """把可比公司的年度财务数据填进市场快照。
+
+    返回 (填好的列表, 提示信息列表)。
+
+    对不上的情况不报错，只提示：某个可比公司在 market.csv 里有、在 peers.csv
+    里没有，那它的 PE / PB / EV-EBITDA 全都算不出来（分母为空），
+    相对估值会跳过它。但股价、股数、债务还在，所以整条流水线仍然跑得完 ——
+    这比因为一条数据缺失就中断整个流程要好。
+
+    反过来（peers.csv 里有、market.csv 里没有）不提示：那种行根本用不到，
+    因为可比公司是「由 market.csv 的 role=peer 指定」的。
+    """
+    filled: list[CompanyMetrics] = []
+    notes: list[str] = []
+
+    for peer in peers:
+        data = financials.get(peer.code)
+        if data is None:
+            notes.append(
+                f"可比公司 {peer.code}（{peer.name}）在 peers.csv 里没有财务数据，"
+                "它的倍数会被跳过"
+            )
+            filled.append(peer)
+            continue
+        filled.append(
+            replace(
+                peer,
+                revenue=data.revenue,
+                net_profit_attributable=data.net_profit_attributable,
+                book_equity_attributable=data.book_equity_attributable,
+                ebit=data.ebit,
+                ebitda=data.ebitda,
+            )
+        )
+
+    return filled, notes
+
+
 def _demo() -> None:
     """自检：把三样转换各做一遍并打印。python3 -m pipeline.adapters"""
     from algorithm.finai.dcf import project
@@ -243,16 +299,22 @@ def _demo() -> None:
     target, peers = config.load_market_snapshot()
 
     assumptions = drivers_to_assumptions(drivers, terminal)
+    gross = as_series(drivers.gross_margin)
+    opex = as_series(drivers.opex_pct_revenue)
+    da_series = as_series(drivers.da_pct_revenue)
+
     print("[drivers] → [assumptions] 关键字段")
     print(f"    收入基数      {drivers.revenue_base:,.2f} → {assumptions.revenue_base:,.2f}")
-    print(f"    收入增速      {drivers.revenue_growth} → {assumptions.revenue_growth}")
+    print(
+        f"    收入增速      {as_series(drivers.revenue_growth)} "
+        f"→ {assumptions.revenue_growth}"
+    )
     print("    EBIT 利润率   ← 毛利率 − 费用率 − 折旧率")
     for index, margin in enumerate(assumptions.ebit_margin, start=1):
         print(
             f"        第 {index} 年 {margin:.4f}"
-            f"  （{drivers.gross_margin[index-1]:.2f} − "
-            f"{drivers.opex_pct_revenue[index-1]:.2f} − "
-            f"{drivers.da_pct_revenue[index-1]:.2f}）"
+            f"  （{gross[index-1]:.2f} − {opex[index-1]:.2f} − "
+            f"{da_series[index-1]:.2f}）"
         )
     print(f"    营运资本占比  （应收+存货−应付）→ {assumptions.nwc_pct_revenue:.4f}")
     print(f"    终值          {assumptions.terminal_method}，"
@@ -268,8 +330,12 @@ def _demo() -> None:
 
     print("\n[market] → MarketData")
     market = company_to_market_data(target)
-    print(f"    {target.name}  股价 {market.price}  股数 {market.diluted_shares:,.0f}  "
+    print(f"    目标  {target.name}  股价 {market.price}  "
+          f"股数 {market.diluted_shares:,.0f}  "
           f"市值 {market.market_cap:,.2f}  净债务 {market.net_debt:,.2f}")
+    for peer in peers:
+        print(f"    可比  {peer.code} {peer.name}  股价 {peer.price}  "
+              f"市值 {peer.market_cap:,.2f}  净债务 {peer.net_debt:,.2f}")
 
     print("\n填进三表预测（相对估值用）")
     filled = fill_target_from_forecast(target, forecast)

@@ -414,9 +414,18 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
 
 | 待做 | 说明 |
 | --- | --- |
-| 数据层 | 读 YAML 假设文件、写运行日志（`trace.jsonl`）。JSON 落盘与运行清单已由 `reporting.py` 完成 |
+| 数据层中的抽取部分 | 假设配置（TOML）、市场快照（CSV）、可比公司财务（CSV）、JSON 落盘、运行日志都已由 `pipeline/` 与 `algorithm/output/` 完成。**还差的是「年报 PDF → 结构化财报」这一步**，目前 `[opening_balance]` 与 `data/peers.csv` 是手填的过渡数据 |
 | 文档抽取 | 年报 PDF 到结构化财报，每个数字绑定页码与原文片段 |
 | DCF 接三表 | 目前 `dcf.py` 走的是简化路径，`forecast.py` 算出的 FCFF 序列还没有接进估值函数 |
 | 报告生成 | 从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx） |
 
-当前测试规模：`algorithm/tests/` 下 271 个单元测试，全部用手算数字做断言。
+每个模块在流水线里的位置见 `pipeline/run.py` 顶部的阶段图：
+
+```text
+[config] → [forecast] → [validate] → [wacc] → [valuation]
+         → [sensitivity] → [reverse] → [comps] → [football_field] → [落盘]
+```
+
+当前测试规模：算法层 345 个、框架层 54 个，共 399 个单元测试。
+算法层用手算数字做断言，框架层验的是「装配」——
+配置读得对不对、串起来跑不跑得通、出错时有没有拦住并留下记录。

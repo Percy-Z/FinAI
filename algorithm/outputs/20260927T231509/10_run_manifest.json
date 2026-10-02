@@ -1,0 +1,77 @@
+{
+  "run_id": "20260927T231509",
+  "created_at": "2026-09-27T23:15:09",
+  "python": "3.15.0b1",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "inputs": {
+    "target": "T",
+    "peers": [
+      "A",
+      "B",
+      "C"
+    ],
+    "price": 10.0,
+    "wacc": 0.094659,
+    "base_year": 2025,
+    "years": 5
+  },
+  "outputs": [
+    {
+      "name": "comps",
+      "file": "07_comps.csv",
+      "bytes": 579,
+      "sha256": "c238bdc511c9563c21b6dce4260d5c88bb46e8dd2642ce802dc0c0310682950c"
+    },
+    {
+      "name": "comps_implied",
+      "file": "08_comps_implied.csv",
+      "bytes": 986,
+      "sha256": "11e9e8f4b86edc8b9c5d2aa43c36c32094efe8bb2eb1bedb6d2a46358b539f17"
+    },
+    {
+      "name": "football_field",
+      "file": "09_football_field.json",
+      "bytes": 751,
+      "sha256": "a1ec4c5f57f2314cdb91ed7eb70d10807c35bb83b39370416c65c6def36fade4"
+    },
+    {
+      "name": "projections",
+      "file": "01_projections.json",
+      "bytes": 8134,
+      "sha256": "767be6e6c256f8c240cd613ba3e52a2cdd6756b853cf7693cc56503a107b0502"
+    },
+    {
+      "name": "reverse_dcf",
+      "file": "06_reverse_dcf.json",
+      "bytes": 1415,
+      "sha256": "ca0ee7d2be6525627dfbabb0f9b161e6b1b3d43ee55f58a1bcae78a651c9d672"
+    },
+    {
+      "name": "sensitivity",
+      "file": "05_sensitivity.csv",
+      "bytes": 120,
+      "sha256": "e92fb49151565e1e3660d567f18f0e305169a11a04e6b5f537cf0dda7508a6a0"
+    },
+    {
+      "name": "tornado",
+      "file": "04_tornado.csv",
+      "bytes": 458,
+      "sha256": "fe85eda1fc03259fe6f488570fddd0cfc8f30b175e5926c20b0082b46c0c0284"
+    },
+    {
+      "name": "validation_report",
+      "file": "02_validation_report.json",
+      "bytes": 23427,
+      "sha256": "12478980f8633f81b259ab0924bbc9be5aac5a5afd25f399d09e6c8ef9cba5fa"
+    },
+    {
+      "name": "valuation",
+      "file": "03_valuation.json",
+      "bytes": 2217,
+      "sha256": "07b562370a35abc27e640f160b9cdf9ebd3d781153d3b49ad6b700106c36f4bc"
+    }
+  ],
+  "warnings": [
+    "没有安装 matplotlib，跳过全部图表的渲染"
+  ]
+}
