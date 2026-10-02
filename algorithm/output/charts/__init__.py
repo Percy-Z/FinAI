@@ -66,9 +66,16 @@ if HAS_MATPLOTLIB:
                 outputs.football_field, target("football_field")
             )
         if outputs.tornado:
-            price = (
-                outputs.football_field.price if outputs.football_field else 0.0
-            )
+            # 现价优先取「估值结果」里的：只要这次运行做了估值就有，
+            # 而足球场图要等相对估值接上才会有。
+            # 原来只从足球场图取，没有它时回退成 0 —— 那样龙卷风图上的
+            # 「现价」线会画在 0 的位置（横轴起点），误导读者。
+            if outputs.dcf is not None:
+                price = outputs.dcf.price
+            elif outputs.football_field is not None:
+                price = outputs.football_field.price
+            else:
+                price = 0.0
             produced["tornado"] = render_tornado(
                 outputs.tornado, price, target("tornado")
             )
