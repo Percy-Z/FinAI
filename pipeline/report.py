@@ -17,9 +17,15 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
+import re
 from pathlib import Path
 from typing import Any, Sequence
+
+# 依赖探测放在模块级、只探测一次 —— 与输出层的 matplotlib 同一套做法：
+# 没装也能 import 这个模块，只是不生成对应格式。
+HAS_REPORTLAB = importlib.util.find_spec("reportlab") is not None
 
 
 def _read_json(path: Path) -> Any | None:
@@ -559,6 +565,247 @@ def write_report(run_dir: str | Path) -> Path:
     return target
 
 
+# ---------------------------------------------------------------------------
+# PDF：把上面那份 Markdown 渲染成 PDF
+#
+# 为什么要绕 Markdown 这一道：Markdown 是「唯一源」。如果 PDF 直接由数据
+# 构建，就有两套布局逻辑，改一处忘一处 —— 报告的两个版本会不一致。
+# 渲染器只处理我们自己生成的 Markdown 子集（标题/表格/列表/引用/图片），
+# 不追求通用。
+# ---------------------------------------------------------------------------
+
+
+#
+# 中文字体：优先用系统字体文件并「嵌入」进 PDF，这样任何阅读器都能显示。
+# 退而求其次用 reportlab 内置的 CID 字体（STSong-Light）—— 它不嵌入，
+# 依赖阅读器自带 Adobe-GB1 语言包；实测 poppler 就显示不出来，
+# 所以只当兜底。
+#
+
+_FONT_CANDIDATES: list[tuple[str, str, int]] = [
+    # macOS
+    ("FinAINormal", "/System/Library/Fonts/STHeiti Light.ttc", 0),
+    ("FinAIBold", "/System/Library/Fonts/STHeiti Medium.ttc", 0),
+    # Windows
+    ("FinAINormal", "C:/Windows/Fonts/msyh.ttc", 0),
+    ("FinAIBold", "C:/Windows/Fonts/msyhbd.ttc", 0),
+    # Linux
+    ("FinAINormal", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
+    ("FinAIBold", "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 0),
+]
+
+
+def _register_fonts() -> str:
+    """注册中文字体，返回正文用的字体名。"""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    registered: dict[str, str] = {}
+    for name, path, index in _FONT_CANDIDATES:
+        if name in registered or not Path(path).exists():
+            continue
+        try:
+            if name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(name, path, subfontIndex=index))
+        except Exception:
+            continue  # 这个字体读不了就试下一个
+        registered[name] = path
+
+    normal = "FinAINormal" if "FinAINormal" in registered else None
+    bold = "FinAIBold" if "FinAIBold" in registered else None
+
+    if normal is None:
+        # 兜底：reportlab 内置 CID 字体（不嵌入，需要阅读器支持）
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+        if "STSong-Light" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        return "STSong-Light"
+
+    # 注册字体族，让 <b> 标签能找到粗体
+    pdfmetrics.registerFontFamily(
+        normal,
+        normal=normal,
+        bold=bold or normal,
+        italic=normal,
+        boldItalic=bold or normal,
+    )
+    return normal
+
+
+def _pdf_styles():
+    """定义排版样式。"""
+    from reportlab.lib.styles import ParagraphStyle
+
+    font = _register_fonts()
+    return {
+        1: ParagraphStyle("h1", fontName=font, fontSize=18, leading=26, spaceAfter=10),
+        2: ParagraphStyle("h2", fontName=font, fontSize=14, leading=21, spaceBefore=14, spaceAfter=8),
+        3: ParagraphStyle("h3", fontName=font, fontSize=11.5, leading=17, spaceBefore=10, spaceAfter=6),
+        "body": ParagraphStyle("body", fontName=font, fontSize=9.5, leading=15, spaceAfter=5),
+        "quote": ParagraphStyle(
+            "quote", fontName=font, fontSize=9, leading=14, leftIndent=10,
+            textColor="#4a5568", spaceAfter=6,
+        ),
+        "bullet": ParagraphStyle(
+            "bullet", fontName=font, fontSize=9.5, leading=15, leftIndent=12, spaceAfter=2
+        ),
+    }
+
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _inline(text: str) -> str:
+    """把 Markdown 的行内标记转成 reportlab 认的简单标签。先转义再加标签。"""
+    out = _escape(text)
+    out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out)
+    out = re.sub(r"`(.+?)`", r'<font face="Courier">\1</font>', out)
+    return out
+
+
+def _flowables(markdown: str, base_dir: Path) -> list:
+    """把 Markdown 子集转成 reportlab 的 flowables。"""
+    from reportlab.platypus import Image, Paragraph, Spacer, Table, TableStyle
+
+    styles = _pdf_styles()
+    flow: list = []
+    lines = markdown.splitlines()
+    i = 0
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+
+        # 标题
+        if stripped.startswith("#"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            flow.append(Paragraph(_inline(stripped[level:].strip()), styles[min(level, 3)]))
+            i += 1
+            continue
+
+        # 图片（附录里的图表）
+        picture = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", stripped)
+        if picture:
+            path = (base_dir / picture.group(2)).resolve()
+            if path.exists():
+                from reportlab.lib.utils import ImageReader
+
+                width, height = ImageReader(str(path)).getSize()
+                target_width = 160 * 72 / 25.4  # 160mm 宽
+                flow.append(
+                    Image(str(path), width=target_width, height=target_width * height / width)
+                )
+                flow.append(Spacer(1, 8))
+            i += 1
+            continue
+
+        # 表格
+        if stripped.startswith("|"):
+            rows: list[list[str]] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                # 跳过分隔行（全由 - 和 : 组成）
+                if not all(set(c) <= set("-: ") and c for c in cells):
+                    rows.append(cells)
+                i += 1
+            if rows:
+                body = [
+                    [Paragraph(_inline(c), styles["body"]) for c in row] for row in rows
+                ]
+                table = Table(body, repeatRows=1, hAlign="LEFT")
+                table.setStyle(
+                    TableStyle(
+                        [
+                            ("GRID", (0, 0), (-1, -1), 0.4, "#c8d0da"),
+                            ("BACKGROUND", (0, 0), (-1, 0), "#eef2f6"),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                            ("TOPPADDING", (0, 0), (-1, -1), 3),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ]
+                    )
+                )
+                flow.append(table)
+                flow.append(Spacer(1, 8))
+            continue
+
+        # 引用块（含 AI 占位标记）
+        if stripped.startswith(">"):
+            block = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                block.append(lines[i].strip().lstrip(">").strip())
+                i += 1
+            text = "<br/>".join(_inline(b) for b in block if b)
+            if text:
+                flow.append(Paragraph(text, styles["quote"]))
+            continue
+
+        # 无序列表
+        if stripped.startswith("- "):
+            while i < len(lines) and lines[i].strip().startswith("- "):
+                flow.append(
+                    Paragraph("• " + _inline(lines[i].strip()[2:]), styles["bullet"])
+                )
+                i += 1
+            flow.append(Spacer(1, 4))
+            continue
+
+        # 普通段落（连续行合并成一段）
+        block = []
+        while i < len(lines):
+            candidate = lines[i].strip()
+            if not candidate or candidate.startswith(("#", "|", ">", "- ", "![")):
+                break
+            block.append(candidate)
+            i += 1
+        if block:
+            flow.append(Paragraph(" ".join(_inline(b) for b in block), styles["body"]))
+
+    return flow
+
+
+def write_pdf(run_dir: str | Path) -> Path | None:
+    """把 report.md 渲染成 report.pdf。
+
+    没装 reportlab 时返回 None（不报错）—— 调用方据此打印提示。
+    """
+    if not HAS_REPORTLAB:
+        return None
+
+    from reportlab.lib.pagesizes import A4  # noqa: F401
+    from reportlab.platypus import PageBreak, SimpleDocTemplate, Spacer
+
+    run_dir = Path(run_dir)
+    source = run_dir / "report.md"
+    if not source.exists():
+        write_report(run_dir)
+
+    target = run_dir / "report.pdf"
+    document = SimpleDocTemplate(
+        str(target),
+        pagesize=A4,
+        title=source.stem,
+        leftMargin=18 * 72 / 25.4,
+        rightMargin=18 * 72 / 25.4,
+        topMargin=18 * 72 / 25.4,
+        bottomMargin=18 * 72 / 25.4,
+    )
+
+    markdown = source.read_text(encoding="utf-8")
+    # 附录（图表）另起一页 —— 否则图片会插在文字中间
+    head, sep, tail = markdown.partition("## 附录：图表")
+    flow = _flowables(head, run_dir)
+    if sep:
+        flow += [PageBreak(), *_flowables(sep + tail, run_dir)]
+    document.build(flow)
+    return target
+
+
 def _demo() -> None:
     """自检：对最近一次运行生成报告并打印摘要。python3 -m pipeline.report"""
     root = Path(__file__).resolve().parents[1] / "runs"
@@ -569,6 +816,8 @@ def _demo() -> None:
     text = target.read_text(encoding="utf-8")
     print(f"已生成 {target}")
     print(f"  行数 {len(text.splitlines())}，字符 {len(text):,}")
+    pdf = write_pdf(latest)
+    print(f"  PDF: {pdf}" if pdf else "  PDF: 跳过（没有安装 reportlab）")
     print(f"  节标题：")
     for line in text.splitlines():
         if line.startswith("## "):

@@ -2,9 +2,10 @@
 
 2026 年北京市大学生金融人工智能竞赛「自动化估值建模」方向的实现仓库。
 
-当前进度：算法层九个模块、输出层（数据文件 + 六张图）、框架层九个阶段全部打通。
-`make run` 一条命令从配置跑到产物，共 399 个单元测试覆盖
-（算法层 345 + 框架层 54）。
+当前进度：算法层九个模块、输出层（数据文件 + 六张图）、框架层十一个阶段全部打通。
+`make run` 一条命令从配置跑到产物 —— 十六个数据与图表产物，外加报告三件套
+（`report.md` / `report.pdf` / 活公式 `model.xlsx`），共 427 个单元测试覆盖
+（算法层 345 + 框架层 82）。
 
 - **算法层**（`algorithm/finai/`）：三表联动预测、资本成本、估值引擎、敏感性分析、
   反向求解、相对估值、勾稽校验、财务报表数据结构、输入输出契约。
@@ -36,32 +37,37 @@ python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件�
 | 范围 | 依赖 | 说明 |
 | --- | --- | --- |
 | 核心流程 | **无** | 读配置、三表预测、勾稽校验、资本成本、估值、敏感性、落盘、日志 —— 只用标准库 |
-| 图表层 | matplotlib | 渲染 6 张图。**没装也能跑通全流程**，只是不生成图表，运行清单里会记一条告警 |
+| 图表层 | matplotlib | 渲染 6 张图 |
+| 报告层 | reportlab | 把 `report.md` 渲染成 `report.pdf` |
+| 报告层 | openpyxl | 生成活公式模型 `model.xlsx`（七个页签） |
 
-图表是**可选依赖**。装它有三种方式，选一种即可：
+**后三样都是可选依赖**：没装也能跑通全流程，只是不生成对应的文件，
+终端与运行清单里会记一条跳过说明。
+
+装它们有三种方式，选一种即可：
 
 ```bash
 # 方式一：虚拟环境（推荐，不碰系统 Python）
 cd FinAI
 python3 -m venv .venv
-.venv/bin/pip install matplotlib
-make run PYTHON=.venv/bin/python      # 用虚拟环境的解释器跑，才会出图
+.venv/bin/pip install matplotlib reportlab openpyxl
+make run PYTHON=.venv/bin/python      # 用虚拟环境的解释器跑，才会出图表与报告文件
 
 # 方式二：用 Homebrew 装（走 brew 自己的依赖体系）
-brew install matplotlib
+brew install matplotlib               # reportlab / openpyxl 走 pip 更省事
 
 # 方式三：装到用户目录（不碰系统 Python，但要显式绕开 PEP 668 的保护）
-python3 -m pip install --break-system-packages --user matplotlib
+python3 -m pip install --break-system-packages --user matplotlib reportlab openpyxl
 ```
 
-> **如果直接 `pip install matplotlib` 报 `externally-managed-environment`**：
+> **如果直接 `pip install ...` 报 `externally-managed-environment`**：
 > 那不是本项目的问题 —— Homebrew 会给它的 Python 打上 `externally-managed` 标记
 > （PEP 668），禁止 pip 往系统 Python 里装包，以免和包管理器打架。
 > 用上面三种方式之一即可。
 
 ### 关键：装的地方和跑的地方要对上
 
-代码只检查「**当前这个 Python 能不能 import matplotlib**」，不关心它装在哪。
+代码只检查「**当前这个 Python 能不能 import 它们**」，不关心装在哪。
 所以不管用哪种方式装，都要保证**装的解释器和跑的解释器是同一个**：
 
 | 装在哪 | 怎么跑 |
@@ -70,13 +76,13 @@ python3 -m pip install --break-system-packages --user matplotlib
 | 系统或用户目录（brew / `pip --user`） | `make run` |
 
 **最常见的坑**：装进了虚拟环境，但跑 `make run` 时忘了带 `PYTHON=`，
-于是用回系统 Python，又看到「没有安装 matplotlib」的提示。
+于是用回系统 Python，又看到「没有安装 xxx，跳过」的提示。
 
 排查方法：
 
 ```bash
-python3 -c "import matplotlib; print('系统 Python 里有')"          # 有 → make run 就能出图
-.venv/bin/python -c "import matplotlib; print('虚拟环境里有')"      # 有 → 要带 PYTHON= 跑
+python3 -c "import matplotlib, reportlab, openpyxl; print('系统 Python 里有')"
+.venv/bin/python -c "import matplotlib, reportlab, openpyxl; print('虚拟环境里有')"
 ```
 
 `.venv/` 已在 `.gitignore` 里，不会被提交 —— 它和机器绑定（路径写死在
@@ -89,6 +95,8 @@ python3 -c "import matplotlib; print('系统 Python 里有')"          # 有 →
 | 名称 | 版本 | 来源 | 许可证 | 使用范围 |
 | --- | --- | --- | --- | --- |
 | matplotlib | 以实际安装为准 | <https://matplotlib.org> | BSD 兼容许可（见官方 LICENSE） | 仅用于渲染图表；**所有数值计算不依赖它** |
+| reportlab | 以实际安装为准 | <https://pypi.org/project/reportlab/> | BSD 兼容许可（见官方 LICENSE） | 仅用于把 `report.md` 渲染成 PDF；**所有数值计算不依赖它** |
+| openpyxl | 以实际安装为准 | <https://openpyxl.readthedocs.io> | MIT | 仅用于生成活公式 `model.xlsx`；**所有数值计算不依赖它** |
 
 Python 版本要求：**3.11 及以上**（标准库 `tomllib` 从 3.11 开始提供）。
 
@@ -107,12 +115,15 @@ Python 版本要求：**3.11 及以上**（标准库 `tomllib` 从 3.11 开始�
 data/                输入：人填的假设与市场快照
   assumptions.toml   经营假设、估值参数、终值、敏感性变量表、基期资产负债表
   market.csv         市场快照：目标公司与可比公司的股价、股本、负债、现金
+  peers.csv          可比公司清单（手填的过渡数据，将来由文档抽取层产出）
 
 pipeline/            框架层：把算法模块装成一条流水线（不含任何金融计算）
   config.py          配置层：文件 → 对象，并检查合法性
   adapters.py        适配层：把一种对象翻译成另一种
   tracing.py         留痕层：逐步轨迹 + 运行清单
   run.py             编排层：主流程，按顺序调各阶段
+  report.py          报告层：把产物拼成估值报告，并渲染成 PDF
+  workbook.py        报告层：生成七个页签的活公式 Excel 模型
   tests/             框架层测试，验的是「装配」而不是算术
 
 algorithm/
@@ -134,6 +145,7 @@ algorithm/
   runs/             运行产物。产物目录统一叫 runs/，避免和包名 output 只差一个 s
 
 runs/<run_id>/       框架层一次运行的产物：01_projections.json … 10_run_manifest.json
+                     + charts/11…16.png + report.md / report.pdf / model.xlsx
 logs/<run_id>/       该次运行的轨迹（trace.jsonl）与运行记录（run_manifest.json）
 docs/                架构图：Mermaid 源码 + 渲染好的 PNG
 ```
@@ -176,6 +188,22 @@ algorithm/runs/20260927T165932/
 `run_manifest.json` 是可复现性的凭证：记录每个输出文件的 sha256、字节数，
 以及调用方传入的输入说明。两次运行结果不一样时，用它就能判断是输入变了、
 代码变了还是假设变了。
+
+## 报告三件套
+
+一次运行的最后一步，把上面这些产物拼成一份可交付的报告：
+
+| 文件 | 内容 | 需要的依赖 |
+| --- | --- | --- |
+| `report.md` | 报告本体，十一节：结论、主要假设、三表预测、勾稽校验、DCF、敏感性、反解、相对估值、区间汇总、可复现性、图表 | 无 |
+| `report.pdf` | 同一份报告的 PDF 版。中文字体是**嵌进文件**的，任何阅读器都能显示 | reportlab |
+| `model.xlsx` | 七个页签的活公式模型（Inputs / Historicals / Projections / WACC / DCF / Sensitivities / Checks）。改 `Inputs` 里的假设，全表自动重算 | openpyxl |
+
+三件套都**从产物文件读**，不从内存读 —— 改措辞不用重跑计算（`make report`），
+报告里引用的数字与评委拿到的产物来自同一处，不会两处各算一遍。
+
+报告只写**事实**（复述假设、展示结果、列出校验结论）。5 处需要判断的位置留了
+`> 🤖 待 AI 层填写` 占位标记，由 AI 层按通知要求区分「事实 / 推论 / 观点」。
 
 ## 相对估值的两条路径
 
@@ -229,20 +257,18 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 
 ## 下一步
 
-已完成的（原来列在这里的两条）：
-
-已完成的（原来列在这里的两条）：
+已完成的：
 
 - **数据层**：读 `data/assumptions.toml`（TOML 而不是 YAML —— 见上面「依赖」一节的理由）、
   `data/market.csv`、`data/peers.csv`，写 JSON 结果、运行日志与逐步轨迹
 - **把 `forecast.py` 的 FCFF 接进估值**：由 `pipeline/adapters.py` 完成形状转换。
   两条路径算出的 FCFF 必须一致，有回归测试盯着
+- **报告生成**：各类 json 与 csv 已能拼成估值报告 —— `report.md`、`report.pdf`
+  与七页签活公式 `model.xlsx` 都接进了流水线，`make report` 可单独重生成
 
 还在做的，按依赖顺序：
 
 1. **文档抽取**：年报 PDF 到结构化财报，每个数字绑定页码与原文片段。
    这是数据入口最后一段手工环节 —— 现在 `[opening_balance]` 和 `data/peers.csv`
    都是手填的过渡数据
-2. **报告生成**：从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx）。
-   数据已经齐了，差的是把数字拼成文章
-3. **初赛交付物**：项目计划书与 5 分钟演示视频（截止 10 月 18 日）
+2. **初赛交付物**：项目计划书与 5 分钟演示视频（截止 10 月 18 日）

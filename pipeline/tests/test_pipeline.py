@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import io
 import json
 import sys
@@ -1321,6 +1322,116 @@ class TestReport(unittest.TestCase):
         text = build_report(self.run_dir)
         self.assertIn("## 八、相对估值", text)       # 其余节还在
         self.assertNotIn("## 七、反向验证", text)    # 缺产物的那节跳过
+
+    def test_没装依赖时跳过对应格式并说明原因(self):
+        """PDF 与 Excel 是可选依赖：没装就跳过，而不是报错。
+
+        这条在两种环境下的期望不同 —— 装了 reportlab/openpyxl 就生成，
+        没装就跳过并在 trace 里记下原因。两种都算通过。
+        """
+        from pipeline.report import HAS_REPORTLAB
+        from pipeline.workbook import HAS_OPENPYXL
+
+        self.assertEqual((self.run_dir / "report.pdf").exists(), HAS_REPORTLAB)
+        self.assertEqual((self.run_dir / "model.xlsx").exists(), HAS_OPENPYXL)
+
+
+# ---------------------------------------------------------------------------
+# 五之二、活公式 Excel 模型
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("openpyxl") is not None, "没有安装 openpyxl"
+)
+class TestWorkbook(unittest.TestCase):
+    """活公式模型：七个页签，改 Inputs 则全表重算。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        with mock.patch.object(run, "OUTPUT_ROOT", self.root / "runs"), mock.patch.object(
+            run,
+            "RunTrace",
+            lambda rid: tracing.RunTrace(rid, log_root=self.root / "logs"),
+        ):
+            with redirect_stdout(io.StringIO()):
+                run.main()
+        self.run_dir = next((self.root / "runs").iterdir())
+
+    def test_七个页签都在(self):
+        from openpyxl import load_workbook
+
+        book = load_workbook(self.run_dir / "model.xlsx")
+        self.assertEqual(
+            book.sheetnames,
+            ["Inputs", "Historicals", "Projections", "WACC", "DCF",
+             "Sensitivities", "Checks"],
+        )
+
+    def test_关键结果是公式而不是写死的数(self):
+        """「活公式」的意思：改 Inputs 里的假设，估值跟着变。
+
+        所以 DCF 页签的每股价值必须是一个公式，指向 Projections，
+        而不是一个算好的常数。
+        """
+        from openpyxl import load_workbook
+
+        book = load_workbook(self.run_dir / "model.xlsx")
+        dcf = book["DCF"]
+        projections = book["Projections"]
+        wacc = book["WACC"]
+
+        # 每股价值 = 权益价值 / 股数（公式）
+        self.assertTrue(str(dcf["B19"].value).startswith("="))
+        self.assertEqual(dcf["B19"].value, "=B17/B18")
+        # FCFF 引 Projections，折现因子引 WACC
+        self.assertEqual(dcf["B5"].value, "=Projections!B22")
+        self.assertIn("WACC!$B$20", str(dcf["B6"].value))
+        # EBIT 利润率是三项相减（毛利率−费用率−折旧率），摊开写、漏不掉
+        self.assertEqual(projections["B13"].value, "=B7-B9-B11")
+        # WACC 也是公式
+        self.assertTrue(str(wacc["B20"].value).startswith("="))
+
+    def test_基期资产负债表合计用公式且差额为零(self):
+        from openpyxl import load_workbook
+
+        book = load_workbook(self.run_dir / "model.xlsx")
+        sheet = book["Historicals"]
+        # 资产总计 / 负债合计 / 权益合计 都是 SUM，不是写死的数
+        self.assertTrue(str(sheet["B8"].value).startswith("=SUM"))
+        self.assertTrue(str(sheet["B13"].value).startswith("=SUM"))
+        self.assertTrue(str(sheet["B16"].value).startswith("=SUM"))
+        # 平衡差额 = 资产总计 − 负债与权益合计
+        self.assertTrue(str(sheet["B18"].value).startswith("="))
+
+    def test_引擎的值与模型的值并排放着(self):
+        """Checks 页签把这个作为自我校验：Excel 公式 vs 引擎。
+
+        Excel 打开时「差额」应当是 0 —— 说明公式链复现了引擎的口径。
+        """
+        from openpyxl import load_workbook
+
+        book = load_workbook(self.run_dir / "model.xlsx")
+        sheet = book["Checks"]
+        values = {
+            sheet.cell(row=row, column=1).value: sheet.cell(row=row, column=2).value
+            for row in range(1, sheet.max_row + 1)
+        }
+        # 按整行标签精确匹配，不能用关键字模糊找 —— 页签顶部的大标题里
+        # 同时含「Python 引擎」和「Excel 公式」，模糊匹配会先命中标题行。
+        engine_key = "Python 引擎算出的每股价值"
+        model_key = "Excel 公式算出的每股价值"
+        self.assertIn(engine_key, values)
+        self.assertIn(model_key, values)
+        self.assertAlmostEqual(
+            values[engine_key],
+            json.loads((self.run_dir / "03_valuation.json").read_text("utf-8"))[
+                "per_share"
+            ],
+        )
+        self.assertEqual(values[model_key], "=DCF!B19")
 
 
 # ---------------------------------------------------------------------------

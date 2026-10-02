@@ -106,7 +106,9 @@ from .config import (
     load_wacc_params,
 )
 from .report import write_report
+from .report import write_pdf
 from .tracing import RunTrace
+from .workbook import build_workbook
 
 # 仓库根目录：本文件在 pipeline/ 下，往上退一级就是 FinAI/
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -461,25 +463,48 @@ def stage_football_field(
     return field
 
 
-def stage_report(run_dir: Path, trace: RunTrace) -> Path:
-    """阶段：报告生成。把这次运行的产物拼成一份估值报告。
+def stage_report(run_dir: Path, trace: RunTrace) -> tuple[Path, list[str]]:
+    """阶段：报告生成。把这次运行的产物拼成报告与活公式模型。
 
     从**产物文件**读，不从内存读 —— 报告可以单独重新生成（改措辞不用
     重跑计算），而且报告里引用的数字与评委拿到的产物来自同一处。
 
-    生成的 report.md 放在产物目录里，和其他产物在一起。
+    产出三样，都放在产物目录里：
+        report.md     估值报告（Markdown，唯一源）
+        report.pdf    同一份报告的 PDF（需要 reportlab）
+        model.xlsx    活公式 Excel 模型（需要 openpyxl）
+
     叙述性文字留给 AI 层，报告里对应位置有占位标记。
+
+    后两样是可选依赖：没装则跳过，并把原因返回给调用方打印 ——
+    与输出层「没装 matplotlib 就跳过图表」是同一套做法。
     """
     started = time.perf_counter()
-    target = write_report(run_dir)
+    markdown = write_report(run_dir)
+    outputs = [markdown]
+    skipped: list[str] = []
+
+    pdf = write_pdf(run_dir)
+    if pdf is not None:
+        outputs.append(pdf)
+    else:
+        skipped.append("report.pdf（没有安装 reportlab，见 README「依赖」一节）")
+
+    workbook = build_workbook(run_dir)
+    if workbook is not None:
+        outputs.append(workbook)
+    else:
+        skipped.append("model.xlsx（没有安装 openpyxl，见 README「依赖」一节）")
+
     trace.record(
         step="report",
         tool="pipeline.report.write_report",
         duration_s=time.perf_counter() - started,
         inputs=[run_dir / "10_run_manifest.json"],
-        outputs=[target],
+        outputs=outputs,
+        extra={"skipped": skipped} if skipped else None,
     )
-    return target
+    return markdown, skipped
 
 
 def _record_failure(trace: RunTrace, error: Exception) -> Path:
@@ -610,6 +635,18 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
                 "assumptions": asdict(drivers),
                 "opening_balance": asdict(opening),
                 "wacc": wacc_summary,
+                # 市场数据也记进来：估值桥要用（股价、股数、有息负债、现金…），
+                # 而且活公式 Excel 模型里 Inputs 页签需要它。
+                "market": {
+                    "price": market.price,
+                    "diluted_shares": market.diluted_shares,
+                    "interest_bearing_debt": market.interest_bearing_debt,
+                    "cash": market.cash,
+                    "minority_interest": market.minority_interest,
+                    "preferred_stock": market.preferred_stock,
+                    "non_operating_assets": market.non_operating_assets,
+                    "as_of": market.as_of,
+                },
                 # 敏感性分析的区间归因：各变量贡献了区间宽度的百分之多少。
                 # 报告里要引用它 —— 比如「WACC 贡献了 42% 的区间宽度，
                 # 所以必须解释为什么这个折现率是可靠的」。
@@ -633,7 +670,7 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     )
 
     # 阶段十一：报告生成（从刚落盘的产物读，不从内存读）
-    report_path = stage_report(artifacts.directory, trace)
+    report_path, report_skipped = stage_report(artifacts.directory, trace)
 
     manifest = trace.finish()
 
@@ -767,6 +804,8 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     print()
     print(summarize(artifacts))
     print(f"报告        {report_path}")
+    for note in report_skipped:
+        print(f"  跳过      {note}")
     print(f"轨迹        {trace.trace_path}")
     print(f"运行记录    {manifest}")
 

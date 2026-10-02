@@ -34,9 +34,10 @@ run:
 	$(PYTHON) -m pipeline.run
 
 
-# 只重新生成报告：从最近一次运行的产物读，不重跑计算 —— 改措辞时用这个。
+# 只重新生成报告三件套：从最近一次运行的产物读，不重跑计算 —— 改措辞时用这个。
 report:
 	$(PYTHON) -m pipeline.report
+	$(PYTHON) -m pipeline.workbook
 
 
 # 全部单元测试。算法层与框架层分开，方便出问题时定位是哪一边。
@@ -49,7 +50,7 @@ test-algorithm:
 	$(PYTHON) -m unittest discover -s algorithm/tests
 
 
-# 框架层：42 个测试，验的是「装配」——配置读得对不对、串起来跑不跑得通、
+# 框架层：82 个测试，验的是「装配」——配置读得对不对、串起来跑不跑得通、
 # 出错时有没有拦住并留下记录。测试目录跟着框架代码走，所以是 pipeline/tests。
 test-pipeline:
 	@if [ -d pipeline/tests ]; then \
