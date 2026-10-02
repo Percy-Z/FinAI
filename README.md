@@ -2,105 +2,71 @@
 
 2026 年北京市大学生金融人工智能竞赛「自动化估值建模」方向的实现仓库。
 
-当前进度：算法层九个模块、输出层（数据文件 + 六张图）、框架层十一个阶段全部打通。
-`make run` 一条命令从配置跑到产物 —— 十六个数据与图表产物，外加报告三件套
-（`report.md` / `report.pdf` / 活公式 `model.xlsx`），共 427 个单元测试覆盖
-（算法层 345 + 框架层 82）。
+**一句话**：输入一家公司的经营假设和市场快照，自动跑出三表预测、DCF 估值、
+敏感性分析、反向验证与相对估值，最后产出一份带图表、可交互的估值报告。
 
-- **算法层**（`algorithm/finai/`）：三表联动预测、资本成本、估值引擎、敏感性分析、
-  反向求解、相对估值、勾稽校验、财务报表数据结构、输入输出契约。
-- **输出层**（`algorithm/output/`）：把结果落成编号数据文件、运行清单与六张图表。
-- **框架层**（`pipeline/`）：把上述模块装成一条能跑的流水线 —— 读配置、串流程、留痕迹。
+**当前状态**：三层全部打通，一次运行产出 19 个文件，427 个单元测试全部通过。
+**缺口在数据入口（文档抽取）与 AI 推理层**，详见[现在的进度](#现在的进度)。
 
-每个算法的输入输出见 [`algorithm/shuoming.md`](algorithm/shuoming.md)。
+> 整份代码里最重要的一条约定：**AI 只负责找信息和做判断，所有算术都由
+> 确定性代码完成。** 这一条决定了下面所有的分工与目录结构。
 
-## 快速开始
+**目录**：[这个项目做什么](#这个项目做什么) ·
+[系统怎么运转](#系统怎么运转) · [使用方法](#使用方法) ·
+[给 AI 层的交接说明](#给-ai-层的交接说明) · [现在的进度](#现在的进度) ·
+[附录](#附录目录结构依赖与项目知识)
 
-核心流程不需要任何第三方依赖，用系统自带的 Python 3.11+ 即可（用到标准库 `tomllib`）。
-下面的命令都在仓库根目录 `FinAI/` 下执行：
+## 这个项目做什么
 
-```bash
-python3 -m unittest discover -s algorithm/tests -v
-python3 algorithm/examples/dcf_demo.py
-python3 algorithm/examples/sensitivity_demo.py
-python3 algorithm/examples/validate_demo.py
-python3 algorithm/examples/comps_demo.py
-python3 algorithm/examples/forecast_demo.py
-python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件出
-```
+### 输入（`data/` 下三个文件）
 
-注意 `discover` 必须指定 `-s algorithm/tests`：`algorithm` 是命名空间包，
-不带参数直接跑 `python3 -m unittest discover` 会找不到测试。
-
-## 依赖
-
-| 范围 | 依赖 | 说明 |
+| 文件 | 内容 | 性质 |
 | --- | --- | --- |
-| 核心流程 | **无** | 读配置、三表预测、勾稽校验、资本成本、估值、敏感性、落盘、日志 —— 只用标准库 |
-| 图表层 | matplotlib | 渲染 6 张图 |
-| 报告层 | reportlab | 把 `report.md` 渲染成 `report.pdf` |
-| 报告层 | openpyxl | 生成活公式模型 `model.xlsx`（七个页签） |
+| `assumptions.toml` | 目标公司的经营假设、WACC 参数、终值假设、敏感性考察哪些变量、基期资产负债表 | 人为假设 + 历史事实 |
+| `market.csv` | 估值基准日的市场快照：股价、摊薄股数、有息负债、现金、少数股东权益 | 市场事实，每天在变 |
+| `peers.csv` | 3~5 家可比公司的年度财务数据 | 历史事实，一年才换一次 |
 
-**后三样都是可选依赖**：没装也能跑通全流程，只是不生成对应的文件，
-终端与运行清单里会记一条跳过说明。
+配置用 TOML 而不是 YAML（评审建议里写的是 YAML），理由是零依赖 ——
+详见[附录](#为什么用-toml-而不是-yaml)。
 
-装它们有三种方式，选一种即可：
+### 输出（`runs/<run_id>/`，一次运行 19 个文件）
 
-```bash
-# 方式一：虚拟环境（推荐，不碰系统 Python）
-cd FinAI
-python3 -m venv .venv
-.venv/bin/pip install matplotlib reportlab openpyxl
-make run PYTHON=.venv/bin/python      # 用虚拟环境的解释器跑，才会出图表与报告文件
-
-# 方式二：用 Homebrew 装（走 brew 自己的依赖体系）
-brew install matplotlib               # reportlab / openpyxl 走 pip 更省事
-
-# 方式三：装到用户目录（不碰系统 Python，但要显式绕开 PEP 668 的保护）
-python3 -m pip install --break-system-packages --user matplotlib reportlab openpyxl
+```text
+01_projections.json        三表联动预测（逐年明细）
+02_validation_report.json  勾稽校验报告
+03_valuation.json          DCF 估值结果与诊断
+04_tornado.csv             单因素敏感性排序
+05_sensitivity.csv         双因素敏感性网格
+06_reverse_dcf.json        市场隐含假设（反解）
+07_comps.csv               可比公司倍数明细
+08_comps_implied.csv       每种倍数的隐含每股价值
+09_football_field.json     估值区间汇总
+10_run_manifest.json       运行清单（含每个产物的 sha256）
+charts/11…16.png           六张图
+report.md / report.pdf     估值报告（两个格式）
+model.xlsx                 七个页签的活公式 Excel 模型
 ```
 
-> **如果直接 `pip install ...` 报 `externally-managed-environment`**：
-> 那不是本项目的问题 —— Homebrew 会给它的 Python 打上 `externally-managed` 标记
-> （PEP 668），禁止 pip 往系统 Python 里装包，以免和包管理器打架。
-> 用上面三种方式之一即可。
+### 它不做什么
 
-### 关键：装的地方和跑的地方要对上
+- **不联网**。所有输入都是本地文件，跑一次不依赖网络。
+- **不让模型算数字**。折现、终值、敏感性、倍数全部走确定性公式。
+- **不给投资建议**。判断性的文字（「为什么这个假设合理」）由 AI 层写，
+  框架层只在报告里留出位置。
 
-代码只检查「**当前这个 Python 能不能 import 它们**」，不关心装在哪。
-所以不管用哪种方式装，都要保证**装的解释器和跑的解释器是同一个**：
+## 系统怎么运转
 
-| 装在哪 | 怎么跑 |
-| --- | --- |
-| 虚拟环境 | `make run PYTHON=.venv/bin/python` |
-| 系统或用户目录（brew / `pip --user`） | `make run` |
+### 三层，依赖方向单一
 
-**最常见的坑**：装进了虚拟环境，但跑 `make run` 时忘了带 `PYTHON=`，
-于是用回系统 Python，又看到「没有安装 xxx，跳过」的提示。
+| 层 | 目录 | 职责 | 明确不做的事 |
+| --- | --- | --- | --- |
+| **框架层** | `pipeline/` | 读配置 → 按顺序调算法 → 留痕 → 出报告 | 一行金融计算都不写 |
+| **算法层** | `algorithm/finai/` | 全部算术，九个模块 | 不读文件，不知道文件长什么样 |
+| **输出层** | `algorithm/output/` | 把结果写成 json/csv、渲染图表 | 不做计算 |
 
-排查方法：
-
-```bash
-python3 -c "import matplotlib, reportlab, openpyxl; print('系统 Python 里有')"
-.venv/bin/python -c "import matplotlib, reportlab, openpyxl; print('虚拟环境里有')"
-```
-
-`.venv/` 已在 `.gitignore` 里，不会被提交 —— 它和机器绑定（路径写死在
-`pyvenv.cfg` 里），队友克隆后要自己建一个，一条命令的事。
-
-### 第三方组件说明
-
-（竞赛通知要求：使用第三方开源项目应列明名称、版本、来源、许可证及具体使用范围）
-
-| 名称 | 版本 | 来源 | 许可证 | 使用范围 |
-| --- | --- | --- | --- | --- |
-| matplotlib | 以实际安装为准 | <https://matplotlib.org> | BSD 兼容许可（见官方 LICENSE） | 仅用于渲染图表；**所有数值计算不依赖它** |
-| reportlab | 以实际安装为准 | <https://pypi.org/project/reportlab/> | BSD 兼容许可（见官方 LICENSE） | 仅用于把 `report.md` 渲染成 PDF；**所有数值计算不依赖它** |
-| openpyxl | 以实际安装为准 | <https://openpyxl.readthedocs.io> | MIT | 仅用于生成活公式 `model.xlsx`；**所有数值计算不依赖它** |
-
-Python 版本要求：**3.11 及以上**（标准库 `tomllib` 从 3.11 开始提供）。
-
-## 系统架构
+依赖是单向的：`pipeline → finai`、`pipeline → output`，**反向没有**。
+好处有两个：算法层可以脱离框架单独测试（345 个测试用手算数字断言）；
+将来换数据源（比如从手填的 TOML 换成年报抽取出的 JSON）只动框架层，算法层不碰。
 
 ![系统架构与数据流](docs/architecture.png)
 
@@ -109,7 +75,250 @@ Python 版本要求：**3.11 及以上**（标准库 `tomllib` 从 3.11 开始�
 两张图的源码在 [`docs/`](docs/) 下，是可编辑的 Mermaid 文件，改完按
 [`docs/README.md`](docs/README.md) 里的命令重新渲染即可。
 
-## 目录结构
+### 一次运行经过 11 个阶段
+
+每一步都写进 `logs/<run_id>/trace.jsonl`，含耗时、输入、输出。
+
+| # | 阶段 | 干什么 | 产出 |
+| --- | --- | --- | --- |
+| 1 | `load_config` | 读三个数据文件，构造成数据类并检查合法性 | — |
+| 2 | `forecast` | 三表联动预测（默认 5 年） | `01_projections.json` |
+| 3 | `validate` | 逐年的财务勾稽校验 | `02_validation_report.json` |
+| 4 | `wacc` | 资本成本（CAPM + 债务成本） | — |
+| 5 | `valuation` | DCF：折现、终值、估值桥 | `03_valuation.json` |
+| 6 | `sensitivity` | 龙卷风 + 双因素网格 + 区间归因 | `04`、`05` |
+| 7 | `reverse_dcf` | 反解「市场在定价什么假设」 | `06_reverse_dcf.json` |
+| 8 | `comps` | 相对估值：倍数与隐含价值 | `07`、`08` |
+| 9 | `football_field` | 估值区间汇总 | `09_football_field.json` |
+| 10 | `write_outputs` | 落盘 + 渲染六张图 + 写运行清单 | `10`、`charts/` |
+| 11 | `report` | 拼装估值报告三件套 | `report.md`、`report.pdf`、`model.xlsx` |
+
+### 五条硬性设计原则（改代码之前先读这段）
+
+**① AI 不做算术。** 所有数字都由确定性代码产生，AI 只负责找信息、做判断、
+写解释。让大模型算折现率的队伍都栽了 —— 它算错的时候不会报错，只会给你一个
+看着很合理的数字。
+
+**② 两条 FCFF 路径必须一致。** 三表预测那条路和估值引擎那条路，都算一遍
+自由现金流。映射时最容易漏的是**折旧摊销率**：`EBIT 利润率 = 毛利率 − 费用率 −
+折旧率`，漏减这一项，每股价值会**高估约 30%**，而且不报错。
+`pipeline/tests/` 里有一条回归测试专门盯住它。
+
+**③ 所有「选择哪些」都在配置里。** 敏感性考察哪 6 个变量、反向解哪 4 个参数、
+相对估值用哪些倍数 —— 全部在 `assumptions.toml` 里，不在代码里写死。
+代码里只剩「今天该买还是该卖」这种真正需要人判断的事。
+
+**④ 可选依赖优雅降级。** 图表、PDF、Excel 依赖外部库，但**没装也能跑通全流程**，
+只是不生成对应文件，终端与运行清单里记一条跳过说明，绝不崩。
+
+**⑤ 报告从产物文件读，不从内存读。** 好处是改措辞不用重跑计算（`make report`），
+而且报告里引用的数字与评委拿到的产物来自同一处，不会两处各算一遍。
+
+## 使用方法
+
+### 一、装环境
+
+核心流程**零依赖**（只用标准库），系统自带的 Python 3.11+ 就能跑。
+只有图表与报告需要三个可选的库：
+
+```bash
+cd FinAI
+python3 -m venv .venv                        # 建虚拟环境（只做一次）
+.venv/bin/pip install matplotlib reportlab openpyxl
+```
+
+`matplotlib` 渲染六张图、`reportlab` 生成 PDF、`openpyxl` 生成 Excel 模型。
+三种装法（虚拟环境 / Homebrew / 用户目录）与常见报错的排查见
+[附录 · 依赖](#依赖)。
+
+### 二、跑一遍
+
+```bash
+# 完整跑一遍（推荐用虚拟环境的解释器，才会出图表与报告文件）
+make run PYTHON=.venv/bin/python
+
+# 只是想验证代码没坏，用系统 Python 也可以
+make run
+```
+
+跑完终端会打印一次运行的摘要、产物目录、以及有没有跳过什么。
+
+### 三、看产物
+
+```bash
+open runs/<run_id>/report.pdf        # 估值报告
+open runs/<run_id>/model.xlsx        # 活公式模型：改 Inputs，全表自动重算
+open runs/<run_id>/charts            # 六张图
+```
+
+每次运行新建一个带时间戳的目录，**不覆盖上一次**。文件名前面的编号固定：
+数据文件 01~10、图表 11~16，按文件名字典序排出来就是流水线顺序，
+打开文件夹从上往下看就是数据的生成顺序。
+
+### 四、改假设（最常用）
+
+改 `data/assumptions.toml`，重跑，其它什么都不用动。几个小节：
+
+| 小节 | 改什么 |
+| --- | --- |
+| `[company]` | 公司名与代码，只影响报告抬头 |
+| `[drivers]` | 经营假设：收入增速、毛利率、费用率、折旧率、资本开支率、营运资本占比、税率、股利支付率 |
+| `[wacc]` | 无风险利率、贝塔、股权风险溢价、税前债务成本 |
+| `[terminal]` | 终值方法（永续增长 / 退出倍数）与永续增长率 |
+| `[sensitivity]` | 考察哪 6 个变量、双因素网格选哪两个 |
+| `[reverse]` | 反解哪 4 个参数 |
+| `[comps]` | 相对估值用哪些倍数 |
+| `[opening_balance]` | 基期资产负债表（历史事实，将来由抽取层提供） |
+
+实测两个例子，说明「改假设不改代码」是真的：
+
+```text
+收入增速第一年 10% → 15%     每股价值 9.30 → 9.72 元（WACC 不变）
+贝塔 1.20 → 1.50             WACC 9.4659% → 11.2386%
+```
+
+### 五、常用命令
+
+```bash
+make                 # 显示所有命令
+make config          # 只读配置并自检，不跑流水线（改完配置先跑这个）
+make run             # 跑完整条流水线
+make report          # 只重新生成报告三件套，不重跑计算（改措辞时用）
+make test            # 跑全部单元测试（算法层 + 框架层）
+make verify          # 提交前的全量检查：测试 + 配置自检 + 完整跑一遍
+make clean           # 清空 runs/ 与 logs/（代码不动）
+```
+
+指定解释器：在任意命令后面加 `PYTHON=.venv/bin/python`。
+
+## 给 AI 层的交接说明
+
+可以做什么、接口在哪、红线在哪。
+
+### AI 层的五项职责
+
+评审 P1-1 要求 AI 层落四个**推理**职责；全链路图里还有第五个「抽取出处定位」，
+同样归在 AI 推理层（它是输入解析）。五项现在**一个都还没开始**，
+这是整份仓库目前最大的空白：
+
+| # | 职责 | 落点 / 交付物 | 现状 |
+| --- | --- | --- | --- |
+| 1 | **抽取出处定位** | `tools/parse_docs.py` → `data/financials.json`，每个数字带文件 / 页码 / 原文 / 置信度 | 未开始。**要等框架层把字段清单定下来**，见下面接口③ |
+| 2 | **报告撰写** | 报告里 5 处 `待 AI 层填写` 占位 | 位置已留好，等文字 |
+| 3 | **假设依据检索** | 从年报「经营情况讨论与分析」里找出支撑每条假设的原文 | 位置已留好（报告第二节），等依据 |
+| 4 | **合理性审查** | 检查假设自相矛盾、结论可被反证之处，发现问题向人提问 | 未开始 |
+| 5 | **编排调度** | 决定先调哪个工具、发现异常回溯哪一步 | 未开始 |
+
+按**依赖关系**看，第 2 项完全不等别人（纯写作，见效最快）；第 1 项工作量最大，
+而且要先有字段清单才能动。
+
+### 已经给你准备好的三处落点
+
+**① 报告里 5 处占位标记。** 跑完 `make run` 后，`runs/<run_id>/report.md` 里搜
+`待 AI 层填写`，会看到五处。每处都写明了要你回答什么：
+
+| 位置 | 要写的内容 |
+| --- | --- |
+| 一、结论 | 用两三句话概括估值结论，指出最关键的假设是哪一个 |
+| 二、主要假设 | 说明增速、毛利率、WACC 各参数的来源与判断理由（通知里「假设依据」的主要落点） |
+| 六、敏感性分析 | 解释贡献最大的那几个参数为什么可靠 |
+| 七、反向验证 | 把反解出来的隐含假设与公司历史、行业情况对照，给出判断 |
+| 八、相对估值 | 说明可比公司怎么选、剔除的理由，以及不同倍数结论是否一致 |
+
+写作时请按通知要求区分**事实 / 推论 / 观点**，可以引用的数字就在每节的表格里。
+
+**② 运行清单里预留了两个空位。** `logs/<run_id>/run_manifest.json` 里有
+`model_versions` 与 `prompt_versions` 两个空字典，就是给「这次用了哪个模型、
+哪一版提示词」准备的。用了哪个模型就填进去，可复现性靠它。
+
+**③ 文档抽取：位置和口子都开好了，等 `data/financials.json`。**
+
+这一项对应评审的 B4。产物是 `data/financials.json`，三条硬约束：
+
+```text
+每个数字都带出处    文件 / 页码 / 原文片段 / 置信度
+中间格式是 JSON     不要拿 Excel 当中间格式 —— Excel 是给人看的界面，不是给机器传的格式
+科目名不写死        配一份 data/dict/mapping.toml：内部字段 → 年报上可能出现的几种叫法
+                    （A 股「营业总收入」与「营业收入」并存，写死换一家公司就跑不通）
+```
+
+谁负责哪一段：
+
+| 环节 | 谁 |
+| --- | --- |
+| 让模型读 PDF、把数字和出处一起吐出来 | **AI 层** |
+| `financials.json` 的字段清单与口径（schema） | **框架层** —— 目前**有意还没定**，定完单独同步 |
+| 抽出来的数字对不对 | **框架层** —— 用勾稽校验当强制关卡（11 项恒等式） |
+
+现在 `assumptions.toml` 里的 `[opening_balance]` 与 `data/peers.csv` 是**手填的
+过渡数据**，就是这一项的临时替身。框架层已经把位置留好：`pipeline/config.py` 里
+`load_opening_balance` 的注释写着「等抽取层做好之后，这里改成从 `financials.json`
+读，**函数签名不变，调用方不用改**」—— 接进来的时候只动数据源那一处。
+
+⚠️ 一条硬规矩：**不要把抽取结果手抄进 `assumptions.toml`**。抄一遍出处就丢了，
+而「每个数字能指回年报第几页」正是这一项的全部价值 —— 丢了出处，
+抽错数字就变成静默错误，估值结果偏三成也查不出来。
+
+### 一条红线
+
+**不要修改 `pipeline/` 与 `algorithm/` 里的任何算术逻辑。**
+
+要加信息，走这两条路：
+
+```text
+读已有产物   runs/<run_id>/ 下的 json / csv 就是全部事实来源
+写文字       报告里已经留好了位置；缺位置就提出来加，不要在算术代码里夹带解释
+```
+
+如果你需要一个新的数字，**先说**，由框架层或算法层用确定性代码算出来再落盘 ——
+不要在大模型里直接算。
+
+### 建议的接手顺序
+
+```text
+1. 先跑 make run PYTHON=.venv/bin/python，把 report.md 从头读一遍
+2. 写报告里那 5 段文字（纯写作，不用碰代码，见效最快）
+3. 做「假设依据检索」：给每个关键假设找到可引用的外部依据
+4. 做合理性审查：对结论提出反例与质疑（这是评委最想看到的"核心推理"）
+5. 做编排调度：把上面几步串起来
+6. 文档抽取（职责 1）等字段清单定完再动手 —— 它是五项里工作量最大的一个
+```
+
+## 现在的进度
+
+### 已完成
+
+| 模块 | 状态 | 说明 |
+| --- | --- | --- |
+| 算法层 | ✅ | 九个模块：三表预测、资本成本、DCF、敏感性、反解、相对估值、勾稽校验、报表结构、输入输出契约。345 个测试 |
+| 输出层 | ✅ | 编号数据文件 + 运行清单 + 六张图 |
+| 框架层 | ✅ | 十一个阶段：读配置、编排、留痕、报告。82 个测试 |
+| 报告三件套 | ✅ | `report.md`、`report.pdf`（中文字体已嵌入）、七个页签的活公式 `model.xlsx` |
+| 可复现性 | ✅ | 运行清单记录每个产物的 sha256 与代码版本；失败也会留下记录 |
+
+### 未开始
+
+| 事项 | 说明 | 依赖 |
+| --- | --- | --- |
+| **文档抽取**（AI 层职责 1） | 年报 PDF → `data/financials.json`，每个数字绑定文件 / 页码 / 原文 / 置信度 | 最大的缺口。现在 `[opening_balance]` 与 `peers.csv` 是手填的过渡数据；动手前要先有字段清单 |
+| **AI 推理层**（其余四项） | 报告撰写、假设依据检索、合理性审查、编排调度 | 见[给 AI 层的交接说明](#给-ai-层的交接说明)；其中报告撰写的位置已经留好 |
+| **初赛交付物** | 项目计划书 + 5 分钟演示视频 | 截止 10 月 18 日 |
+
+### 验证过的事实（可以直接引用）
+
+```text
+活公式正确      LibreOffice 重算 model.xlsx，每股价值与 Python 引擎逐位一致，
+                差额 0（Excel 与引擎的口径完全对上）
+改假设有效      收入增速 10%→15%：每股价值 9.30→9.72 元
+                贝塔 1.20→1.50：WACC 9.4659%→11.2386%
+可复现          同一配置跑两次，产物除运行编号外逐字节相同
+失败留证据      配置写错、代码出错都会写进 run_manifest.json（status=failed）
+两条路径一致    三表预测与估值引擎各算一遍 FCFF，结果必须相同（有回归测试）
+```
+
+## 附录：目录结构、依赖与项目知识
+
+### 目录结构
 
 ```text
 data/                输入：人填的假设与市场快照
@@ -150,62 +359,97 @@ logs/<run_id>/       该次运行的轨迹（trace.jsonl）与运行记录（run
 docs/                架构图：Mermaid 源码 + 渲染好的 PNG
 ```
 
-## 端到端跑一遍
+### 依赖
 
-`pipeline_demo.py` 把八个算法模块串起来，一次跑完并落盘：
-
-```text
-资本成本 → 三表联动预测 → 勾稽校验 → DCF 估值
-→ 敏感性分析 → 反向求解 → 相对估值 → 足球场图 → 写文件
-```
-
-每次运行新建一个带时间戳的目录，不覆盖上一次。**文件名前面的编号是固定的**，
-数据文件 01 到 10、图表 11 到 16，全目录编号唯一，按文件名字典序排出来就是流水线顺序：
-
-```text
-algorithm/runs/20260927T165932/
-  01_projections.json        三表联动预测
-  02_validation_report.json  勾稽校验报告（可能含多年）
-  03_valuation.json          DCF 估值结果
-  04_tornado.csv             单因素敏感性排序
-  05_sensitivity.csv         双因素敏感性网格
-  06_reverse_dcf.json        反向求解出的市场隐含假设
-  07_comps.csv               每家公司一行的倍数表
-  08_comps_implied.csv       每种倍数的隐含每股价值
-  09_football_field.json     估值区间的数据
-  10_run_manifest.json       运行清单，含每个产物的 sha256
-  charts/
-    11_football_field.png      估值区间
-    12_tornado.png             单因素敏感性
-    13_sensitivity_heatmap.png 双因素敏感性
-    14_peer_multiples.png      可比公司倍数
-    15_forecast_trend.png      三表预测趋势
-    16_validation_summary.png  勾稽校验总览
-```
-
-图表层的组织方式和完整对应表见 [`algorithm/output/README.md`](algorithm/output/README.md)。
-
-`run_manifest.json` 是可复现性的凭证：记录每个输出文件的 sha256、字节数，
-以及调用方传入的输入说明。两次运行结果不一样时，用它就能判断是输入变了、
-代码变了还是假设变了。
-
-## 报告三件套
-
-一次运行的最后一步，把上面这些产物拼成一份可交付的报告：
-
-| 文件 | 内容 | 需要的依赖 |
+| 范围 | 依赖 | 说明 |
 | --- | --- | --- |
-| `report.md` | 报告本体，十一节：结论、主要假设、三表预测、勾稽校验、DCF、敏感性、反解、相对估值、区间汇总、可复现性、图表 | 无 |
-| `report.pdf` | 同一份报告的 PDF 版。中文字体是**嵌进文件**的，任何阅读器都能显示 | reportlab |
-| `model.xlsx` | 七个页签的活公式模型（Inputs / Historicals / Projections / WACC / DCF / Sensitivities / Checks）。改 `Inputs` 里的假设，全表自动重算 | openpyxl |
+| 核心流程 | **无** | 读配置、三表预测、勾稽校验、资本成本、估值、敏感性、落盘、日志 —— 只用标准库 |
+| 图表层 | matplotlib | 渲染 6 张图 |
+| 报告层 | reportlab | 把 `report.md` 渲染成 `report.pdf` |
+| 报告层 | openpyxl | 生成活公式模型 `model.xlsx`（七个页签） |
 
-三件套都**从产物文件读**，不从内存读 —— 改措辞不用重跑计算（`make report`），
-报告里引用的数字与评委拿到的产物来自同一处，不会两处各算一遍。
+**后三样都是可选依赖**：没装也能跑通全流程，只是不生成对应的文件，
+终端与运行清单里会记一条跳过说明。
 
-报告只写**事实**（复述假设、展示结果、列出校验结论）。5 处需要判断的位置留了
-`> 🤖 待 AI 层填写` 占位标记，由 AI 层按通知要求区分「事实 / 推论 / 观点」。
+装它们有三种方式，选一种即可：
 
-## 相对估值的两条路径
+```bash
+# 方式一：虚拟环境（推荐，不碰系统 Python）
+cd FinAI
+python3 -m venv .venv
+.venv/bin/pip install matplotlib reportlab openpyxl
+make run PYTHON=.venv/bin/python      # 用虚拟环境的解释器跑，才会出图表与报告文件
+
+# 方式二：用 Homebrew 装（走 brew 自己的依赖体系）
+brew install matplotlib               # reportlab / openpyxl 走 pip 更省事
+
+# 方式三：装到用户目录（不碰系统 Python，但要显式绕开 PEP 668 的保护）
+python3 -m pip install --break-system-packages --user matplotlib reportlab openpyxl
+```
+
+> **如果直接 `pip install ...` 报 `externally-managed-environment`**：
+> 那不是本项目的问题 —— Homebrew 会给它的 Python 打上 `externally-managed` 标记
+> （PEP 668），禁止 pip 往系统 Python 里装包，以免和包管理器打架。
+> 用上面三种方式之一即可。
+
+#### 关键：装的地方和跑的地方要对上
+
+代码只检查「**当前这个 Python 能不能 import 它们**」，不关心装在哪。
+所以不管用哪种方式装，都要保证**装的解释器和跑的解释器是同一个**：
+
+| 装在哪 | 怎么跑 |
+| --- | --- |
+| 虚拟环境 | `make run PYTHON=.venv/bin/python` |
+| 系统或用户目录（brew / `pip --user`） | `make run` |
+
+**最常见的坑**：装进了虚拟环境，但跑 `make run` 时忘了带 `PYTHON=`，
+于是用回系统 Python，又看到「没有安装 xxx，跳过」的提示。
+
+排查方法：
+
+```bash
+python3 -c "import matplotlib, reportlab, openpyxl; print('系统 Python 里有')"
+.venv/bin/python -c "import matplotlib, reportlab, openpyxl; print('虚拟环境里有')"
+```
+
+`.venv/` 已在 `.gitignore` 里，不会被提交 —— 它和机器绑定（路径写死在
+`pyvenv.cfg` 里），队友克隆后要自己建一个，一条命令的事。
+
+#### 第三方组件说明
+
+（竞赛通知要求：使用第三方开源项目应列明名称、版本、来源、许可证及具体使用范围）
+
+| 名称 | 版本 | 来源 | 许可证 | 使用范围 |
+| --- | --- | --- | --- | --- |
+| matplotlib | 以实际安装为准 | <https://matplotlib.org> | BSD 兼容许可（见官方 LICENSE） | 仅用于渲染图表；**所有数值计算不依赖它** |
+| reportlab | 以实际安装为准 | <https://pypi.org/project/reportlab/> | BSD 兼容许可（见官方 LICENSE） | 仅用于把 `report.md` 渲染成 PDF；**所有数值计算不依赖它** |
+| openpyxl | 以实际安装为准 | <https://openpyxl.readthedocs.io> | MIT | 仅用于生成活公式 `model.xlsx`；**所有数值计算不依赖它** |
+
+Python 版本要求：**3.11 及以上**（标准库 `tomllib` 从 3.11 开始提供）。
+
+#### 为什么用 TOML 而不是 YAML
+
+评审建议里到处写的是 YAML（`mapping.yaml`、`assumptions_resolved.yaml`……），
+**本项目一律改用 TOML**，只为一个理由：**零依赖**。
+
+```text
+Python 3.11+ 自带 tomllib，直接就能读 TOML
+读 YAML 要装 PyYAML —— 一个第三方库
+```
+
+核心流程"零依赖"这条一旦破功，数据入口就多一个装包步骤，
+也就多一个"队友克隆下来跑不通"的理由。两者在这个项目里表达力完全够用
+（都是「小节 + 键值 + 数组表」这一套）。
+
+三种格式各管一段，不要混：
+
+| 格式 | 用在哪 | 谁读 |
+| --- | --- | --- |
+| **TOML** | 人写的配置与字典：`data/assumptions.toml`、将来的 `data/dict/mapping.toml` | 人改，代码读 |
+| **CSV** | 表格型快照：`data/market.csv`、`data/peers.csv` | 人改，代码读 |
+| **JSON** | 机器之间传数据：抽取层产出的 `financials.json`、`runs/` 下的产物 | 代码写，代码读 |
+
+### 相对估值的两条路径
 
 | 倍数类型 | 倍数 | 隐含价值怎么算 |
 | --- | --- | --- |
@@ -219,7 +463,7 @@ algorithm/runs/20260927T165932/
 不参与统计。可比公司通常只有三到五家，按四分位距自动剔除会显著改变结论，
 所以异常值剔除默认关闭，只用中位数抗偏。
 
-## 勾稽校验的四类结论
+### 勾稽校验的四类结论
 
 | 结论 | 含义 |
 | --- | --- |
@@ -233,15 +477,15 @@ BS-03 未分配利润滚动、BS-04 明细不超总额、CF-01 现金滚动、CF
 X-01 收入与应收背离、X-02 利润现金转化、X-03 非经常性损益占比、X-04 量级合理性。
 另有 X-05 跨期一致性需要两份年报，用 `check_restatement` 单独调用。
 
-DQ-01 排在最前面，专门拦"数据其实没抽到"这种情况：资产、收入、净利润、
+DQ-01 排在最前面，专门拦「数据其实没抽到」这种情况：资产、收入、净利润、
 经营现金流全为零时，恒等式 0 = 0 + 0 恒成立，会报出一条假通过。
 
-## 单位约定
+### 单位约定
 
 全项目统一：金额用元，股数用股，比率用小数（0.12 表示 12%）。
 中途不要换单位，这是最容易翻车的地方。
 
-## 计算链
+### 计算链
 
 ```text
 收入     = 上期收入 x (1 + 增长率)
@@ -255,20 +499,10 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
 每股价值 = 权益价值 / 摊薄股数
 ```
 
-## 下一步
+### 其他文档
 
-已完成的：
-
-- **数据层**：读 `data/assumptions.toml`（TOML 而不是 YAML —— 见上面「依赖」一节的理由）、
-  `data/market.csv`、`data/peers.csv`，写 JSON 结果、运行日志与逐步轨迹
-- **把 `forecast.py` 的 FCFF 接进估值**：由 `pipeline/adapters.py` 完成形状转换。
-  两条路径算出的 FCFF 必须一致，有回归测试盯着
-- **报告生成**：各类 json 与 csv 已能拼成估值报告 —— `report.md`、`report.pdf`
-  与七页签活公式 `model.xlsx` 都接进了流水线，`make report` 可单独重生成
-
-还在做的，按依赖顺序：
-
-1. **文档抽取**：年报 PDF 到结构化财报，每个数字绑定页码与原文片段。
-   这是数据入口最后一段手工环节 —— 现在 `[opening_balance]` 和 `data/peers.csv`
-   都是手填的过渡数据
-2. **初赛交付物**：项目计划书与 5 分钟演示视频（截止 10 月 18 日）
+| 文档 | 内容 |
+| --- | --- |
+| [`algorithm/shuoming.md`](algorithm/shuoming.md) | 每个算法模块的输入输出契约 |
+| [`algorithm/output/README.md`](algorithm/output/README.md) | 输出层的编号规则与产物清单 |
+| [`docs/README.md`](docs/README.md) | 架构图怎么改、怎么重新渲染 |

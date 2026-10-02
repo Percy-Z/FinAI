@@ -18,7 +18,7 @@
 | `reverse_dcf.py` | 反向求解：给定股价反解市场隐含假设 | `reverse_dcf.json` |
 | `comps.py` | 相对估值：可比公司倍数、隐含价值、足球场图 | `comps.csv`、`comps_implied.csv` |
 | `validate.py` | 勾稽校验：恒等式、现金口径、信号类检查 | `validation_report.json` |
-| `output/reporting.py` | 输出层：把结果写进 `outputs/<run_id>/` | 01 到 10 号数据文件 + 运行清单 |
+| `output/reporting.py` | 输出层：把结果写进 `runs/<run_id>/` | 01 到 10 号数据文件 + 运行清单 |
 | `output/charts/` | 图表层：一个文件一张图 | 11 到 16 号 PNG |
 
 ---
@@ -306,8 +306,11 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
 `output` 依赖 `finai`，`finai` 完全不知道 `output` 的存在。
 
 **用途**：把算法层的结果落成文件与图表。每次运行产出一个带时间戳的目录
-`outputs/<run_id>/`，不覆盖上一次；同时写一份 `10_run_manifest.json`，
+`runs/<run_id>/`，不覆盖上一次；同时写一份 `10_run_manifest.json`，
 记录每个产物的 sha256 与字节数。
+
+命名提醒：代码目录叫 `output/`，产物目录叫 `runs/`，不再用 `outputs` ——
+只差一个 s 的两个目录名放一起太容易看错。框架层的产物目录同样叫 `runs/`。
 
 输出层分成两部分：`reporting.py` 负责数据文件与运行清单，`charts/` 子包负责图表。
 **一个文件负责一张图**，编号写在文件名最前面，全目录编号唯一（数据 01 到 10，图表 11 到 16）。
@@ -382,7 +385,7 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
 
 ```text
 ① 数据准备与校验
-    年报 PDF（尚未接入） → 文档抽取 → financials.json
+    年报 PDF（尚未接入，属 AI 层职责） → 文档抽取 → financials.json
                                           |
                                           v
                              validate.py 勾稽校验 → validation_report.json
@@ -393,8 +396,8 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
                                             ├→ reverse_dcf.py 反向求解
                                             └→ 足球场图 ← comps.py 相对估值
 
-③ 落盘（reporting.py）
-    上面所有结果 → export_run(RunOutputs(...)) → outputs/<run_id>/
+③ 落盘（reporting.py）与报告（框架层 pipeline/report.py、pipeline/workbook.py）
+    上面所有结果 → export_run(RunOutputs(...)) → runs/<run_id>/
         valuation.json                ← dcf
         football_field.json / .png    ← 足球场图
         comps.csv / comps_implied.csv ← comps
@@ -403,6 +406,9 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
         validation_report.json        ← validate
         projections.json              ← forecast
         run_manifest.json             ← 每个产物的 sha256
+    框架层再从这些产物读出报告三件套：
+        report.md / report.pdf        ← pipeline/report.py
+        model.xlsx                    ← pipeline/workbook.py（七个页签的活公式模型）
 ```
 
 两条独立的估值线（DCF 与相对估值）算出区间后，`football_field()` 会检查它们是否重叠。
@@ -414,18 +420,23 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
 
 | 待做 | 说明 |
 | --- | --- |
-| 数据层中的抽取部分 | 假设配置（TOML）、市场快照（CSV）、可比公司财务（CSV）、JSON 落盘、运行日志都已由 `pipeline/` 与 `algorithm/output/` 完成。**还差的是「年报 PDF → 结构化财报」这一步**，目前 `[opening_balance]` 与 `data/peers.csv` 是手填的过渡数据 |
-| 文档抽取 | 年报 PDF 到结构化财报，每个数字绑定页码与原文片段 |
-| DCF 接三表 | 目前 `dcf.py` 走的是简化路径，`forecast.py` 算出的 FCFF 序列还没有接进估值函数 |
-| 报告生成 | 从各类 json 与 csv 生成估值报告（md / pdf / 活公式 xlsx） |
+| 文档抽取 | 年报 PDF → 结构化财报，每个数字绑定文件 / 页码 / 原文片段 / 置信度。**这项归 AI 层**（评审 §4 的职责表把「抽取」划给「AI 抽取 + 规则校验」），产物是 `financials.json`；字段清单由框架层定。目前 `[opening_balance]` 与 `data/peers.csv` 是手填的过渡数据 |
+
+下面三项原来列在这里，**已经做完了**：
+
+| 已完成 | 说明 |
+| --- | --- |
+| 数据层与日志 | 假设配置（TOML）、市场快照（CSV）、可比公司财务（CSV）、JSON 落盘、逐步轨迹与运行清单，由 `pipeline/` 与 `algorithm/output/` 完成 |
+| DCF 接三表 | `pipeline/adapters.py` 把 `forecast.py` 的 FCFF 序列接进了估值函数。两条路径算出的 FCFF 必须一致，有回归测试盯着（映射时漏减折旧率会低估现金流、高估每股价值约三成，且不报错） |
+| 报告生成 | `pipeline/report.py` 与 `pipeline/workbook.py`：`report.md`、`report.pdf`（中文字体已嵌入）、七个页签的活公式 `model.xlsx` |
 
 每个模块在流水线里的位置见 `pipeline/run.py` 顶部的阶段图：
 
 ```text
 [config] → [forecast] → [validate] → [wacc] → [valuation]
-         → [sensitivity] → [reverse] → [comps] → [football_field] → [落盘]
+         → [sensitivity] → [reverse] → [comps] → [football_field] → [落盘] → [报告]
 ```
 
-当前测试规模：算法层 345 个、框架层 54 个，共 399 个单元测试。
+当前测试规模：算法层 345 个、框架层 82 个，共 427 个单元测试。
 算法层用手算数字做断言，框架层验的是「装配」——
 配置读得对不对、串起来跑不跑得通、出错时有没有拦住并留下记录。

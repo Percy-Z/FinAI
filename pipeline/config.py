@@ -19,8 +19,8 @@ TypeError，而不是被静默忽略成一个默认值。
 假设文件用 TOML 而不是 YAML。原因：本项目坚持零第三方依赖，
 而 YAML 需要 PyYAML，tomllib 是 Python 3.11+ 的标准库。
 
-注意 algorithm/shuoming.md 里仍写着「读 YAML 假设文件」，那是还没同步的
-旧说法，以本文件为准（2026-09-28 决定）。README.md 已于 2026-10-02 同步。
+这个决定在 README.md 的附录「为什么用 TOML 而不是 YAML」里也写了 ——
+因为评审文档建议的是 YAML，不写清理由，后来的人容易又改回去。
 
 将来 [opening_balance] 会改由抽取层从年报生成。届时只需替换
 load_opening_balance 的内部实现，函数签名和下游代码都不用动。
