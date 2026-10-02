@@ -105,6 +105,7 @@ from .config import (
     load_terminal_params,
     load_wacc_params,
 )
+from .report import write_report
 from .tracing import RunTrace
 
 # 仓库根目录：本文件在 pipeline/ 下，往上退一级就是 FinAI/
@@ -460,6 +461,27 @@ def stage_football_field(
     return field
 
 
+def stage_report(run_dir: Path, trace: RunTrace) -> Path:
+    """阶段：报告生成。把这次运行的产物拼成一份估值报告。
+
+    从**产物文件**读，不从内存读 —— 报告可以单独重新生成（改措辞不用
+    重跑计算），而且报告里引用的数字与评委拿到的产物来自同一处。
+
+    生成的 report.md 放在产物目录里，和其他产物在一起。
+    叙述性文字留给 AI 层，报告里对应位置有占位标记。
+    """
+    started = time.perf_counter()
+    target = write_report(run_dir)
+    trace.record(
+        step="report",
+        tool="pipeline.report.write_report",
+        duration_s=time.perf_counter() - started,
+        inputs=[run_dir / "10_run_manifest.json"],
+        outputs=[target],
+    )
+    return target
+
+
 def _record_failure(trace: RunTrace, error: Exception) -> Path:
     """失败的运行也要留证据：记一笔失败，再写清单。
 
@@ -610,6 +632,9 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         outputs=sorted(str(path) for path in artifacts.files.values()),
     )
 
+    # 阶段十一：报告生成（从刚落盘的产物读，不从内存读）
+    report_path = stage_report(artifacts.directory, trace)
+
     manifest = trace.finish()
 
     # 打印运行摘要，让人一眼看到这次跑出了什么
@@ -741,6 +766,7 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 产物列表由输出层的 summarize 打印（编号、文件名、字节数）
     print()
     print(summarize(artifacts))
+    print(f"报告        {report_path}")
     print(f"轨迹        {trace.trace_path}")
     print(f"运行记录    {manifest}")
 

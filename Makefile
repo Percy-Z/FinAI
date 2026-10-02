@@ -8,7 +8,7 @@
 PYTHON ?= python3
 
 .DEFAULT_GOAL := help
-.PHONY: help config run test test-algorithm test-pipeline verify clean
+.PHONY: help config run report test test-algorithm test-pipeline verify clean
 
 
 help:
@@ -16,6 +16,7 @@ help:
 	@echo ""
 	@echo "  make config    只读配置并自检，不跑流水线"
 	@echo "  make run       跑完整条流水线"
+	@echo "  make report    只重新生成报告（用最近一次运行的产物）"
 	@echo "  make test      跑全部单元测试"
 	@echo "  make verify    提交前的全量检查（测试 + 配置 + 完整跑一遍）"
 	@echo "  make clean     删掉运行产物（runs/ 和 logs/）"
@@ -31,6 +32,11 @@ config:
 # 跑完整条流水线：读配置 → 各阶段 → 落盘 → 写日志。
 run:
 	$(PYTHON) -m pipeline.run
+
+
+# 只重新生成报告：从最近一次运行的产物读，不重跑计算 —— 改措辞时用这个。
+report:
+	$(PYTHON) -m pipeline.report
 
 
 # 全部单元测试。算法层与框架层分开，方便出问题时定位是哪一边。

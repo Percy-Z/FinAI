@@ -1243,7 +1243,88 @@ class TestEndToEnd(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 五、日志层
+# 五、报告生成
+# ---------------------------------------------------------------------------
+
+
+class TestReport(unittest.TestCase):
+    """报告是最后一个阶段：从产物文件读，拼成一份可读的估值报告。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        with mock.patch.object(run, "OUTPUT_ROOT", self.root / "runs"), mock.patch.object(
+            run,
+            "RunTrace",
+            lambda rid: tracing.RunTrace(rid, log_root=self.root / "logs"),
+        ):
+            with redirect_stdout(io.StringIO()):
+                run.main()
+        self.run_dir = next((self.root / "runs").iterdir())
+        self.text = (self.run_dir / "report.md").read_text(encoding="utf-8")
+
+    def test_报告在产物目录里自动生成(self):
+        self.assertTrue((self.run_dir / "report.md").exists())
+        self.assertGreater(len(self.text.splitlines()), 100)
+
+    def test_报告包含全部章节(self):
+        for title in [
+            "一、结论",
+            "二、主要假设",
+            "三、三表联动预测",
+            "四、财务勾稽校验",
+            "五、现金流折现估值",
+            "六、敏感性分析",
+            "七、反向验证",
+            "八、相对估值",
+            "九、估值区间汇总",
+            "十、数据来源与可复现性",
+            "附录：图表",
+        ]:
+            self.assertIn(f"## {title}", self.text, msg=f"报告缺少「{title}」")
+
+    def test_报告里的关键数字与产物一致(self):
+        """报告的数字必须来自产物 —— 这里是逐项核对，防止两处各算一遍。"""
+        valuation = json.loads((self.run_dir / "03_valuation.json").read_text("utf-8"))
+        manifest = json.loads(
+            (self.run_dir / "10_run_manifest.json").read_text("utf-8")
+        )
+        # 每股价值（两位小数）
+        self.assertIn(f"{valuation['per_share']:.2f}", self.text)
+        # WACC（四位小数百分比）
+        wacc = manifest["inputs"]["run_parameters"]["wacc"]["value"]
+        self.assertIn(f"{wacc:.4%}", self.text)
+        # 运行编号
+        self.assertIn(manifest["run_id"], self.text)
+
+    def test_判断性的内容留给AI层(self):
+        """报告只生成事实性内容；涉及判断的位置有占位标记。"""
+        hint_count = self.text.count("待 AI 层填写")
+        self.assertGreaterEqual(
+            hint_count, 4, msg="涉及判断的位置应当留出 AI 占位标记"
+        )
+
+    def test_报告可以单独重新生成(self):
+        """改措辞不用重跑计算 —— report 从产物读，两次生成结果相同。"""
+        from pipeline.report import build_report, write_report
+
+        first = build_report(self.run_dir)
+        again = write_report(self.run_dir).read_text(encoding="utf-8")
+        self.assertEqual(first, again)
+
+    def test_缺产物时跳过那一节而不报错(self):
+        """某个阶段没跑（或还没接）时，报告应当照常生成。"""
+        from pipeline.report import build_report
+
+        (self.run_dir / "06_reverse_dcf.json").unlink()
+        text = build_report(self.run_dir)
+        self.assertIn("## 八、相对估值", text)       # 其余节还在
+        self.assertNotIn("## 七、反向验证", text)    # 缺产物的那节跳过
+
+
+# ---------------------------------------------------------------------------
+# 六、日志层
 # ---------------------------------------------------------------------------
 
 
@@ -1262,7 +1343,7 @@ class TestTracing(unittest.TestCase):
 
         trace_file = next((root / "logs").glob("*/trace.jsonl"))
         lines = [line for line in trace_file.read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(len(lines), 10)
+        self.assertEqual(len(lines), 11)
 
         steps = []
         for index, line in enumerate(lines, start=1):
@@ -1285,6 +1366,7 @@ class TestTracing(unittest.TestCase):
                 "comps",
                 "football_field",
                 "write_outputs",
+                "report",
             ],
         )
 
