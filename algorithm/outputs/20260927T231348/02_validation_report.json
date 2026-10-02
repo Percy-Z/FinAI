@@ -1,0 +1,730 @@
+{
+  "count": 5,
+  "reports": [
+    {
+      "fiscal_year": 2026,
+      "source": "pipeline_demo",
+      "summary": {
+        "pass": 10,
+        "warning": 0,
+        "fail": 0,
+        "skipped": 1,
+        "total": 11
+      },
+      "checks": [
+        {
+          "check_id": "DQ-01",
+          "category": "data_quality",
+          "description": "核心数字不应全部为零或缺失，资产总计必须为正",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "BS-01",
+          "category": "balance_sheet",
+          "description": "资产总计 = 负债合计 + 所有者权益合计",
+          "status": "pass",
+          "expected": 432.57500000000005,
+          "actual": 432.57500000000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-02",
+          "category": "balance_sheet",
+          "description": "所有者权益 = 归母权益 + 少数股东权益",
+          "status": "pass",
+          "expected": 263.57500000000005,
+          "actual": 263.57500000000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-03",
+          "category": "balance_sheet",
+          "description": "期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利",
+          "status": "pass",
+          "expected": 163.57500000000002,
+          "actual": 163.57500000000002,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-04",
+          "category": "balance_sheet",
+          "description": "货币资金、应收账款、存货均不应超过资产总计",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "CF-01",
+          "category": "cash_flow",
+          "description": "期末现金 = 期初现金 + 经营 + 投资 + 筹资 + 汇率影响",
+          "status": "pass",
+          "expected": 88.17500000000001,
+          "actual": 88.17500000000001,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "CF-02",
+          "category": "cash_flow",
+          "description": "现金流量表期末现金 与 资产负债表货币资金 的口径差异",
+          "status": "pass",
+          "expected": 88.17500000000001,
+          "actual": 88.17500000000001,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "X-01",
+          "category": "signal",
+          "description": "应收账款增速不应显著快于营业收入增速",
+          "status": "pass",
+          "expected": 0.10000000000000009,
+          "actual": 0.10000000000000009,
+          "difference": null,
+          "metric": 0.0,
+          "tolerance": 0.2,
+          "note": "营业收入增速 +10.0%，应收账款增速 +10.0%，相差 +0.0%"
+        },
+        {
+          "check_id": "X-02",
+          "category": "signal",
+          "description": "经营活动现金流 与 净利润 的转化关系",
+          "status": "pass",
+          "expected": 62.25000000000002,
+          "actual": 78.25000000000003,
+          "difference": null,
+          "metric": 1.2570281124497993,
+          "tolerance": 0.5,
+          "note": "经营现金流 78，净利润 62，比率 1.26"
+        },
+        {
+          "check_id": "X-03",
+          "category": "signal",
+          "description": "非经常性损益占归母净利润的比重",
+          "status": "skipped",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": "缺少输入：non_recurring_gains"
+        },
+        {
+          "check_id": "X-04",
+          "category": "signal",
+          "description": "营业收入与资产总计的量级关系应落在合理区间",
+          "status": "pass",
+          "expected": 440.00000000000006,
+          "actual": 432.57500000000005,
+          "difference": null,
+          "metric": 1.0171646535282899,
+          "tolerance": null,
+          "note": "营业收入 / 资产总计 = 1.0172"
+        }
+      ]
+    },
+    {
+      "fiscal_year": 2027,
+      "source": "pipeline_demo",
+      "summary": {
+        "pass": 10,
+        "warning": 0,
+        "fail": 0,
+        "skipped": 1,
+        "total": 11
+      },
+      "checks": [
+        {
+          "check_id": "DQ-01",
+          "category": "data_quality",
+          "description": "核心数字不应全部为零或缺失，资产总计必须为正",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "BS-01",
+          "category": "balance_sheet",
+          "description": "资产总计 = 负债合计 + 所有者权益合计",
+          "status": "pass",
+          "expected": 484.26800000000003,
+          "actual": 484.26800000000003,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-02",
+          "category": "balance_sheet",
+          "description": "所有者权益 = 归母权益 + 少数股东权益",
+          "status": "pass",
+          "expected": 311.30800000000005,
+          "actual": 311.30800000000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-03",
+          "category": "balance_sheet",
+          "description": "期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利",
+          "status": "pass",
+          "expected": 211.30800000000005,
+          "actual": 211.30800000000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-04",
+          "category": "balance_sheet",
+          "description": "货币资金、应收账款、存货均不应超过资产总计",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "CF-01",
+          "category": "cash_flow",
+          "description": "期末现金 = 期初现金 + 经营 + 投资 + 筹资 + 汇率影响",
+          "status": "pass",
+          "expected": 125.17200000000001,
+          "actual": 125.17200000000003,
+          "difference": 1.4210854715202004e-14,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "CF-02",
+          "category": "cash_flow",
+          "description": "现金流量表期末现金 与 资产负债表货币资金 的口径差异",
+          "status": "pass",
+          "expected": 125.17200000000003,
+          "actual": 125.17200000000003,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "X-01",
+          "category": "signal",
+          "description": "应收账款增速不应显著快于营业收入增速",
+          "status": "pass",
+          "expected": 0.09000000000000008,
+          "actual": 0.09000000000000008,
+          "difference": null,
+          "metric": 0.0,
+          "tolerance": 0.2,
+          "note": "营业收入增速 +9.0%，应收账款增速 +9.0%，相差 +0.0%"
+        },
+        {
+          "check_id": "X-02",
+          "category": "signal",
+          "description": "经营活动现金流 与 净利润 的转化关系",
+          "status": "pass",
+          "expected": 68.19000000000001,
+          "actual": 86.23000000000002,
+          "difference": null,
+          "metric": 1.2645549200762576,
+          "tolerance": 0.5,
+          "note": "经营现金流 86，净利润 68，比率 1.26"
+        },
+        {
+          "check_id": "X-03",
+          "category": "signal",
+          "description": "非经常性损益占归母净利润的比重",
+          "status": "skipped",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": "缺少输入：non_recurring_gains"
+        },
+        {
+          "check_id": "X-04",
+          "category": "signal",
+          "description": "营业收入与资产总计的量级关系应落在合理区间",
+          "status": "pass",
+          "expected": 479.6000000000001,
+          "actual": 484.26800000000003,
+          "difference": null,
+          "metric": 0.9903607093592806,
+          "tolerance": null,
+          "note": "营业收入 / 资产总计 = 0.9904"
+        }
+      ]
+    },
+    {
+      "fiscal_year": 2028,
+      "source": "pipeline_demo",
+      "summary": {
+        "pass": 10,
+        "warning": 0,
+        "fail": 0,
+        "skipped": 1,
+        "total": 11
+      },
+      "checks": [
+        {
+          "check_id": "DQ-01",
+          "category": "data_quality",
+          "description": "核心数字不应全部为零或缺失，资产总计必须为正",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "BS-01",
+          "category": "balance_sheet",
+          "description": "资产总计 = 负债合计 + 所有者权益合计",
+          "status": "pass",
+          "expected": 539.86644,
+          "actual": 539.8664400000001,
+          "difference": 1.1368683772161603e-13,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-02",
+          "category": "balance_sheet",
+          "description": "所有者权益 = 归母权益 + 少数股东权益",
+          "status": "pass",
+          "expected": 363.06964000000005,
+          "actual": 363.06964000000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-03",
+          "category": "balance_sheet",
+          "description": "期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利",
+          "status": "pass",
+          "expected": 263.06964000000005,
+          "actual": 263.06964000000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-04",
+          "category": "balance_sheet",
+          "description": "货币资金、应收账款、存货均不应超过资产总计",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "CF-01",
+          "category": "cash_flow",
+          "description": "期末现金 = 期初现金 + 经营 + 投资 + 筹资 + 汇率影响",
+          "status": "pass",
+          "expected": 165.99876000000003,
+          "actual": 165.99876000000003,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "CF-02",
+          "category": "cash_flow",
+          "description": "现金流量表期末现金 与 资产负债表货币资金 的口径差异",
+          "status": "pass",
+          "expected": 165.99876000000003,
+          "actual": 165.99876000000003,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "X-01",
+          "category": "signal",
+          "description": "应收账款增速不应显著快于营业收入增速",
+          "status": "pass",
+          "expected": 0.08000000000000007,
+          "actual": 0.08000000000000007,
+          "difference": null,
+          "metric": 0.0,
+          "tolerance": 0.2,
+          "note": "营业收入增速 +8.0%，应收账款增速 +8.0%，相差 +0.0%"
+        },
+        {
+          "check_id": "X-02",
+          "category": "signal",
+          "description": "经营活动现金流 与 净利润 的转化关系",
+          "status": "pass",
+          "expected": 73.9452,
+          "actual": 94.08840000000001,
+          "difference": null,
+          "metric": 1.2724071339316143,
+          "tolerance": 0.5,
+          "note": "经营现金流 94，净利润 74，比率 1.27"
+        },
+        {
+          "check_id": "X-03",
+          "category": "signal",
+          "description": "非经常性损益占归母净利润的比重",
+          "status": "skipped",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": "缺少输入：non_recurring_gains"
+        },
+        {
+          "check_id": "X-04",
+          "category": "signal",
+          "description": "营业收入与资产总计的量级关系应落在合理区间",
+          "status": "pass",
+          "expected": 517.9680000000001,
+          "actual": 539.8664400000001,
+          "difference": null,
+          "metric": 0.9594373008257375,
+          "tolerance": null,
+          "note": "营业收入 / 资产总计 = 0.9594"
+        }
+      ]
+    },
+    {
+      "fiscal_year": 2029,
+      "source": "pipeline_demo",
+      "summary": {
+        "pass": 10,
+        "warning": 0,
+        "fail": 0,
+        "skipped": 1,
+        "total": 11
+      },
+      "checks": [
+        {
+          "check_id": "DQ-01",
+          "category": "data_quality",
+          "description": "核心数字不应全部为零或缺失，资产总计必须为正",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "BS-01",
+          "category": "balance_sheet",
+          "description": "资产总计 = 负债合计 + 所有者权益合计",
+          "status": "pass",
+          "expected": 599.0609208000001,
+          "actual": 599.0609208000001,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-02",
+          "category": "balance_sheet",
+          "description": "所有者权益 = 归母权益 + 少数股东权益",
+          "status": "pass",
+          "expected": 418.6383448,
+          "actual": 418.6383448,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-03",
+          "category": "balance_sheet",
+          "description": "期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利",
+          "status": "pass",
+          "expected": 318.6383448,
+          "actual": 318.6383448,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-04",
+          "category": "balance_sheet",
+          "description": "货币资金、应收账款、存货均不应超过资产总计",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "CF-01",
+          "category": "cash_flow",
+          "description": "期末现金 = 期初现金 + 经营 + 投资 + 筹资 + 汇率影响",
+          "status": "pass",
+          "expected": 210.58654320000008,
+          "actual": 210.58654320000005,
+          "difference": -2.842170943040401e-14,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "CF-02",
+          "category": "cash_flow",
+          "description": "现金流量表期末现金 与 资产负债表货币资金 的口径差异",
+          "status": "pass",
+          "expected": 210.58654320000005,
+          "actual": 210.58654320000005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "X-01",
+          "category": "signal",
+          "description": "应收账款增速不应显著快于营业收入增速",
+          "status": "pass",
+          "expected": 0.07000000000000006,
+          "actual": 0.07000000000000006,
+          "difference": null,
+          "metric": 0.0,
+          "tolerance": 0.2,
+          "note": "营业收入增速 +7.0%，应收账款增速 +7.0%，相差 +0.0%"
+        },
+        {
+          "check_id": "X-02",
+          "category": "signal",
+          "description": "经营活动现金流 与 净利润 的转化关系",
+          "status": "pass",
+          "expected": 79.38386400000005,
+          "actual": 101.65648800000005,
+          "difference": null,
+          "metric": 1.2805686556149496,
+          "tolerance": 0.5,
+          "note": "经营现金流 102，净利润 79，比率 1.28"
+        },
+        {
+          "check_id": "X-03",
+          "category": "signal",
+          "description": "非经常性损益占归母净利润的比重",
+          "status": "skipped",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": "缺少输入：non_recurring_gains"
+        },
+        {
+          "check_id": "X-04",
+          "category": "signal",
+          "description": "营业收入与资产总计的量级关系应落在合理区间",
+          "status": "pass",
+          "expected": 554.2257600000002,
+          "actual": 599.0609208000001,
+          "difference": null,
+          "metric": 0.9251575937550292,
+          "tolerance": null,
+          "note": "营业收入 / 资产总计 = 0.9252"
+        }
+      ]
+    },
+    {
+      "fiscal_year": 2030,
+      "source": "pipeline_demo",
+      "summary": {
+        "pass": 10,
+        "warning": 0,
+        "fail": 0,
+        "skipped": 1,
+        "total": 11
+      },
+      "checks": [
+        {
+          "check_id": "DQ-01",
+          "category": "data_quality",
+          "description": "核心数字不应全部为零或缺失，资产总计必须为正",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "BS-01",
+          "category": "balance_sheet",
+          "description": "资产总计 = 负债合计 + 所有者权益合计",
+          "status": "pass",
+          "expected": 661.446602448,
+          "actual": 661.4466024480001,
+          "difference": 1.1368683772161603e-13,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-02",
+          "category": "balance_sheet",
+          "description": "所有者权益 = 归母权益 + 少数股东权益",
+          "status": "pass",
+          "expected": 477.69867188800004,
+          "actual": 477.69867188800004,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-03",
+          "category": "balance_sheet",
+          "description": "期末未分配利润 = 期初 + 归母净利润 - 提取盈余公积 - 宣告股利",
+          "status": "pass",
+          "expected": 377.69867188800004,
+          "actual": 377.69867188800004,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "BS-04",
+          "category": "balance_sheet",
+          "description": "货币资金、应收账款、存货均不应超过资产总计",
+          "status": "pass",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": ""
+        },
+        {
+          "check_id": "CF-01",
+          "category": "cash_flow",
+          "description": "期末现金 = 期初现金 + 经营 + 投资 + 筹资 + 汇率影响",
+          "status": "pass",
+          "expected": 258.784045392,
+          "actual": 258.78404539200005,
+          "difference": 5.684341886080802e-14,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "CF-02",
+          "category": "cash_flow",
+          "description": "现金流量表期末现金 与 资产负债表货币资金 的口径差异",
+          "status": "pass",
+          "expected": 258.78404539200005,
+          "actual": 258.78404539200005,
+          "difference": 0.0,
+          "metric": null,
+          "tolerance": 1.0,
+          "note": ""
+        },
+        {
+          "check_id": "X-01",
+          "category": "signal",
+          "description": "应收账款增速不应显著快于营业收入增速",
+          "status": "pass",
+          "expected": 0.06000000000000005,
+          "actual": 0.06000000000000005,
+          "difference": null,
+          "metric": 0.0,
+          "tolerance": 0.2,
+          "note": "营业收入增速 +6.0%，应收账款增速 +6.0%，相差 +0.0%"
+        },
+        {
+          "check_id": "X-02",
+          "category": "signal",
+          "description": "经营活动现金流 与 净利润 的转化关系",
+          "status": "pass",
+          "expected": 84.37189584000005,
+          "actual": 108.75782928000004,
+          "difference": null,
+          "metric": 1.289029103793574,
+          "tolerance": 0.5,
+          "note": "经营现金流 109，净利润 84，比率 1.29"
+        },
+        {
+          "check_id": "X-03",
+          "category": "signal",
+          "description": "非经常性损益占归母净利润的比重",
+          "status": "skipped",
+          "expected": null,
+          "actual": null,
+          "difference": null,
+          "metric": null,
+          "tolerance": null,
+          "note": "缺少输入：non_recurring_gains"
+        },
+        {
+          "check_id": "X-04",
+          "category": "signal",
+          "description": "营业收入与资产总计的量级关系应落在合理区间",
+          "status": "pass",
+          "expected": 587.4793056000002,
+          "actual": 661.4466024480001,
+          "difference": null,
+          "metric": 0.8881734420068853,
+          "tolerance": null,
+          "note": "营业收入 / 资产总计 = 0.8882"
+        }
+      ]
+    }
+  ]
+}
