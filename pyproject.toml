@@ -1,5 +1,33 @@
 # 这个文件只放工具配置，项目本身零依赖，用系统自带的 Python 3 就能跑。
 
+[project]
+name = "finai"
+version = "0.1.0"
+description = "自动化估值建模：从财务假设跑到带推理与图表的估值报告"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"   # 用到 tomllib，它是 3.11 才进标准库的
+
+# 核心链路只用标准库 —— 这里刻意为空，装了也不会拉任何包。
+# 可选增强见下面的 optional-dependencies，缺了会降级而不是报错。
+dependencies = []
+
+[project.optional-dependencies]
+charts  = ["matplotlib>=3.8"]      # 六张分析图
+pdf     = ["reportlab>=4.0"]       # PDF 后备渲染（首选是 LaTeX）
+extract = ["pdfplumber>=0.11"]     # 年报 PDF 抽取
+all     = ["matplotlib>=3.8", "reportlab>=4.0", "pdfplumber>=0.11"]
+
+[project.scripts]
+finai = "pipeline.cli:main"        # 装完就有 finai 命令，见 docs/reproduce.md
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["algorithm", "algorithm.finai", "algorithm.output", "pipeline", "mcp_server"]
+
 [tool.mypy]
 # 第三方库（例如要装了才有的 matplotlib）找不到类型存根时不报错
 ignore_missing_imports = true

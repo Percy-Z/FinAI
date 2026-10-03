@@ -1,7 +1,7 @@
 """输出层：把算法结果落成文件。
 
 设计约定
-    每次运行产出一个带时间戳的目录 outputs/<run_id>/，不覆盖上一次。
+    每次运行产出一个带时间戳的目录 runs/<run_id>/，不覆盖上一次。
     两次运行结果不一样时，能立刻判断是输入变了、代码变了还是假设变了。
 
     同时写一份 run_manifest.json，记录每个输出文件的 sha256、字节数，
@@ -191,7 +191,7 @@ def export_run(
     narrative: Any = None,
     report_meta: dict[str, Any] | None = None,
 ) -> RunArtifacts:
-    """把一次运行的全部结果写进 outputs/<run_id>/。
+    """把一次运行的全部结果写进 runs/<run_id>/。
 
     narrative 是 narrative.NarrativeResult（大模型写的各章节正文），可以不给：
     报告照样出，只是叙述段落换成一句说明。这样「有没有大模型」不影响

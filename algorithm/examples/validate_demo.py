@@ -3,7 +3,7 @@
 运行：python3 examples/validate_demo.py
 
 用一份「报表平了但利润质量存疑」的样例数据跑完全部检查，
-打印结论并写出 outputs/demo/validation_report.json。
+打印结论并写出 runs/demo/validation_report.json。
 
 样例里的问题都是刻意埋的：
     应收账款增速 46.2%，营业收入增速 11.1%  -> X-01 告警

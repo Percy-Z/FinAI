@@ -3,7 +3,7 @@
 运行：python3 examples/sensitivity_demo.py
 
 打印龙卷风图、区间归因、双因素网格和反向求解结果，
-并把 tornado.csv 与 sensitivity.csv 写到 outputs/demo/ 下。
+并把 tornado.csv 与 sensitivity.csv 写到 runs/demo/ 下。
 """
 
 import sys

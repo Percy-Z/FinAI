@@ -179,7 +179,7 @@ class MarketData:
 
 @dataclass
 class DCFResult:
-    """估值结果。字段名与 outputs/<run_id>/valuation.json 保持一致。"""
+    """估值结果。字段名与 runs/<run_id>/valuation.json 保持一致。"""
 
     wacc: float
     projection: Projection

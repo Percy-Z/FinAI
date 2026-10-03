@@ -8,7 +8,7 @@
 PYTHON ?= python3
 
 .DEFAULT_GOAL := help
-.PHONY: help config run test test-algorithm test-pipeline test-mcp lint check verify clean
+.PHONY: help install config run demo test test-algorithm test-pipeline test-mcp lint check verify clean
 
 
 help:
@@ -16,6 +16,8 @@ help:
 	@echo ""
 	@echo "  make config    只读配置并自检，不跑流水线"
 	@echo "  make run       跑完整条流水线"
+	@echo "  make demo      现场演示：跑一遍 + 打印产物 + 打开报告 PDF"
+	@echo "  make install   把本项目管理安装为 finai 命令（pip install -e .）"
 	@echo "  make test      跑全部单元测试"
 	@echo "  make lint      静态检查：mypy + pyflakes + pyright（严格模式）"
 	@echo "  make check     验收最近一次运行的产物（文件齐不齐、报告有没有图）"
@@ -28,6 +30,23 @@ help:
 # 只读配置，构造出各个数据类对象并打印。配置有问题时会在这里暴露。
 config:
 	$(PYTHON) -m pipeline.config
+
+
+# 把本项目管理安装到当前解释器，装完就有 finai 命令。
+# 用 -e（可编辑）是因为你们在开发中：改代码不用重装。
+install:
+	$(PYTHON) -m pip install -e .
+
+
+# 现场演示用：跑一遍、打印产物清单、打开报告 PDF。
+# 决赛要求「评审现场可实时处理的样例数据」，这一条命令就是那件事。
+demo:
+	$(PYTHON) -m pipeline.run
+	@latest=$$(ls -1dt runs/*/ | head -1); \
+	if [ -f "$$latest/19_report.pdf" ]; then \
+		echo "打开报告：$$latest/19_report.pdf"; \
+		open "$$latest/19_report.pdf" 2>/dev/null || echo "（打不开预览就手动打开上面的路径）"; \
+	fi
 
 
 # 跑完整条流水线：读配置 → 各阶段 → 落盘 → 写日志。

@@ -10,17 +10,26 @@
 
 ## 快速开始
 
-不需要安装任何第三方依赖，用系统自带的 Python 3 即可。
+**核心链路只用 Python 标准库**，不装任何第三方包也能跑完流水线并产出
+Markdown 报告。四个可选依赖分别负责图表、PDF、年报抽取，装了就生效、
+没装就降级（不报错）。完整清单与安装方式见 [`THIRD_PARTY.md`](THIRD_PARTY.md)，
+复现步骤见 [`docs/reproduce.md`](docs/reproduce.md)。
+
+```bash
+python3 -m pip install -e ".[all]"   # 可选依赖全装；只想跑通可跳过
+make verify                          # 静态检查 + 测试 + 配置 + 跑一遍 + 验收产物
+make demo                            # 现场演示：跑一遍并打开报告 PDF
+```
+
+装完之后多一个 `finai` 命令，在任何目录都能用：`finai run`、`finai check`、
+`finai extract <年报.pdf>`、`finai mcp`、`finai version`。
+
 下面的命令都在仓库根目录 `FinAI/` 下执行：
 
 ```bash
-python3 -m unittest discover -s algorithm/tests -v
-python3 algorithm/examples/dcf_demo.py
-python3 algorithm/examples/sensitivity_demo.py
-python3 algorithm/examples/validate_demo.py
-python3 algorithm/examples/comps_demo.py
-python3 algorithm/examples/forecast_demo.py
-python3 algorithm/examples/pipeline_demo.py   # 端到端：假设进，文件出
+python3 -m unittest discover -s algorithm/tests -v   # 算法层测试
+python3 algorithm/examples/dcf_demo.py               # 各模块的演示脚本
+python3 algorithm/examples/pipeline_demo.py          # 端到端：假设进，文件出
 ```
 
 注意 `discover` 必须指定 `-s algorithm/tests`：`algorithm` 是命名空间包，
@@ -188,6 +197,41 @@ FCFF     = NOPAT + 折旧摊销 - 资本开支 - 营运资本增加
    （目前估值走的是简化路径，两条路径的 FCFF 由回归测试盯着，数值一致）
 3. 初赛交付物：项目计划书与 5 分钟演示视频（截止 10 月 18 日）
 
-报告已经能出 Markdown 与自包含 HTML，后者可以直接在浏览器里打印成 PDF。
-刻意没有引入 reportlab：本项目的原则是核心零第三方依赖，
-可选的增强（matplotlib 画图、大模型写正文）都做成「缺了就降级」。
+报告出三份：Markdown（内容源）、自包含 HTML（图内嵌，浏览器直接看）、
+A4 PDF（LaTeX 排版，12 页）。PDF 走「LaTeX 优先、reportlab 后备」的降级链，
+两条路共用同一个内容源，不会走偏。
+
+## 打包与分发
+
+三种形态，按需要选。
+
+**一、源码 + 可编辑安装（提交作品与现场演示用这个）**
+
+```bash
+python3 -m pip install -e ".[all]"
+finai run
+```
+
+装的是 `pyproject.toml` 里 `[project.scripts]` 声明的入口（`pipeline/cli.py`），
+用标准库 argparse 写的，不依赖 click 之类的框架。
+**这一种最符合通知要求**：源码、依赖声明、运行说明齐全，
+「附依赖文件及操作说明，确保评审人员能够复现」说的就是它。
+
+**二、Docker（换机器复现用）**
+
+环境差异（Python 版本、中文字体、LaTeX）是复现失败的主要原因，
+Docker 把这层一次性消掉。需要写一个 Dockerfile：Python 3.11+、可选依赖、
+LaTeX 与中文字体。**要做的话我可以写。**
+
+**三、单文件可执行程序（PyInstaller）**
+
+```bash
+python3 -m pip install pyinstaller
+pyinstaller --name finai --onefile --add-data "data:data" pipeline/cli.py
+```
+
+产物是 `dist/finai`。两个坑要知道：matplotlib 与 reportlab 的资源文件要额外
+`--add-data`；**LaTeX 是系统级程序，打不进单文件**，所以单文件版的 PDF
+只能走 reportlab 路线。好处是评委不用配环境。
+
+**建议**：提交与演示都用第一种。单文件版是加分项，不是必需品。

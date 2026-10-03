@@ -18,7 +18,7 @@
 | `reverse_dcf.py` | 反向求解：给定股价反解市场隐含假设 | `reverse_dcf.json` |
 | `comps.py` | 相对估值：可比公司倍数、隐含价值、足球场图 | `comps.csv`、`comps_implied.csv` |
 | `validate.py` | 勾稽校验：恒等式、现金口径、信号类检查 | `validation_report.json` |
-| `output/reporting.py` | 输出层：把结果写进 `outputs/<run_id>/` | 01 到 10 号数据文件 + 运行清单 |
+| `output/reporting.py` | 输出层：把结果写进 `runs/<run_id>/` | 01 到 10 号数据文件 + 运行清单 |
 | `output/charts/` | 图表层：一个文件一张图 | 11 到 16 号 PNG |
 | `output/narrative.py` | 叙述层：把结果交给大模型写成报告正文 | 模型名、提示词版本、哈希、数字校验结论 |
 | `output/report.py` | 报告层：组装成可交的报告 | `17_report.md`、`18_report.html` |
@@ -312,7 +312,7 @@ warning 而不是 fail。CF-02 的货币资金本来就包含受限资金和保�
 `output` 依赖 `finai`，`finai` 完全不知道 `output` 的存在。
 
 **用途**：把算法层的结果落成文件与图表。每次运行产出一个带时间戳的目录
-`outputs/<run_id>/`，不覆盖上一次；同时写一份 `10_run_manifest.json`，
+`runs/<run_id>/`，不覆盖上一次；同时写一份 `10_run_manifest.json`，
 记录每个产物的 sha256 与字节数。
 
 输出层分成两部分：`reporting.py` 负责数据文件与运行清单，`charts/` 子包负责图表。
@@ -545,7 +545,7 @@ make run
                                             └→ 足球场图 ← comps.py 相对估值
 
 ③ 落盘（reporting.py）
-    上面所有结果 → export_run(RunOutputs(...)) → outputs/<run_id>/
+    上面所有结果 → export_run(RunOutputs(...)) → runs/<run_id>/
         valuation.json                ← dcf
         football_field.json / .png    ← 足球场图
         comps.csv / comps_implied.csv ← comps
