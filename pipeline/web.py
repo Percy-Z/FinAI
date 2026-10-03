@@ -75,6 +75,7 @@ class RunState:
                 "last_run": self.last_run,
                 "steps": steps,
                 "artifacts": _artifacts(self.run_id) if self.run_id else [],
+                "evidence": _evidence(self.run_id) if self.run_id else [],
                 "metrics": _metrics(self.run_id) if self.run_id else {},
             }
 
@@ -192,6 +193,53 @@ def _metrics(run_id: str | None) -> dict[str, Any]:
                 "kind": "text",
             }
     return result
+
+
+def _evidence(run_id: str | None) -> list[dict[str, Any]]:
+    """复现凭证：能证明「这个结果可以重跑」的原始记录。
+
+    这一组按钮是给评审用的。竞赛要求「数据来源可核验、执行过程可追溯、
+    运行结果可复现」—— 这三句话对应下面三类文件，点开就是原始内容，
+    不是我们二次加工过的展示页：
+
+        数据来源  → data/ 下的三个输入文件（manifest 里有它们的 sha256）
+        执行过程  → logs/<运行编号>/trace.jsonl（每一步的工具调用与耗时）
+        结果复现  → 10_run_manifest.json（全部产物的 sha256 + 代码版本）
+        模型可查  → logs/<运行编号>/narrative.json（提示词与响应原文）
+    """
+    if not run_id:
+        return []
+    run_dir = RUNS_ROOT / run_id
+    log_dir = LOGS_ROOT / run_id
+    data_dir = REPO_ROOT / "data"
+
+    def item(label: str, hint: str, path: Path, url: str) -> dict[str, Any]:
+        return {
+            "label": label,
+            "hint": hint,
+            "url": url,
+            "exists": path.exists(),
+            "bytes": path.stat().st_size if path.exists() else 0,
+        }
+
+    return [
+        item("打开报告 PDF", "十二页 A4，LaTeX 排版",
+             run_dir / "19_report.pdf", f"/runs/{run_id}/19_report.pdf"),
+        item("打开报告网页", "图内嵌的单文件 HTML",
+             run_dir / "18_report.html", f"/runs/{run_id}/18_report.html"),
+        item("运行清单", "全部产物的 sha256、输入哈希、代码版本",
+             run_dir / "10_run_manifest.json", f"/runs/{run_id}/10_run_manifest.json"),
+        item("执行轨迹", "每一步的工具调用、耗时、输入输出哈希",
+             log_dir / "trace.jsonl", f"/logs/{run_id}/trace.jsonl"),
+        item("大模型原始问答", "提示词与响应的完整原文",
+             log_dir / "narrative.json", f"/logs/{run_id}/narrative.json"),
+        item("输入 · 经营假设", "含假设依据台账，manifest 中有其 sha256",
+             data_dir / "assumptions.toml", "/data/assumptions.toml"),
+        item("输入 · 行情快照", "估值基准日的股价与负债表数据",
+             data_dir / "market.csv", "/data/market.csv"),
+        item("输入 · 可比公司", "可比公司最近一个完整年度的财务数据",
+             data_dir / "peers.csv", "/data/peers.csv"),
+    ]
 
 
 def _recent_runs(limit: int = 8) -> list[dict[str, Any]]:
@@ -329,7 +377,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(payload)
             return
         if path.startswith("/runs/"):
-            self._serve_artifact(path)
+            self._serve_under(RUNS_ROOT, path, "/runs/")
+            return
+        if path.startswith("/logs/"):
+            self._serve_under(LOGS_ROOT, path, "/logs/")
+            return
+        if path.startswith("/data/"):
+            self._serve_under(REPO_ROOT / "data", path, "/data/")
             return
         self._html("<h1>404</h1>", 404)
 
@@ -345,12 +399,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"ok": False, "error": "未知接口"}, 404)
 
-    def _serve_artifact(self, path: str) -> None:
-        """只允许读 runs/ 下的文件 —— 这里必须防目录穿越。"""
-        relative = unquote(path[len("/runs/") :])
-        candidate = (RUNS_ROOT / relative).resolve()
+    def _serve_under(self, base: Path, path: str, prefix: str) -> None:
+        """只允许读指定目录下的文件 —— 这里必须防目录穿越。
+
+        runs/ 放产物、logs/ 放执行轨迹与模型原文、data/ 放输入文件。
+        三个目录都只读，且都做同一套路径校验。
+        """
+        relative = unquote(path[len(prefix) :])
+        candidate = (base / relative).resolve()
         try:
-            candidate.relative_to(RUNS_ROOT.resolve())
+            candidate.relative_to(base.resolve())
         except ValueError:
             self._json({"error": "越界路径"}, 403)
             return
@@ -363,9 +421,12 @@ class Handler(BaseHTTPRequestHandler):
             ".pdf": "application/pdf",
             ".png": "image/png",
             ".json": "application/json; charset=utf-8",
+            ".jsonl": "text/plain; charset=utf-8",
             ".csv": "text/csv; charset=utf-8",
             ".md": "text/plain; charset=utf-8",
             ".tex": "text/plain; charset=utf-8",
+            ".toml": "text/plain; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
         }
         self._send(200, candidate.read_bytes(), types.get(suffix, "application/octet-stream"))
 
@@ -400,6 +461,9 @@ button{font:inherit;border:0;border-radius:4px;cursor:pointer}
 .primary{background:var(--navy);color:#fff;padding:11px 22px;font-size:14px}
 .primary:hover{background:var(--navy2)}
 .primary:disabled{background:#aab4c2;cursor:not-allowed}
+.ghost{display:inline-block;background:#fff;color:var(--navy);border:1px solid var(--line);
+       padding:10px 18px;font-size:14px;text-decoration:none;border-radius:4px}
+.ghost:hover{border-color:var(--gold);background:#fffdf7}
 .ghost{background:transparent;border:1px solid var(--line);padding:7px 14px;color:var(--text)}
 .ghost:hover{border-color:var(--navy);color:var(--navy)}
 .status{margin-left:14px;font-size:13px;color:var(--muted)}
@@ -432,6 +496,14 @@ button{font:inherit;border:0;border-radius:4px;cursor:pointer}
 .runs{list-style:none;margin:0;padding:0;font-size:13px}
 .runs li{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--line)}
 .runs li:last-child{border-bottom:0}
+.btns{display:flex;flex-wrap:wrap;gap:10px}
+.btn-ev{display:block;text-align:left;border:1px solid var(--line);background:#fff;
+        border-radius:5px;padding:10px 14px;min-width:190px;flex:1 1 190px;
+        text-decoration:none;color:var(--text)}
+.btn-ev:hover{border-color:var(--gold);background:#fffdf7}
+.btn-ev .l{font-weight:500;color:var(--navy);font-size:13.5px}
+.btn-ev .h{display:block;color:var(--muted);font-size:11.5px;margin-top:3px}
+.btn-ev.gone{opacity:.45;cursor:not-allowed}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f2f5f8;
      padding:1px 5px;border-radius:3px;font-size:12.5px}
 </style>
@@ -447,6 +519,8 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f2f5f8;
   <div class="card">
     <h2>运行</h2>
     <button class="primary" id="run">运行估值流水线</button>
+    <a class="ghost" id="quick-report" href="#" target="_blank" rel="noopener"
+       style="display:none">打开报告</a>
     <span class="status" id="status">就绪</span>
     <p class="muted" style="margin:10px 0 0">
       流程：读配置 → 三表联动预测 → 勾稽校验 → 资本成本 → 现金流折现 →
@@ -459,6 +533,14 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f2f5f8;
 
   <div class="row">
     <div>
+      <div class="card" id="evidence-card" style="display:none">
+        <h2>复现凭证</h2>
+        <p class="muted" style="margin:0 0 12px">
+          这些是原始记录，不是二次加工的内容。数据来源、执行过程、结果哈希、
+          模型原文都能点开核对 —— 评审要复现，靠的就是这一组。
+        </p>
+        <div class="btns" id="evidence"></div>
+      </div>
       <div class="card" id="metrics-card" style="display:none">
         <h2>本次结果</h2>
         <div class="metrics" id="metrics"></div>
@@ -573,6 +655,24 @@ async function refresh(){
       <span class="ms">${st.duration_s!=null?st.duration_s.toFixed(2)+"s":""}</span></li>`;
   }).join("");
   document.getElementById("steps").innerHTML = steps.length ? list : '<li class="muted">还没有运行</li>';
+
+  // 复现凭证
+  const ev = s.evidence || [];
+  document.getElementById("evidence-card").style.display = ev.length ? "block" : "none";
+  document.getElementById("evidence").innerHTML = ev.map(e=>
+    e.exists
+      ? `<a class="btn-ev" href="${e.url}" target="_blank" rel="noopener">
+           <span class="l">${e.label}</span>
+           <span class="h">${e.hint}</span></a>`
+      : `<span class="btn-ev gone"><span class="l">${e.label}</span>
+           <span class="h">文件不存在</span></span>`
+  ).join("");
+
+  // 顶部快捷入口：直接开报告
+  const quick = (s.artifacts||[]).find(a=>a.kind==="报告" && a.file.endsWith(".pdf"));
+  const qbtn = document.getElementById("quick-report");
+  if(quick){ qbtn.href = quick.url; qbtn.style.display = "inline-block"; }
+  else { qbtn.style.display = "none"; }
 
   // 指标
   const metrics = s.metrics || {};
