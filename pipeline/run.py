@@ -883,6 +883,19 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
 
     # 产物列表由输出层的 summarize 打印（编号、文件名、字节数）
     print()
+    # 时间构成：想优化耗时的时候，先看时间花在哪 ——
+    # 不打印这个的话，「跑得慢」只能靠猜。
+    slowest = sorted(
+        (step for step in trace.step_summary if step.get("duration_s")),
+        key=lambda item: item["duration_s"],
+        reverse=True,
+    )[:3]
+    total = sum(step.get("duration_s") or 0 for step in trace.step_summary)
+    if slowest:
+        detail = "，".join(
+            f"{step['step']} {step['duration_s']:.1f}s" for step in slowest
+        )
+        print(f"耗时构成  总 {total:.1f}s（前三：{detail}）")
     print(summarize(artifacts))
     print(f"轨迹        {trace.trace_path}")
     print(f"运行记录    {manifest}")

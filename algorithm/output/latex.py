@@ -197,6 +197,25 @@ def render_latex(
             body.append(rf"\begin{{notebox}}{_inline(block.text)}\end{{notebox}}")
         elif block.kind == "alert":
             body.append(rf"\begin{{alertbox}}{_inline(block.text)}\end{{alertbox}}")
+        elif block.kind == "verdict":
+            # 结论是全篇的落点，排版上要给足分量：金框 + 明确标记
+            badge = (
+                rf"\\[2pt]{{\footnotesize\color{{gray}}{_escape(block.badge)}}}"
+                if block.badge
+                else ""
+            )
+            body.append(
+                "\n".join(
+                    [
+                        r"\begin{verdictbox}",
+                        rf"\textbf{{\color{{finainavy}}【结论】}}\quad "
+                        rf"\textbf{{{_inline(block.text)}}}",
+                        badge,
+                        r"\end{verdictbox}",
+                        "",
+                    ]
+                )
+            )
         elif block.kind == "quote":
             body.append(rf"\begin{{legendbox}}{_inline(block.text)}\end{{legendbox}}")
         elif block.kind == "list":
@@ -275,6 +294,9 @@ _PREAMBLE = r"""% 本文件由 algorithm/output/latex.py 自动生成，请勿�
   arc=1pt, left=8pt, right=8pt, top=5pt, bottom=5pt, breakable}}
 \newtcolorbox{{legendbox}}{{colback=white, colframe=finaisoft!80, boxrule=0.4pt,
   arc=1pt, left=10pt, right=10pt, top=7pt, bottom=7pt, breakable}}
+% 结论卡：全篇的落点，用金色边框单独框出来
+\newtcolorbox{{verdictbox}}{{colback=finaigold!8, colframe=finaigold, boxrule=1.2pt,
+  arc=2pt, left=12pt, right=12pt, top=10pt, bottom=10pt, breakable}}
 
 \pagestyle{{fancy}}
 \fancyhf{{}}
@@ -317,9 +339,14 @@ def find_engine() -> str | None:
 
 
 def compile_latex(
-    tex_path: str | Path, runs: int = 2, timeout: int = 240
+    tex_path: str | Path, runs: int = 1, timeout: int = 240
 ) -> tuple[Path | None, list[str]]:
-    """编译 .tex，返回 (PDF 路径, 日志行)。失败时 PDF 为 None。"""
+    """编译 .tex，返回 (PDF 路径, 日志行)。失败时 PDF 为 None。
+
+    默认只编一遍：本报告没有目录，也没有 \\ref 交叉引用，第二遍只是重复劳动
+    （一遍约 1.5 秒）。**如果以后加了目录或图表编号引用，把 runs 改成 2** ——
+    那时第二遍是必需的，页码和引用要靠它才对。
+    """
     source = Path(tex_path)
     engine = find_engine()
     if engine is None:

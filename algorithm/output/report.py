@@ -41,6 +41,7 @@ REPORT_HTML_NUMBER = "18"
 FACT = "【事实】"
 INFERENCE = "【推论】"
 OPINION = "【观点】"
+CONCLUSION = "【结论】"
 
 _DIRECTION_TEXT = {"higher": "更高", "lower": "更低", "same": "相同"}
 
@@ -128,6 +129,49 @@ def _stance(price: float, low: float, high: float) -> str:
     return "落在估值区间之内"
 
 
+def _verdict_block(
+    narrative: NarrativeResult | None,
+    dcf: dict[str, Any],
+    field_data: dict[str, Any],
+) -> Block:
+    """生成「最终结论」块。
+
+    为什么要有这一块：分析报告可以通篇是事实与推论，但**必须有一个落点**。
+    竞赛要求「涉及估值或投资判断的，应说明主要假设、适用范围和风险因素」——
+    判断就是那个落点。
+
+    大模型写出 final_verdict 时用它；没写（或没有 key）时用代码的机械判断兜底：
+    现价相对估值区间的位置 + DCF 隐含回报。**结论这一项不能因为缺 key 就消失**，
+    那样报告就没有判断了。来源会在括号里标明，读者知道这句是谁下的。
+    """
+    if narrative is not None and narrative.ok:
+        text = narrative.sections.get("final_verdict", "").strip()
+        if text:
+            return Block(kind="verdict", text=text, badge="AI 生成 · 结论")
+
+    overall = field_data.get("overall") or []
+    price = field_data.get("price") or dcf.get("price")
+    if len(overall) == 2 and isinstance(price, (int, float)):
+        low, high = float(overall[0]), float(overall[1])
+        stance = _stance(float(price), low, high)
+        ret = dcf.get("implied_return")
+        tail = f"，现金流折现的隐含回报 {_pct(ret)}" if isinstance(ret, (int, float)) else ""
+        return Block(
+            kind="verdict",
+            text=(
+                f"综合判断：当前股价 {_fmt(price)} 元{stance}，"
+                f"估值区间为 {_fmt(low)} ~ {_fmt(high)} 元{tail}。"
+                "该判断基于当前假设，假设变更后需重算。"
+            ),
+            badge="代码判断（未使用大模型）",
+        )
+    return Block(
+        kind="verdict",
+        text="本次运行没有可用的估值结果，无法给出结论。",
+        badge="代码判断",
+    )
+
+
 def _narrative_block(narrative: NarrativeResult | None, key: str) -> list[Block]:
     """取某章节的叙述。没有就留一句说明，不留空白，也不假装写过。"""
     if narrative is not None and narrative.ok and key in narrative.sections:
@@ -203,6 +247,11 @@ def render_markdown(blocks: Sequence[Block]) -> str:
             lines.append(f"> _{block.text}_\n")
         elif block.kind == "alert":
             lines.append(f"> ⚠️ **{block.text}**\n")
+        elif block.kind == "verdict":
+            # 结论要一眼能看到：单独一段，前面加【结论】标记
+            lines.append(f"> {CONCLUSION} **{block.text}**\n")
+            if block.badge:
+                lines.append(f"> _{block.badge}_\n")
         elif block.kind == "quote":
             lines.extend(f"> {line}" for line in block.text.splitlines())
             lines.append("")
@@ -265,6 +314,9 @@ td, th { word-break:break-word; }
         padding-left:12px; margin:12px 0; }
 .alert { border:1px solid #d9534f; background:#fdf2f2; color:#8a1f1b;
          padding:14px 18px; border-radius:4px; margin:18px 0; font-weight:500; }
+.verdict { border:1px solid var(--accent); background:color-mix(in srgb, var(--accent) 8%, transparent);
+           padding:16px 20px; border-radius:4px; margin:18px 0; }
+.verdict .label { font-weight:500; color:var(--primary); }
 blockquote { margin:16px 0; padding:12px 18px; background:var(--soft);
              border-left:3px solid var(--line); color:var(--muted); font-size:13.5px; }
 footer { max-width:900px; margin:20px auto 0; color:var(--muted); font-size:12.5px;
@@ -339,6 +391,16 @@ def render_html(
             parts.append(f'<p class="note">{_inline_html(block.text)}</p>')
         elif block.kind == "alert":
             parts.append(f'<div class="alert">⚠️ {_inline_html(block.text)}</div>')
+        elif block.kind == "verdict":
+            badge = (
+                f'<div class="text-small text-muted">{_inline_html(block.badge)}</div>'
+                if block.badge
+                else ""
+            )
+            parts.append(
+                f'<div class="verdict"><span class="label">结论</span>　'
+                f"{_inline_html(block.text)}{badge}</div>"
+            )
         elif block.kind == "quote":
             parts.append(f"<blockquote>{_inline_html(block.text)}</blockquote>")
         elif block.kind == "list":
@@ -439,7 +501,8 @@ def build_blocks(
                 "内容性质标注："
                 f"**{FACT}** 从财务数据或市场快照直接读到的数字；"
                 f"**{INFERENCE}** 基于事实推导出来的判断；"
-                f"**{OPINION}** 我们的价值判断。"
+                f"**{OPINION}** 我们的价值判断；"
+                f"**{CONCLUSION}** 全篇的落点 —— 把推论收敛成一句可执行的判断。"
                 "带「AI 生成」徽章的段落由大模型撰写，写后逐数字校验，"
                 "校验结论见附录 10.3。"
             ),
@@ -507,6 +570,8 @@ def build_blocks(
                 ),
             )
         )
+    # 结论卡：先给判断，再讲理由。放在数字表之后、展开分析之前。
+    add(_verdict_block(narrative, dcf, field_data))
     blocks.extend(_narrative_block(narrative, "investment_conclusion"))
 
     # ── 2 估值摘要 ────────────────────────────────────────────────────
