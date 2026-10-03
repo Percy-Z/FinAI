@@ -15,6 +15,15 @@ echo
 echo "工作目录：$(pwd)"
 echo
 
+# 已经在跑就直接打开浏览器 —— 双击两次不该报「端口被占用」那种看不懂的错。
+if curl -s -m 2 -o /dev/null "http://127.0.0.1:8770/api/status"; then
+  echo "工作台已经在运行，直接打开浏览器。"
+  open "http://127.0.0.1:8770/"
+  echo "（如果要用新端口，在终端里跑：python3 -m pipeline.web --port 9000）"
+  sleep 1
+  exit 0
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "找不到 python3。请先安装 Python 3.11 或更高版本："
   echo "    https://www.python.org/downloads/"

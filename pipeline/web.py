@@ -498,6 +498,7 @@ const fmtBytes = n => n > 1048576 ? (n/1048576).toFixed(1)+" MB"
 const fmtValue = m => m.kind==="percent" ? (m.value*100).toFixed(2)+"%"
                    : m.kind==="multiple" ? m.value.toFixed(2)+"x"
                    : m.kind==="text" ? m.value : m.value.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2});
+let offline = false;
 
 async function post(path){
   const r = await fetch(path,{method:"POST"});
@@ -514,8 +515,25 @@ document.getElementById("run").onclick = async () => {
 
 async function refresh(){
   let s;
-  try { s = await (await fetch("/api/status")).json(); }
-  catch(e){ document.getElementById("status").textContent = "无法连接本地服务"; return; }
+  try {
+    s = await (await fetch("/api/status", {cache:"no-store"})).json();
+    offline = false;
+  } catch(e) {
+    // 这个页面必须由本地服务提供。服务停了以后页面还在（浏览器缓存着），
+    // 但所有接口都失效 —— 所以要把「怎么办」写在页面上，而不是只说连不上。
+    if(!offline){
+      offline = true;
+      document.getElementById("alerts").innerHTML =
+        '<div class="err"><b>本地服务没有响应。</b>' +
+        '这个页面必须由本地服务提供，不能离线打开，也不要只保存网页文件。<br>' +
+        '服务可能已经停止：重新双击仓库根目录的 <code>启动工作台.command</code>，' +
+        '或在终端里跑 <code>make web</code>。<br>' +
+        '<b>请保持那个终端窗口开着</b> —— 关掉窗口就等于停止服务。' +
+        '页面每 1.2 秒自动重连，服务起来后会自己恢复。</div>';
+      document.getElementById("status").textContent = "未连接到本地服务";
+    }
+    return;
+  }
 
   // 环境状态
   const env = s.environment || {};
