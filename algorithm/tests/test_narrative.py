@@ -273,6 +273,30 @@ class TestVerifyNumbers(unittest.TestCase):
         warnings = verify_numbers({"risks": "占比 8.47%。"}, self.facts)
         self.assertIn("risks", warnings[0])
 
+    def test_range_dash_is_not_read_as_a_minus_sign(self):
+        """区间写法（7.32-12.87、2026—2030）不能被当成负数。
+
+        实测踩过：一份报告里因此产生 10 处误报，全是区间连接符。
+        误报一多这道校验就没人看了，等于没有。
+        """
+        # 把区间两端的数字放进事实表，这样测的就只是「连字符有没有被当负号」
+        facts = {"range": {"low": 7.32, "high": 12.87, "mid": 9.58, "mid2": 9.77}}
+        cases = [
+            "估值区间 7.32-12.87 元。",
+            "区间为 9.58 - 9.77 元。",
+            "预测期 2026—2030 年。",
+            "每股价值 7.32~12.87 元。",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(verify_numbers({"a": text}, facts), [])
+
+    def test_real_negative_numbers_are_still_checked(self):
+        """真的负数还要能查出来 —— 修区间问题不能把负数一起放过。"""
+        warnings = verify_numbers({"a": "隐含回报 -8.47%。"}, self.facts)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("8.47", warnings[0])
+
 
 class TestWriteNarrative(unittest.TestCase):
     def setUp(self):

@@ -326,19 +326,45 @@ def export_run(
         ),
     )
 
-    # PDF：把刚写出的 Markdown 渲染一遍。
-    # 渲染器来自队友的 pipeline/report.py（见 output/pdf.py 的来源说明），
-    # 与网页版共用同一份 Markdown —— 内容是同一份，不会走偏。
-    from .pdf import HAS_REPORTLAB, markdown_to_pdf
+    # PDF：优先用 LaTeX（排版更适合当报告书），没有 LaTeX 时退回 reportlab。
+    # 两条路都从同一份 blocks 出，内容一致。
+    from .latex import compile_latex, find_engine, render_latex
 
-    if HAS_REPORTLAB:
-        pdf_path = markdown_to_pdf(target("report"), target("report_pdf"))
+    pdf_target = target("report_pdf")
+    if find_engine() is not None:
+        tex_path = directory / "report.tex"
+        tex_path.write_text(
+            render_latex(
+                blocks, context, title=f"{context.company_name} 估值报告"
+            ),
+            encoding="utf-8",
+        )
+        pdf_path, log = compile_latex(tex_path)
+        # 编译产生的 .aux/.log 是过程文件，清掉；.tex 留着（是 PDF 的源）
+        for suffix in (".aux", ".log", ".out", ".toc"):
+            leftover = tex_path.with_suffix(suffix)
+            if leftover.exists():
+                leftover.unlink()
+        if pdf_path is not None and pdf_path != pdf_target:
+            pdf_path.replace(pdf_target)
+            pdf_path = pdf_target
         if pdf_path is not None:
             record("report_pdf", pdf_path)
+            # 编译成功时那条日志是说明（用了哪个引擎、跑了几遍），
+            # 不该混进 warnings —— 验收层会把 warnings 当问题列出来。
+        else:
+            warnings.append("LaTeX 编译失败：" + "；".join(log))
     else:
-        warnings.append(
-            "没有安装 reportlab，跳过 report.pdf（安装：uv pip install reportlab）"
-        )
+        from .pdf import HAS_REPORTLAB, markdown_to_pdf
+
+        if HAS_REPORTLAB:
+            rendered = markdown_to_pdf(target("report"), pdf_target)
+            if rendered is not None:
+                record("report_pdf", rendered)
+        else:
+            warnings.append(
+                "既没有 LaTeX（xelatex）也没有 reportlab，跳过报告 PDF"
+            )
 
     if narrative is not None:
         # 大模型的模型名、提示词版本、哈希、token 用量都进清单 ——

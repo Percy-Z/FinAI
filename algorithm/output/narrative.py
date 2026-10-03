@@ -542,6 +542,12 @@ def parse_sections(content: str) -> tuple[dict[str, str], list[str]]:
 
 _NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
+# 区间写法：7.32-12.87、9.58 - 9.77、2026—2030。
+# 扫描数字前必须先把这种连字符去掉，否则会被当成负号 ——
+# 实测一份报告里因此产生 10 处「事实表之外的数字」，全是误报，
+# 而误报一多这道校验就没人看了。
+_RANGE_PATTERN = re.compile(r"(?<=\d)\s*[-~–—]\s*(?=\d)")
+
 
 def verify_numbers(
     sections: dict[str, str],
@@ -596,7 +602,9 @@ def verify_numbers(
 
     warnings: list[str] = []
     for name, text in sections.items():
-        for token in _NUMBER_PATTERN.findall(text):
+        # 先把区间连接符换成顿号，再扫数字 —— 顺序不能反
+        cleaned = _RANGE_PATTERN.sub("至", text)
+        for token in _NUMBER_PATTERN.findall(cleaned):
             try:
                 value = float(token)
             except ValueError:
