@@ -40,8 +40,12 @@ class TestProtocol(unittest.TestCase):
 
     def test_notification_gets_no_reply(self):
         """通知没有 id，按协议不能回包。回了会让客户端解析出错。"""
+        # 这里刻意不用上面那个 handle() 辅助函数 —— 它的存在意义就是
+        # 「必须有回包」，而这一条要验的恰恰是「没有回包」。
         self.assertIsNone(
-            handle(self.server, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+            self.server.handle(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            )
         )
 
     def test_ping(self):

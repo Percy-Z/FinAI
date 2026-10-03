@@ -38,6 +38,7 @@ from algorithm.output.reporting import (
 from algorithm.output.charts import CHART_FILES
 from algorithm.output.charts import HAS_MATPLOTLIB as CHARTS_AVAILABLE
 from algorithm.output.charts import chart_filename
+from algorithm.output.pdf import HAS_REPORTLAB
 from algorithm.finai.reverse_dcf import reverse_solve
 from algorithm.finai.sensitivity import Variable, tornado, two_way_grid
 from algorithm.finai.types import ForecastAssumptions, MarketData
@@ -237,10 +238,11 @@ class TestExportRun(unittest.TestCase):
         self.assertTrue(expected.issubset(written), expected - written)
 
     def test_filenames_are_numbered_in_order(self):
-        """数据文件 01-10、图表 11-16、报告 17-18，编号全局唯一且按顺序。
+        """数据文件 01-10、图表 11-16、报告 17-19，编号全局唯一且按顺序。
 
-        报告（17 报告 md、18 报告 html）总是生成；图表只在装了 matplotlib
-        时生成，所以中间会缺 11-16 这一段 —— 那是缺图，不是编号乱了。
+        Markdown（17）与 HTML（18）总是生成；PDF（19）要 reportlab、
+        图表（11-16）要 matplotlib —— 缺依赖时对应编号整段缺席，
+        那是缺产物，不是编号乱了。
         """
         names = sorted(path.name for path in self.artifacts.files.values())
         numbers = [name[:2] for name in names if name[:2].isdigit()]
@@ -248,6 +250,8 @@ class TestExportRun(unittest.TestCase):
         if HAS_MATPLOTLIB:
             expected += [f"{index:02d}" for index in range(11, 17)]
         expected += ["17", "18"]
+        if HAS_REPORTLAB:
+            expected += ["19"]
         self.assertEqual(numbers, expected)
 
     def test_charts_go_into_subdirectory(self):
@@ -306,9 +310,10 @@ class TestExportRun(unittest.TestCase):
         # 什么数据都没有时，报告仍然会生成 —— 它只有章节骨架和破折号，
         # 正文里会写明哪些部分没有数据。这比「什么都不产出」更有用：
         # 至少能看出流水线跑通了，且缺的是什么。
-        self.assertEqual(
-            set(artifacts.files), {"run_manifest", "report", "report_html"}
-        )
+        expected = {"run_manifest", "report", "report_html"}
+        if HAS_REPORTLAB:
+            expected.add("report_pdf")
+        self.assertEqual(set(artifacts.files), expected)
 
     def test_summarize_mentions_run_id_and_files(self):
         text = summarize(self.artifacts)
@@ -384,11 +389,11 @@ class TestRunFileNaming(unittest.TestCase):
     def test_numbers_are_unique_and_ordered(self):
         numbers = [number for number, _ in DATA_FILES.values()]
         self.assertEqual(len(numbers), len(set(numbers)))
-        # 01-10 是分析数据，17/18 是报告（md 与 html）。
+        # 01-10 是分析数据，17-19 是报告（md / html / pdf）。
         # 11-16 留给图表，它们不在 DATA_FILES 里，见 CHART_FILES。
         self.assertEqual(
             sorted(numbers),
-            [f"{index:02d}" for index in range(1, 11)] + ["17", "18"],
+            [f"{index:02d}" for index in range(1, 11)] + ["17", "18", "19"],
         )
 
     def test_unknown_name_raises(self):

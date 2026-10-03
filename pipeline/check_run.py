@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import re
 import sys
 from dataclasses import dataclass
@@ -54,6 +55,9 @@ REQUIRED_DATA_FILES = tuple(
     )
 )
 REQUIRED_REPORTS = ("17_report.md", "18_report.html")
+# PDF 需要 reportlab，属于「装了就该有」：装了却没生成算不合格，
+# 没装则只记一条说明。判断依据是当前解释器能不能 import reportlab。
+OPTIONAL_REPORT_PDF = "19_report.pdf"
 REQUIRED_CHARTS = tuple(
     f"{index:02d}_{name}"
     for index, name in enumerate(
@@ -156,6 +160,25 @@ def check_run(
             errors.append(f"报告章节偏少：只有 {len(headings)} 个二级标题（应有 10 个）")
 
     # ── 5. 清单里的警告 ──────────────────────────────────────────────
+    # ── 4.5 PDF 报告 ─────────────────────────────────────────────────
+    pdf_exist = (directory / OPTIONAL_REPORT_PDF).exists()
+    try:
+        # 只探测有没有，不导入 —— 导入了才算用得上，用不上就会被判成无用导入
+        has_reportlab = importlib.util.find_spec("reportlab") is not None
+    except ImportError:
+        has_reportlab = False
+    if not has_reportlab:
+        if pdf_exist:
+            notes.append(f"有 {OPTIONAL_REPORT_PDF}（装了 reportlab 才会生成）")
+    else:
+        if pdf_exist:
+            notes.append("报告三份齐：Markdown / HTML / PDF")
+        else:
+            errors.append(
+                f"缺 {OPTIONAL_REPORT_PDF}：当前解释器装了 reportlab 却没生成 PDF，"
+                "可能是渲染报错"
+            )
+
     manifest_path = directory / "10_run_manifest.json"
     if manifest_path.exists():
         try:

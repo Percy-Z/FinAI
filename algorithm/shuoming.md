@@ -22,6 +22,7 @@
 | `output/charts/` | 图表层：一个文件一张图 | 11 到 16 号 PNG |
 | `output/narrative.py` | 叙述层：把结果交给大模型写成报告正文 | 模型名、提示词版本、哈希、数字校验结论 |
 | `output/report.py` | 报告层：组装成可交的报告 | `17_report.md`、`18_report.html` |
+| `output/pdf.py` | 排版层：把报告 Markdown 渲染成 A4 PDF | `19_report.pdf`（需要 reportlab） |
 | `finai/extract.py` | 年报抽取：PDF → 带出处的结构化科目 | 每个科目的值、页码、原文片段 |
 | `mcp_server/` | MCP 服务：把能力暴露成标准协议接口 | 五个可被智能体调用的工具 |
 | `skills/finai-valuation/` | Agent Skill：什么时候用、怎么用、出问题看哪里 | `SKILL.md` |

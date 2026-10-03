@@ -72,6 +72,7 @@ algorithm/
     charts/         一个文件一张图，11 到 16 号
     narrative.py    叙述层：把结果交给大模型写成报告正文（可降级）
     report.py       报告层：组装成 17 报告 md 与 18 报告 html
+    pdf.py          把报告 Markdown 渲染成 PDF（19；需要 reportlab）
   tests/            单元测试，用手算数字做断言
   examples/         可直接运行的示例脚本
   runs/             运行产物。产物目录统一叫 runs/，避免和包名 output 只差一个 s
@@ -105,6 +106,7 @@ algorithm/runs/20260927T165932/
   10_run_manifest.json       运行清单，含每个产物的 sha256
   17_report.md               估值报告（Markdown）
   18_report.html             估值报告（自包含 HTML，可直接打印成 PDF）
+  19_report.pdf              估值报告（A4 PDF，需要 reportlab）
   charts/
     11_football_field.png      估值区间
     12_tornado.png             单因素敏感性

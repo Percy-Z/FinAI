@@ -74,6 +74,7 @@ DATA_FILES: dict[str, tuple[str, str]] = {
     "run_manifest": ("10", "run_manifest.json"),
     "report": ("17", "report.md"),
     "report_html": ("18", "report.html"),
+    "report_pdf": ("19", "report.pdf"),
 }
 
 
@@ -324,6 +325,20 @@ def export_run(
             ),
         ),
     )
+
+    # PDF：把刚写出的 Markdown 渲染一遍。
+    # 渲染器来自队友的 pipeline/report.py（见 output/pdf.py 的来源说明），
+    # 与网页版共用同一份 Markdown —— 内容是同一份，不会走偏。
+    from .pdf import HAS_REPORTLAB, markdown_to_pdf
+
+    if HAS_REPORTLAB:
+        pdf_path = markdown_to_pdf(target("report"), target("report_pdf"))
+        if pdf_path is not None:
+            record("report_pdf", pdf_path)
+    else:
+        warnings.append(
+            "没有安装 reportlab，跳过 report.pdf（安装：uv pip install reportlab）"
+        )
 
     if narrative is not None:
         # 大模型的模型名、提示词版本、哈希、token 用量都进清单 ——

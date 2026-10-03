@@ -44,6 +44,7 @@ from algorithm.finai.forecast import (  # noqa: E402
 from algorithm.finai.types import ForecastAssumptions  # noqa: E402
 from algorithm.finai.validate import run_checks  # noqa: E402
 from algorithm.finai.wacc import weights_from_market, wacc_from_market  # noqa: E402
+from algorithm.output.pdf import HAS_REPORTLAB  # noqa: E402
 from pipeline import config, run, tracing  # noqa: E402
 from pipeline.check_run import (  # noqa: E402
     REQUIRED_CHARTS,
@@ -914,7 +915,11 @@ class TestEndToEnd(unittest.TestCase):
                 "outputs": [
                     entry
                     for entry in manifest["outputs"]
-                    if entry["name"] not in ("report", "report_html")
+                    # 报告三种格式的内容都含运行编号与出具时间，哈希每次不同；
+                    # PDF 还额外含 reportlab 写入的生成时间戳，即使内容一样
+                    # 字节也不可能相同。所以三者都排除 —— 报告正文的可复现性
+                    # 由上面那条单独比（比的是 Markdown）。
+                    if entry["name"] not in ("report", "report_html", "report_pdf")
                 ],
                 "warnings": manifest["warnings"],
             }
@@ -954,6 +959,7 @@ class TestEndToEnd(unittest.TestCase):
                 "10_run_manifest.json",
                 "17_report.md",
                 "18_report.html",
+                "19_report.pdf",
             ],
         )
 
@@ -1340,6 +1346,9 @@ class TestCheckRun(unittest.TestCase):
             (directory / name).write_text("{}", encoding="utf-8")
         for name in REQUIRED_REPORTS:
             (directory / name).write_text("# 报告\n", encoding="utf-8")
+        # 装了 reportlab 时验收会要求 PDF，这里也补一个占位文件
+        if HAS_REPORTLAB:
+            (directory / "19_report.pdf").write_bytes(b"%PDF-1.4 stub")
         if charts:
             for name in REQUIRED_CHARTS:
                 (directory / "charts" / name).write_bytes(b"png")
