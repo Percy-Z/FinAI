@@ -11,6 +11,7 @@
     run      跑完整流水线（配置 → 计算 → 报告）
     check    验收某次运行的产物是否齐全
     extract  从年报 PDF 抽取关键财务科目
+    web      启动本地 Web 工作台（浏览器里一键运行、看进度、看报告）
     mcp      启动 MCP 服务（stdio）
     version  打印版本与依赖可用情况
 
@@ -89,6 +90,13 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    from .web import serve
+
+    serve(port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"FinAI {VERSION}")
     print(f"仓库根目录：{REPO_ROOT}")
@@ -124,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="启动 MCP 服务（stdio）")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_web = sub.add_parser("web", help="启动本地 Web 工作台")
+    p_web.add_argument("--port", type=int, default=8770)
+    p_web.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    p_web.set_defaults(func=cmd_web)
 
     p_version = sub.add_parser("version", help="版本与依赖情况")
     p_version.set_defaults(func=cmd_version)

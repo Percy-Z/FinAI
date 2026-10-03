@@ -17,6 +17,7 @@ help:
 	@echo "  make config    只读配置并自检，不跑流水线"
 	@echo "  make run       跑完整条流水线"
 	@echo "  make demo      现场演示：跑一遍 + 打印产物 + 打开报告 PDF"
+	@echo "  make web       启动 Web 工作台（浏览器里一键运行）"
 	@echo "  make install   把本项目管理安装为 finai 命令（pip install -e .）"
 	@echo "  make test      跑全部单元测试"
 	@echo "  make lint      静态检查：mypy + pyflakes + pyright（严格模式）"
@@ -47,6 +48,12 @@ demo:
 		echo "打开报告：$$latest/19_report.pdf"; \
 		open "$$latest/19_report.pdf" 2>/dev/null || echo "（打不开预览就手动打开上面的路径）"; \
 	fi
+
+
+# Web 工作台：浏览器里点一下就跑，能看到九个阶段逐个亮起来。
+# 只绑本机 127.0.0.1，没有外部依赖（标准库 http.server）。
+web:
+	$(PYTHON) -m pipeline.web
 
 
 # 跑完整条流水线：读配置 → 各阶段 → 落盘 → 写日志。

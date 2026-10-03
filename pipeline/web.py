@@ -1,0 +1,622 @@
+"""Web 界面：一个能在浏览器里跑估值流水线的工作台。
+
+为什么做它
+    通知说「可运行的系统原型（Web 界面或命令行均可）」，命令行已经满足要求。
+    但命令行有三个实际问题：演示时不好看、评审现场投影不体面、
+    而且**运行过程是黑盒** —— 两分钟里屏幕上只有滚动的日志。
+
+    所以这个界面解决的是这三件事，不是「加一个花哨外壳」：
+        1. 一键运行：点一下按钮，不用记命令
+        2. 过程可见：九个阶段逐个亮起来，评审能看见系统在工作
+        3. 结果可点：跑完直接看指标、图、产物清单，点开就是完整报告
+
+技术选择：**标准库 http.server，不加任何依赖**
+    用 FastAPI 之类能写得更舒服，但那会破坏本项目「核心零依赖、
+    评委能在干净机器上复现」这条原则。这个界面只是个本地工具，
+    不需要并发、不需要认证、不需要数据库 —— http.server 够用。
+
+安全边界（本地工具也要守）
+    只绑 127.0.0.1，不对外网开放。
+    静态文件服务做路径校验，只能读 runs/ 目录下的文件，防目录穿越。
+    没有鉴权，因为没有必要：它只能被本机访问，且唯一能触发的动作是跑流水线。
+
+启动：
+    python3 -m pipeline.web          # 默认 http://127.0.0.1:8770
+    finai web --port 9000
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNS_ROOT = REPO_ROOT / "runs"
+LOGS_ROOT = REPO_ROOT / "logs"
+DEFAULT_PORT = 8770
+
+
+class RunState:
+    """当前运行的状态。单用户本地工具，一个模块级实例就够了。
+
+    界面轮询的是这里的字段，不是流水线内部状态 —— 这样界面与流水线解耦，
+    流水线不需要知道有没有人在看。
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.running = False
+        self.run_id: str | None = None
+        self.started_at: float = 0.0
+        self.finished_at: float = 0.0
+        self.error: str = ""
+        self.last_run: str | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            steps = _read_trace(self.run_id) if self.run_id else []
+            elapsed = (
+                (self.finished_at or time.time()) - self.started_at
+                if self.started_at
+                else 0.0
+            )
+            return {
+                "running": self.running,
+                "run_id": self.run_id,
+                "elapsed_s": round(elapsed, 1),
+                "error": self.error,
+                "last_run": self.last_run,
+                "steps": steps,
+                "artifacts": _artifacts(self.run_id) if self.run_id else [],
+                "metrics": _metrics(self.run_id) if self.run_id else {},
+            }
+
+
+def _read_trace(run_id: str | None) -> list[dict[str, Any]]:
+    """读执行轨迹，给界面显示「现在跑到哪一步了」。
+
+    直接读 trace.jsonl —— 它是流水线本来就写的日志，界面只是换了个方式呈现，
+    不额外要求流水线暴露进度回调。
+    """
+    if not run_id:
+        return []
+    path = LOGS_ROOT / run_id / "trace.jsonl"
+    if not path.exists():
+        return []
+    steps: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        steps.append(
+            {
+                "seq": entry.get("seq"),
+                "step": entry.get("step"),
+                "status": entry.get("status"),
+                "duration_s": entry.get("duration_s"),
+                "model": entry.get("model"),
+            }
+        )
+    return steps
+
+
+def _artifacts(run_id: str | None) -> list[dict[str, Any]]:
+    """列出产物文件，供界面显示与点击下载。"""
+    if not run_id:
+        return []
+    directory = RUNS_ROOT / run_id
+    if not directory.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    manifest_path = directory / "10_run_manifest.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = {}
+    warnings = manifest.get("warnings") or []
+
+    def add(path: Path, name: str, kind: str) -> None:
+        # 去重：数据文件的通配 [0-9][0-9]_* 会连报告（17/18/19）一起匹配进来，
+        # 后面报告那一轮又会加一次，清单里就出现两份。
+        if any(item["file"] == path.name for item in items):
+            return
+        items.append(
+            {
+                "name": name,
+                "file": path.name,
+                "kind": kind,
+                "bytes": path.stat().st_size,
+                "url": f"/runs/{run_id}/{path.relative_to(directory)}",
+            }
+        )
+
+    for path in sorted(directory.glob("[0-9][0-9]_*")):
+        # 报告由下面那一轮加，这里跳过 —— 否则它们会被标成「数据」。
+        # 注意不能用 "_report." 这种模糊匹配：02_validation_report.json
+        # 名字里也含它，会被误排除。必须按报告自身的编号前缀匹配。
+        is_report = re.match(r"1[789]_report\.", path.name) is not None
+        if path.is_file() and not is_report:
+            add(path, path.stem, "数据")
+    for path in sorted((directory / "charts").glob("*.png")):
+        add(path, path.stem, "图表")
+    # 报告三种格式。编号固定是 17/18/19，但用通配更耐改（比如以后加 20 号）
+    for suffix, kind in (("md", "报告"), ("html", "报告"), ("pdf", "报告")):
+        for candidate in sorted(directory.glob(f"1?_report.{suffix}")):
+            add(candidate, candidate.stem, kind)
+    return items + [{"warnings": warnings}] if warnings else items
+
+
+def _metrics(run_id: str | None) -> dict[str, Any]:
+    """从产物里挑出界面上那几个关键数字。"""
+    if not run_id:
+        return {}
+    valuation = RUNS_ROOT / run_id / "03_valuation.json"
+    field = RUNS_ROOT / run_id / "09_football_field.json"
+    result: dict[str, Any] = {}
+    if valuation.exists():
+        try:
+            payload = json.loads(valuation.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        for key, label, kind in (
+            ("per_share", "每股价值（DCF）", "money"),
+            ("price", "当前股价", "money"),
+            ("implied_return", "隐含回报", "percent"),
+            ("enterprise_value", "企业价值", "money"),
+            ("terminal_share_of_ev", "终值占企业价值", "percent"),
+            ("implied_exit_multiple", "隐含退出倍数", "multiple"),
+        ):
+            if payload.get(key) is not None:
+                result[label] = {"value": payload[key], "kind": kind}
+    if field.exists():
+        try:
+            payload = json.loads(field.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        overall = payload.get("overall")
+        if overall:
+            result["估值区间"] = {
+                "value": f"{overall[0]:.2f} ~ {overall[1]:.2f}",
+                "kind": "text",
+            }
+    return result
+
+
+def _recent_runs(limit: int = 8) -> list[dict[str, Any]]:
+    if not RUNS_ROOT.exists():
+        return []
+    runs = sorted((p for p in RUNS_ROOT.iterdir() if p.is_dir()), key=lambda p: p.name)
+    return [
+        {
+            "run_id": path.name,
+            "has_report": (path / "19_report.pdf").exists()
+            or (path / "18_report.html").exists(),
+            "has_charts": len(list((path / "charts").glob("*.png"))),
+        }
+        for path in reversed(runs[-limit:])
+    ]
+
+
+def _environment() -> dict[str, Any]:
+    """界面顶部显示的「环境准备好没有」。缺什么直接说，别等跑一半才报错。"""
+    import importlib.util
+    import os
+    import shutil
+
+    report_params: dict[str, Any] = {}
+    try:
+        from .config import load_report_params
+
+        request = load_report_params()
+        key, source = request.resolve_api_key()
+        report_params = {
+            "model": request.model,
+            "has_key": bool(key),
+            "key_source": source,
+        }
+    except Exception as err:  # noqa: BLE001 - 配置读不出来也要能打开界面
+        report_params = {"model": "—", "has_key": False, "key_source": f"配置读取失败：{err}"}
+
+    return {
+        "matplotlib": importlib.util.find_spec("matplotlib") is not None,
+        "reportlab": importlib.util.find_spec("reportlab") is not None,
+        "pdfplumber": importlib.util.find_spec("pdfplumber") is not None,
+        "latex": bool(shutil.which("xelatex") or shutil.which("lualatex")),
+        "api_key": report_params.get("has_key", False),
+        "model": report_params.get("model", "—"),
+        "key_source": report_params.get("key_source", ""),
+        "env_latex": os.environ.get("SSL_CERT_FILE", ""),
+    }
+
+
+def _initial_state() -> RunState:
+    """初始状态指向最近一次运行 —— 打开界面就该看到上一次的结果，
+    而不是一片空白等着人点按钮。第一次使用时没有历史运行，保持空。
+
+    放在这里而不是 RunState.__init__ 里：_recent_runs 定义在类之后，
+    在类的构造函数里调它会撞上「名称还没定义」。
+    """
+    state = RunState()
+    existing = _recent_runs(limit=1)
+    if existing:
+        state.run_id = existing[0]["run_id"]
+        state.last_run = state.run_id
+    return state
+
+
+STATE = _initial_state()
+
+
+def _start_run() -> str:
+    """在后台线程里跑流水线，立刻返回运行编号。"""
+    from . import run as pipeline_run
+
+    run_id = pipeline_run.new_run_id()
+    with STATE.lock:
+        if STATE.running:
+            raise RuntimeError("已经有一次运行在进行中")
+        STATE.running = True
+        STATE.run_id = run_id
+        STATE.started_at = time.time()
+        STATE.finished_at = 0.0
+        STATE.error = ""
+
+    def worker() -> None:
+        try:
+            pipeline_run.run_pipeline(run_id)
+        except Exception as err:  # noqa: BLE001 - 失败也要让界面看到原因
+            with STATE.lock:
+                STATE.error = f"{type(err).__name__}: {err}"
+        finally:
+            with STATE.lock:
+                STATE.running = False
+                STATE.finished_at = time.time()
+                STATE.last_run = run_id
+
+    threading.Thread(target=worker, daemon=True).start()
+    return run_id
+
+
+class Handler(BaseHTTPRequestHandler):
+    """路由很少，直接写在 do_GET / do_POST 里，不引入框架。"""
+
+    server_version = "FinAI-Web/0.1"
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        # 默认会把每个请求打到 stderr，界面自己会刷新，不需要这份噪音
+        return
+
+    # ── 工具 ────────────────────────────────────────────────────────
+
+    def _send(self, code: int, body: bytes, content_type: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        # 本地工具，禁止被别的页面 iframe 嵌入
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, payload: Any, code: int = 200) -> None:
+        self._send(code, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+    def _html(self, text: str, code: int = 200) -> None:
+        self._send(code, text.encode("utf-8"), "text/html; charset=utf-8")
+
+    # ── 路由 ────────────────────────────────────────────────────────
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的约定
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            self._html(_PAGE)
+            return
+        if path == "/api/status":
+            payload = STATE.snapshot()
+            payload["environment"] = _environment()
+            payload["recent"] = _recent_runs()
+            self._json(payload)
+            return
+        if path.startswith("/runs/"):
+            self._serve_artifact(path)
+            return
+        self._html("<h1>404</h1>", 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path == "/api/run":
+            try:
+                run_id = _start_run()
+            except RuntimeError as err:
+                self._json({"ok": False, "error": str(err)}, 409)
+                return
+            self._json({"ok": True, "run_id": run_id})
+            return
+        self._json({"ok": False, "error": "未知接口"}, 404)
+
+    def _serve_artifact(self, path: str) -> None:
+        """只允许读 runs/ 下的文件 —— 这里必须防目录穿越。"""
+        relative = unquote(path[len("/runs/") :])
+        candidate = (RUNS_ROOT / relative).resolve()
+        try:
+            candidate.relative_to(RUNS_ROOT.resolve())
+        except ValueError:
+            self._json({"error": "越界路径"}, 403)
+            return
+        if not candidate.is_file():
+            self._json({"error": "文件不存在"}, 404)
+            return
+        suffix = candidate.suffix.lower()
+        types = {
+            ".html": "text/html; charset=utf-8",
+            ".pdf": "application/pdf",
+            ".png": "image/png",
+            ".json": "application/json; charset=utf-8",
+            ".csv": "text/csv; charset=utf-8",
+            ".md": "text/plain; charset=utf-8",
+            ".tex": "text/plain; charset=utf-8",
+        }
+        self._send(200, candidate.read_bytes(), types.get(suffix, "application/octet-stream"))
+
+
+_PAGE = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FinAI 自动化估值工作台</title>
+<style>
+:root{--navy:#0B1B33;--navy2:#13294b;--gold:#D2A74A;--text:#2b3440;--muted:#6b7280;
+      --line:#e3e8ee;--bg:#f4f6f9;--card:#fff;--ok:#1a7f52;--warn:#b45309;--bad:#b3261e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-size:14px;
+     font-family:-apple-system,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+header{background:var(--navy);color:#fff;padding:18px 28px;display:flex;
+       align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;font-weight:500;letter-spacing:.5px}
+header .sub{color:#9fb0c8;font-size:12.5px}
+header .spacer{flex:1}
+.env{display:flex;gap:14px;flex-wrap:wrap;font-size:12px}
+.env span{display:inline-flex;align-items:center;gap:5px;color:#cbd5e1}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.dot.off{background:#8b95a5}
+main{max-width:1180px;margin:0 auto;padding:22px 28px 64px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:18px 20px;margin-bottom:16px}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
+@media(max-width:900px){.row{grid-template-columns:minmax(0,1fr)}}
+h2{font-size:14px;margin:0 0 12px;color:var(--navy);font-weight:500}
+button{font:inherit;border:0;border-radius:4px;cursor:pointer}
+.primary{background:var(--navy);color:#fff;padding:11px 22px;font-size:14px}
+.primary:hover{background:var(--navy2)}
+.primary:disabled{background:#aab4c2;cursor:not-allowed}
+.ghost{background:transparent;border:1px solid var(--line);padding:7px 14px;color:var(--text)}
+.ghost:hover{border-color:var(--navy);color:var(--navy)}
+.status{margin-left:14px;font-size:13px;color:var(--muted)}
+.steps{list-style:none;margin:0;padding:0}
+.steps li{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.steps li:last-child{border-bottom:0}
+.steps .name{flex:1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.steps .ms{color:var(--muted);font-variant-numeric:tabular-nums}
+.pill{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--muted)}
+.pill.done{color:var(--ok);border-color:#bfe3d0;background:#f1faf5}
+.pill.now{color:var(--navy);border-color:var(--gold);background:#fdf8ec}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.metric{border:1px solid var(--line);border-radius:5px;padding:12px 14px}
+.metric .k{font-size:12px;color:var(--muted)}
+.metric .v{font-size:19px;font-variant-numeric:tabular-nums;margin-top:4px;color:var(--navy)}
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.figs a{display:block;border:1px solid var(--line);border-radius:5px;overflow:hidden;background:#fff}
+.figs img{width:100%;display:block}
+.figs .cap{font-size:11.5px;color:var(--muted);padding:6px 8px}
+.files{width:100%;border-collapse:collapse;font-size:13px}
+.files td{padding:6px 8px;border-bottom:1px solid var(--line)}
+.files td:last-child{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.files a{color:var(--navy);text-decoration:none}
+.files a:hover{text-decoration:underline}
+.warn{background:#fff8f0;border:1px solid #f0d9b8;color:var(--warn);
+      padding:10px 14px;border-radius:4px;font-size:13px;margin-bottom:10px}
+.err{background:#fdf2f2;border:1px solid #f0c4c1;color:var(--bad);
+     padding:10px 14px;border-radius:4px;font-size:13px;margin-bottom:10px}
+.muted{color:var(--muted);font-size:12.5px}
+.runs{list-style:none;margin:0;padding:0;font-size:13px}
+.runs li{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--line)}
+.runs li:last-child{border-bottom:0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f2f5f8;
+     padding:1px 5px;border-radius:3px;font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>FinAI 自动化估值工作台</h1>
+  <span class="sub">选题 4 · 自动化估值建模</span>
+  <span class="spacer"></span>
+  <div class="env" id="env"></div>
+</header>
+<main>
+  <div class="card">
+    <h2>运行</h2>
+    <button class="primary" id="run">运行估值流水线</button>
+    <span class="status" id="status">就绪</span>
+    <p class="muted" style="margin:10px 0 0">
+      流程：读配置 → 三表联动预测 → 勾稽校验 → 资本成本 → 现金流折现 →
+      敏感性 → 反向求解 → 相对估值 → 估值区间 → 大模型撰写报告 → 落盘。
+      全程约两分钟，其中大部分是大模型在推理与写作。
+    </p>
+  </div>
+
+  <div id="alerts"></div>
+
+  <div class="row">
+    <div>
+      <div class="card" id="metrics-card" style="display:none">
+        <h2>本次结果</h2>
+        <div class="metrics" id="metrics"></div>
+      </div>
+      <div class="card" id="figs-card" style="display:none">
+        <h2>分析图表</h2>
+        <div class="figs" id="figs"></div>
+      </div>
+      <div class="card" id="files-card" style="display:none">
+        <h2>产物清单</h2>
+        <table class="files"><tbody id="files"></tbody></table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>执行过程</h2>
+        <ul class="steps" id="steps"><li class="muted">还没有运行</li></ul>
+      </div>
+      <div class="card">
+        <h2>历史运行</h2>
+        <ul class="runs" id="runs"><li class="muted">—</li></ul>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+const STEP_NAMES = {
+  load_config:"读取配置", forecast:"三表联动预测", validate:"勾稽校验",
+  wacc:"资本成本", valuation:"现金流折现", sensitivity:"敏感性分析",
+  reverse_dcf:"反向求解", comps:"相对估值", football_field:"估值区间",
+  narrative:"大模型撰写报告", write_outputs:"落盘与报告渲染"
+};
+const ENV_NAMES = {matplotlib:"图表", latex:"LaTeX", reportlab:"PDF后备",
+                   pdfplumber:"年报抽取", api_key:"大模型"};
+const fmtBytes = n => n > 1048576 ? (n/1048576).toFixed(1)+" MB"
+                   : n > 1024 ? (n/1024).toFixed(0)+" KB" : n+" B";
+const fmtValue = m => m.kind==="percent" ? (m.value*100).toFixed(2)+"%"
+                   : m.kind==="multiple" ? m.value.toFixed(2)+"x"
+                   : m.kind==="text" ? m.value : m.value.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2});
+
+async function post(path){
+  const r = await fetch(path,{method:"POST"});
+  return r.json();
+}
+
+document.getElementById("run").onclick = async () => {
+  const btn = document.getElementById("run");
+  btn.disabled = true; btn.textContent = "正在运行…";
+  const res = await post("/api/run");
+  if(!res.ok){ alert(res.error); btn.disabled=false; btn.textContent="运行估值流水线"; }
+  refresh();
+};
+
+async function refresh(){
+  let s;
+  try { s = await (await fetch("/api/status")).json(); }
+  catch(e){ document.getElementById("status").textContent = "无法连接本地服务"; return; }
+
+  // 环境状态
+  const env = s.environment || {};
+  document.getElementById("env").innerHTML = Object.entries(ENV_NAMES).map(([k,label])=>{
+    const on = env[k] ? "" : " off";
+    return `<span><i class="dot${on}"></i>${label}</span>`;
+  }).join("");
+
+  // 状态行
+  const status = document.getElementById("status");
+  const btn = document.getElementById("run");
+  if(s.running){
+    status.textContent = `运行中 ${s.run_id} · 已用 ${s.elapsed_s}s`;
+    btn.disabled = true; btn.textContent = "正在运行…";
+  } else {
+    btn.disabled = false; btn.textContent = "运行估值流水线";
+    status.textContent = s.run_id ? `最近一次 ${s.run_id} · 用时 ${s.elapsed_s}s` : "就绪";
+  }
+
+  // 提示
+  const alerts = [];
+  if(s.error) alerts.push(`<div class="err">运行失败：${s.error}</div>`);
+  if(!env.api_key) alerts.push(`<div class="warn">没有配置大模型 key，报告将不含推理与结论（${env.key_source||"未知来源"}）。设置 <code>DEEPSEEK_API_KEY</code> 或写 <code>apikey.txt</code>。</div>`);
+  if(!env.matplotlib) alerts.push(`<div class="warn">没有安装 matplotlib，报告不会包含图表。</div>`);
+  (s.artifacts||[]).filter(a=>a.warnings).forEach(a=>a.warnings.forEach(w=>alerts.push(`<div class="warn">${w}</div>`)));
+  document.getElementById("alerts").innerHTML = alerts.join("");
+
+  // 步骤
+  const steps = s.steps || [];
+  const running = s.running;
+  const list = steps.map((st,i)=>{
+    const last = i === steps.length-1;
+    const cls = (last && running) ? "now" : "done";
+    const label = (last && running) ? "进行中" : "完成";
+    return `<li><span class="pill ${cls}">${label}</span>
+      <span class="name">${STEP_NAMES[st.step] || st.step}</span>
+      <span class="ms">${st.duration_s!=null?st.duration_s.toFixed(2)+"s":""}</span></li>`;
+  }).join("");
+  document.getElementById("steps").innerHTML = steps.length ? list : '<li class="muted">还没有运行</li>';
+
+  // 指标
+  const metrics = s.metrics || {};
+  const keys = Object.keys(metrics);
+  document.getElementById("metrics-card").style.display = keys.length ? "block" : "none";
+  document.getElementById("metrics").innerHTML = keys.map(k=>
+    `<div class="metric"><div class="k">${k}</div><div class="v">${fmtValue(metrics[k])}</div></div>`).join("");
+
+  // 图
+  const figs = (s.artifacts||[]).filter(a=>a.kind==="图表");
+  document.getElementById("figs-card").style.display = figs.length ? "block" : "none";
+  document.getElementById("figs").innerHTML = figs.map(f=>
+    `<a href="${f.url}" target="_blank"><img src="${f.url}" alt="${f.name}">
+     <div class="cap">${f.file}</div></a>`).join("");
+
+  // 产物
+  const files = (s.artifacts||[]).filter(a=>a.kind!=="图表");
+  document.getElementById("files-card").style.display = files.length ? "block" : "none";
+  document.getElementById("files").innerHTML = files.map(f=>
+    `<tr><td>${f.kind}</td><td><a href="${f.url}" target="_blank">${f.file}</a></td>
+     <td>${fmtBytes(f.bytes)}</td></tr>`).join("");
+
+  // 历史
+  document.getElementById("runs").innerHTML = (s.recent||[]).map(r=>
+    `<li><span>${r.run_id}</span><span class="muted">${r.has_report?"有报告":"仅数据"} · 图 ${r.has_charts}</span></li>`
+  ).join("") || '<li class="muted">—</li>';
+}
+
+refresh();
+setInterval(refresh, 1200);
+</script>
+</body>
+</html>
+"""
+
+
+def serve(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
+    """起服务。只绑 127.0.0.1 —— 这是本地工具，不对外网开放。"""
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{port}/"
+    print(f"FinAI 工作台已启动：{url}")
+    print("按 Ctrl-C 停止。")
+    if open_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止。")
+    finally:
+        httpd.server_close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="FinAI 本地工作台")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    args = parser.parse_args(argv)
+    serve(port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
