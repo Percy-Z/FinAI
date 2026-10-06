@@ -40,6 +40,9 @@ from urllib.parse import unquote, urlparse
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "runs"
 LOGS_ROOT = REPO_ROOT / "logs"
+# 前端静态资源目录。存在 web/index.html 时，首页改用新的工作台界面；
+# 不存在时仍然回落到下面那份内置的 _PAGE，保证旧路径随时可用。
+WEB_ROOT = REPO_ROOT / "web"
 DEFAULT_PORT = 8770
 
 
@@ -261,7 +264,9 @@ def _environment() -> dict[str, Any]:
     """界面顶部显示的「环境准备好没有」。缺什么直接说，别等跑一半才报错。"""
     import importlib.util
     import os
+    import platform
     import shutil
+    import sys
 
     report_params: dict[str, Any] = {}
     try:
@@ -285,6 +290,8 @@ def _environment() -> dict[str, Any]:
         "api_key": report_params.get("has_key", False),
         "model": report_params.get("model", "—"),
         "key_source": report_params.get("key_source", ""),
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
         "env_latex": os.environ.get("SSL_CERT_FILE", ""),
     }
 
@@ -352,8 +359,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        # 本地工具，禁止被别的页面 iframe 嵌入
-        self.send_header("X-Frame-Options", "DENY")
+        # 本地工具：只允许同源页面嵌入（报告中心的 HTML / PDF 内嵌预览需要它），
+        # 别的站点仍然嵌不进来。
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.end_headers()
         self.wfile.write(body)
 
@@ -368,13 +376,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的约定
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            self._html(_PAGE)
+            app_page = WEB_ROOT / "index.html"
+            if app_page.is_file():
+                self._send(
+                    200, app_page.read_bytes(), "text/html; charset=utf-8"
+                )
+            else:
+                self._html(_PAGE)
             return
         if path == "/api/status":
             payload = STATE.snapshot()
             payload["environment"] = _environment()
             payload["recent"] = _recent_runs()
             self._json(payload)
+            return
+        if path.startswith("/web/"):
+            self._serve_under(WEB_ROOT, path, "/web/")
             return
         if path.startswith("/runs/"):
             self._serve_under(RUNS_ROOT, path, "/runs/")
@@ -418,9 +435,14 @@ class Handler(BaseHTTPRequestHandler):
         suffix = candidate.suffix.lower()
         types = {
             ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "text/javascript; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".json": "application/json; charset=utf-8",
             ".pdf": "application/pdf",
             ".png": "image/png",
-            ".json": "application/json; charset=utf-8",
+            ".webp": "image/webp",
+            ".woff2": "font/woff2",
             ".jsonl": "text/plain; charset=utf-8",
             ".csv": "text/csv; charset=utf-8",
             ".md": "text/plain; charset=utf-8",

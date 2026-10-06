@@ -104,7 +104,31 @@ def _pdf_styles() -> dict[Any, Any]:
         "bullet": ParagraphStyle(
             "bullet", fontName=font, fontSize=9.5, leading=15, leftIndent=12, spaceAfter=2
         ),
+        # 图注：Markdown 里用 *11_football_field.png* 单独一行标出图表文件名，
+        # 在 PDF 里排成小字图注，而不是当成正文（否则会看到一对星号）。
+        "caption": ParagraphStyle(
+            "caption", fontName=font, fontSize=8, leading=11,
+            textColor=HexColor("#6b7280"), spaceBefore=2, spaceAfter=10,
+        ),
     }
+
+
+# PDF 的中文字体（微软雅黑 / 华文黑体）没有 emoji 字形，直接写进去会渲染成空方框。
+# 报告里实际会出现的几个符号在这里换成等价写法；Markdown 与 HTML 版本保留原样。
+_SYMBOL_MAP: tuple[tuple[str, str], ...] = (
+    ("⚠️", "!"), ("⚠", "!"),
+    ("✅", "√"), ("❌", "×"),
+    ("🔴", "●"), ("🟡", "●"), ("🟢", "●"),
+    ("\ufe0f", ""), ("\u200d", ""),   # 变体选择符与零宽连接符
+)
+
+
+def _safe_text(text: str) -> str:
+    """把字体里没有的字形换成等价写法，避免 PDF 里出现空方框。"""
+    for source, target in _SYMBOL_MAP:
+        if source in text:
+            text = text.replace(source, target)
+    return text
 
 
 def _escape(text: str) -> str:
@@ -113,10 +137,16 @@ def _escape(text: str) -> str:
 
 def _inline(text: str) -> str:
     """行内标记转成 reportlab 认的标签。先转义再加标签，顺序不能反。"""
-    out = _escape(text)
+    out = _escape(_safe_text(text))
     out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out)
     out = re.sub(r"`(.+?)`", r'<font face="Courier">\1</font>', out)
+    # 整行斜体：报告里的「代码判断（未使用大模型）」这类徽章行。
+    # 用首尾锚定，避免把文件名、哈希里的下划线误当成斜体标记。
+    out = re.sub(r"^_(.+)_$", r"<i>\1</i>", out)
     return out
+
+
+_CAPTION_RE = re.compile(r"^\*([^*]+\.(?:png|jpe?g|svg))\*$")
 
 
 def _flowables(markdown: str, base_dir: Path) -> list[Any]:
@@ -131,6 +161,14 @@ def _flowables(markdown: str, base_dir: Path) -> list[Any]:
     flow: list[Any] = []
     lines = markdown.splitlines()
     i = 0
+    pending_caption: str | None = None
+
+    def flush_caption() -> None:
+        """图注统一放在图片下方；万一没有紧跟图片，也要落在某处，不能丢。"""
+        nonlocal pending_caption
+        if pending_caption:
+            flow.append(Paragraph(_inline(pending_caption), styles["caption"]))
+            pending_caption = None
 
     while i < len(lines):
         stripped = lines[i].strip()
@@ -138,8 +176,16 @@ def _flowables(markdown: str, base_dir: Path) -> list[Any]:
             i += 1
             continue
 
+        # 图表文件名：暂存，等图片渲染完再作为图注输出
+        caption = _CAPTION_RE.match(stripped)
+        if caption:
+            pending_caption = caption.group(1)
+            i += 1
+            continue
+
         # 标题
         if stripped.startswith("#"):
+            flush_caption()
             level = len(stripped) - len(stripped.lstrip("#"))
             flow.append(Paragraph(_inline(stripped[level:].strip()), styles[min(level, 3)]))
             i += 1
@@ -156,11 +202,13 @@ def _flowables(markdown: str, base_dir: Path) -> list[Any]:
                 target = _IMAGE_WIDTH_MM * 72 / 25.4
                 flow.append(Image(str(path), width=target, height=target * height / width))
                 flow.append(Spacer(1, 8))
+                flush_caption()
             i += 1
             continue
 
         # 表格
         if stripped.startswith("|"):
+            flush_caption()
             rows: list[list[str]] = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
@@ -190,6 +238,7 @@ def _flowables(markdown: str, base_dir: Path) -> list[Any]:
 
         # 引用块：报告里的「AI 生成」徽章、内容性质说明、不合格横幅都在这里
         if stripped.startswith(">"):
+            flush_caption()
             block: list[str] = []
             while i < len(lines) and lines[i].strip().startswith(">"):
                 block.append(lines[i].strip().lstrip(">").strip())
@@ -201,6 +250,7 @@ def _flowables(markdown: str, base_dir: Path) -> list[Any]:
 
         # 无序列表
         if stripped.startswith("- "):
+            flush_caption()
             while i < len(lines) and lines[i].strip().startswith("- "):
                 flow.append(
                     Paragraph("• " + _inline(lines[i].strip()[2:]), styles["bullet"])
@@ -210,16 +260,22 @@ def _flowables(markdown: str, base_dir: Path) -> list[Any]:
             continue
 
         # 普通段落：连续行合并成一段
+        flush_caption()
         block = []
         while i < len(lines):
             candidate = lines[i].strip()
-            if not candidate or candidate.startswith(("#", "|", ">", "- ", "![")):
+            if (
+                not candidate
+                or candidate.startswith(("#", "|", ">", "- ", "!["))
+                or _CAPTION_RE.match(candidate)
+            ):
                 break
             block.append(candidate)
             i += 1
         if block:
             flow.append(Paragraph(" ".join(_inline(b) for b in block), styles["body"]))
 
+    flush_caption()
     return flow
 
 

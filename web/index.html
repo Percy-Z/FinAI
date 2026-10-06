@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>FinAI 自动化估值工作台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2300E599'/></svg>">
+<link rel="stylesheet" href="/web/css/app.css">
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- ── 侧边导航 ───────────────────────────────────────────── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-text">
+        <strong>FinAI</strong>
+        <small>自动化估值工作台</small>
+      </span>
+      <button class="icon-btn brand-collapse" id="sidebarToggle" type="button"
+              aria-label="折叠侧边栏" title="折叠侧边栏"></button>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="主导航"></nav>
+
+    <div class="side-foot" id="sideFoot"></div>
+  </aside>
+
+  <!-- ── 主区域 ─────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="icon-btn only-compact" id="navToggle" type="button" aria-label="打开导航"></button>
+        <div class="page-head">
+          <h1 id="pageTitle">总览</h1>
+          <p id="pageSub"></p>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <div class="run-picker" id="runPicker"></div>
+        <div class="top-chips" id="topChips"></div>
+        <button class="btn ghost" id="demoModeBtn" type="button">演示模式</button>
+        <button class="btn primary" id="runBtn" type="button">运行估值</button>
+      </div>
+    </header>
+
+    <div class="banners" id="banners"></div>
+
+    <main class="view" id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<!-- ── 证据抽屉 ─────────────────────────────────────────────── -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-modal="true" role="dialog" aria-labelledby="drawerTitle">
+  <header class="drawer-head">
+    <h2 id="drawerTitle">证据</h2>
+    <div class="drawer-actions">
+      <button class="icon-btn" id="drawerCopy" type="button" title="复制原始内容" aria-label="复制原始内容"></button>
+      <button class="icon-btn" id="drawerClose" type="button" title="关闭（Esc）" aria-label="关闭"></button>
+    </div>
+  </header>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<!-- ── 命令面板 ─────────────────────────────────────────────── -->
+<div class="palette" id="palette" hidden role="dialog" aria-modal="true" aria-label="命令面板">
+  <input id="paletteInput" type="text" autocomplete="off" spellcheck="false"
+         placeholder="跳转页面、切换运行、打开报告…（↑↓ 选择，回车执行，Esc 关闭）">
+  <ul id="paletteList" role="listbox"></ul>
+</div>
+
+<!-- ── 图表灯箱 ─────────────────────────────────────────────── -->
+<div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-label="图表大图">
+  <header>
+    <span id="lightboxTitle"></span>
+    <button class="icon-btn" id="lightboxClose" type="button" aria-label="关闭"></button>
+  </header>
+  <div class="lightbox-body" id="lightboxBody"></div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/web/js/icons.js"></script>
+<script src="/web/js/demo.js"></script>
+<script src="/web/js/api.js"></script>
+<script src="/web/js/charts.js"></script>
+<script src="/web/js/pages.js"></script>
+<script src="/web/js/pages2.js"></script>
+<script src="/web/js/app.js"></script>
+</body>
+</html>
