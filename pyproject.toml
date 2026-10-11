@@ -26,7 +26,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["algorithm", "algorithm.finai", "algorithm.output", "pipeline", "mcp_server"]
+packages = ["algorithm", "algorithm.finai", "algorithm.output", "pipeline", "mcp_server", "finai_web"]
 
 [tool.mypy]
 # 第三方库（例如要装了才有的 matplotlib）找不到类型存根时不报错
@@ -40,7 +40,7 @@ ignore_missing_imports = true
 #
 # include 必须把两部分都列上，否则 `npx pyright`（不带参数）只查 algorithm、
 # 悄悄漏掉 pipeline —— 漏掉的那部分会在 VSCode 里报一片红，命令行却显示干净。
-include = ["algorithm", "pipeline", "mcp_server"]
+include = ["algorithm", "pipeline", "mcp_server", "finai_web"]
 exclude = ["**/__pycache__"]
 # 直接按最严格的模式要求，当前代码在严格模式下也是干净的
 typeCheckingMode = "strict"
