@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from algorithm.finai.comps import CompanyMetrics
 from algorithm.finai.forecast import (
@@ -153,6 +153,37 @@ def fill_target_from_forecast(
         ebit=first_year.income.ebit,
         ebitda=first_year.income.ebitda,
     )
+
+
+def apply_actuals(
+    company: CompanyMetrics, actuals: Mapping[str, Any]
+) -> CompanyMetrics:
+    """用「最近一个完整年度的实际数」覆盖目标公司的利润类指标。
+
+    为什么要有这一步：`fill_target_from_forecast` 给目标公司的是**预测第一年**
+    的数（前瞻口径），而可比公司来自年报（实际口径）。两边的倍数放在一张表里
+    比较时，差里混着「一边算明年、一边算去年」，评审一问就答不上来。
+
+    所以当抽取层能用时（FINAI_DATA_SOURCE=extracted），目标公司也换成实际数，
+    口径统一为「最近一个完整年度」。预测口径的倍数仍然留在三表预测与 DCF 里，
+    只是不再拿去做相对估值。
+
+    actuals 只带这五个指标（多出来的字段忽略）：revenue / net_profit_attributable /
+    book_equity_attributable / ebit / ebitda。
+    """
+    updates: dict[str, float] = {}
+    for field in (
+        "revenue",
+        "net_profit_attributable",
+        "book_equity_attributable",
+        "ebit",
+        "ebitda",
+    ):
+        value = actuals.get(field)
+        if value is None:
+            continue
+        updates[field] = float(value)
+    return replace(company, **updates)
 
 
 def fill_peers_from_financials(

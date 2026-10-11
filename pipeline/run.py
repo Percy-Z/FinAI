@@ -90,6 +90,7 @@ from algorithm.output import (
 )
 
 from .adapters import (
+    apply_actuals,
     company_to_market_data,
     drivers_to_assumptions,
     fill_peers_from_financials,
@@ -99,17 +100,21 @@ from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MARKET_PATH,
     DEFAULT_PEER_PATH,
+    SOURCE_EXTRACTED,
     ConfigError,
     SensitivityParams,
     WaccParams,
     load_case,
     load_evidence,
     load_market_snapshot,
+    load_opening_balance,
     load_peer_financials,
     load_report_params,
     load_sensitivity_params,
+    load_target_actuals,
     load_terminal_params,
     load_wacc_params,
+    resolve_data_source,
 )
 from .tracing import RunTrace
 
@@ -607,12 +612,18 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     """跑一遍完整流水线。任何异常都往上抛，由 main 统一处理。"""
     # 阶段一：读配置
     started = time.perf_counter()
+    # 数据源：默认读手填文件；FINAI_DATA_SOURCE=extracted 时改读年报抽取结果。
+    # 这一步只决定 [opening_balance] 与 peers 的来源，配置的其它部分不受影响。
+    source = resolve_data_source()
     company, drivers, opening = load_case()
+    if source == SOURCE_EXTRACTED:
+        opening = load_opening_balance(source=source)
     terminal = load_terminal_params()
     params = load_wacc_params()
     sensitivity_params = load_sensitivity_params()
     target, peers = load_market_snapshot()
-    peer_financials = load_peer_financials()
+    peer_financials = load_peer_financials(source=source)
+    target_actuals = load_target_actuals(source)
     report_params = load_report_params()
     evidence = load_evidence()
     trace.record(
@@ -620,6 +631,19 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         tool="pipeline.config",
         duration_s=time.perf_counter() - started,
         inputs=[CONFIG_PATH, MARKET_PATH, PEER_PATH],
+        extra={
+            "data_source": source,
+            "opening_balance_from": (
+                "年报抽取（data/extracted/pipeline_input.json）"
+                if source == SOURCE_EXTRACTED
+                else "data/assumptions.toml"
+            ),
+            "peers_from": (
+                "年报抽取（data/extracted/pipeline_input.json）"
+                if source == SOURCE_EXTRACTED
+                else "data/peers.csv"
+            ),
+        },
     )
 
     # 适配：把三表路径的假设翻译成估值路径的假设。
@@ -660,6 +684,15 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     # 市场快照里只有股价股数债务，没有这些，PE / PB / EV-EBITDA 都算不出来。
     filled_target = fill_target_from_forecast(target, forecast)
     filled_peers, peer_notes = fill_peers_from_financials(peers, peer_financials)
+    if target_actuals:
+        # 口径对齐：可比公司用的是年报实际数，目标公司也得用实际数，
+        # 否则「目标 vs 可比」的倍数差里混着「明年 vs 去年」。
+        filled_target = apply_actuals(filled_target, target_actuals)
+        peer_notes.append(
+            "相对估值口径：目标公司与可比公司的利润指标都取自年报实际数"
+            f"（{target_actuals.get('as_of') or '最近一个完整年度'}），"
+            "三表预测的前瞻口径只用于 DCF。"
+        )
     comps_result = stage_comps(filled_target, filled_peers, trace)
 
     # 阶段九：足球场图
@@ -691,6 +724,21 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
         "sensitivity": asdict(sensitivity_params),
         # 假设依据台账：通知把「假设依据」列为考察点，报告第 4 节要引用它
         "evidence": evidence,
+        # 数据来源：这份报告里的 [opening_balance] 与 peers 到底读的是手填文件
+        # 还是年报抽取结果 —— 报告与清单里都要能一眼看到。
+        "data_source": {
+            "switch": source,
+            "opening_balance": (
+                "年报抽取（data/extracted/pipeline_input.json）"
+                if source == SOURCE_EXTRACTED
+                else "手填（data/assumptions.toml）"
+            ),
+            "peers": (
+                "年报抽取（data/extracted/pipeline_input.json）"
+                if source == SOURCE_EXTRACTED
+                else "手填（data/peers.csv）"
+            ),
+        },
         # 数据缺口与反解失败都记进清单 —— 缺什么比有什么更需要在报告里说明
         "notes": {
             "peers": peer_notes,

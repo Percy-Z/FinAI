@@ -304,7 +304,9 @@ def build_fact_sheet(
         }
 
     # 假设与参数：来自清单里的 run_parameters
-    for key in ("assumptions", "wacc", "sensitivity", "evidence"):
+    # data_source 也进事实表：报告第 9 节要根据它决定「数据来源」那几句怎么写
+    # （手填的过渡数据 / 年报抽取的实际数，两者的适用边界完全不同）。
+    for key in ("assumptions", "wacc", "sensitivity", "evidence", "data_source"):
         if key in context:
             facts[key] = context[key]
 
