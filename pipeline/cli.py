@@ -51,12 +51,47 @@ def _print_optional_dependencies() -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    import os
+
     from . import run as pipeline_run
 
+    # --source extracted：这一次运行改用年报抽取结果当 [opening_balance] 与 peers 的来源。
+    # 用环境变量而不是改函数签名，是因为流水线内部（run._run_once）也要读这个开关，
+    # 而它同样要能在命令行以外被使用（例如 CI 里 export 一下）。
+    if getattr(args, "source", None):
+        os.environ["FINAI_DATA_SOURCE"] = args.source
     identifier, directory = pipeline_run.run_pipeline(args.run_id)
     print(f"运行完成：{identifier}")
     print(f"产物目录：{directory}")
+    if getattr(args, "source", None):
+        print(f"数据源：{args.source}（[opening_balance] 与 peers 来自年报抽取结果）")
     return 0
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """把取数层的子命令原样转交给 finai_web.cli。
+
+    为什么不在这里重新实现一遍：取数层的子命令（fetch / extract / build …）
+    与它的路径常量、错误类型都绑在一起。转交一层就没有第二份真相，
+    `finai ingest build` 与 `python -m finai_web build` 行为必然一致。
+    """
+    import sys
+
+    try:
+        from finai_web.cli import main as ingest_main
+    except ImportError:
+        # 没装成包也能用：把仓库根目录挂上（finai_web 就在仓库根下）。
+        sys.path.insert(0, str(REPO_ROOT))
+        try:
+            from finai_web.cli import main as ingest_main
+        except ImportError:
+            print(
+                "找不到 finai_web 取数层。\n"
+                f"    它在 {REPO_ROOT / 'finai_web'}，正常情况直接可用；\n"
+                "    若报这个错，检查仓库是否完整（git status 看 finai_web/ 在不在）。"
+            )
+            return 1
+    return int(ingest_main(args.ingest_args))
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -118,6 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="跑完整流水线")
     p_run.add_argument("--run-id", default=None, help="指定运行编号；默认按时间戳生成")
+    p_run.add_argument(
+        "--source",
+        choices=("config", "extracted"),
+        default=None,
+        help="数据源：config=读手填文件（默认），extracted=读年报抽取结果",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_check = sub.add_parser("check", help="验收某次运行的产物")
@@ -134,6 +175,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="启动 MCP 服务（stdio）")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_ingest = sub.add_parser(
+        "ingest", help="取数层（定标公司 → 年报 PDF → 抽取 → 接流水线）"
+    )
+    p_ingest.add_argument(
+        "ingest_args",
+        nargs=argparse.REMAINDER,
+        help="原样转给 python -m finai_web，例如：check / fetch / extract / build / run",
+    )
+    p_ingest.set_defaults(func=cmd_ingest)
 
     p_web = sub.add_parser("web", help="启动本地 Web 工作台")
     p_web.add_argument("--port", type=int, default=8770)

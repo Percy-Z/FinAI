@@ -903,14 +903,29 @@ def build_blocks(
         add(Block(kind="list", items=tuple(dict.fromkeys(warnings))))
     else:
         add(Block(kind="p", text="本次运行没有产生告警。"))
+    # 数据来源那两句必须随实际来源变化：
+    #   手填（config）   → 是过渡数据，目标与可比口径不同，要提醒
+    #   年报抽取（extracted）→ 已经是实际数、口径一致，再说「手工填写」就是假话
+    source_switch = (facts.get("data_source") or {}).get("switch", "config")
+    if source_switch == "extracted":
+        source_notes = (
+            "基期资产负债表与可比公司财务数据由年报抽取结果生成"
+            "（data/extracted/pipeline_input.json），每个数字都带页码与原文出处。",
+            "目标公司与可比公司的利润指标都取自最近一个完整年度的年报实际数，"
+            "口径一致；三表预测的前瞻口径只用于 DCF。",
+        )
+    else:
+        source_notes = (
+            "基期资产负债表与可比公司财务数据目前是手工填写的过渡数据，"
+            "尚未由年报抽取生成，口径以数据文件里的注释为准。",
+            "可比公司的利润类指标取自最近一个完整年度，目标公司取自预测第一年，"
+            "两者口径不同，做倍数比较时需要注意。",
+        )
     add(
         Block(
             kind="list",
-            items=(
-                "基期资产负债表与可比公司财务数据目前是手工填写的过渡数据，"
-                "尚未由年报抽取生成，口径以数据文件里的注释为准。",
-                "可比公司的利润类指标取自最近一个完整年度，目标公司取自预测第一年，"
-                "两者口径不同，做倍数比较时需要注意。",
+            items=source_notes
+            + (
                 "收入增速与利润率的敏感性分析是把整条预测路径拉平成一个值再算，"
                 "不是只改第一年。",
                 "本报告不构成投资建议。",

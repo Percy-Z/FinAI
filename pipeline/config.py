@@ -35,6 +35,8 @@ load_opening_balance 的内部实现，函数签名和下游代码都不用动�
 from __future__ import annotations
 
 import csv
+import json
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +58,17 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DEFAULT_CONFIG_PATH = DATA_DIR / "assumptions.toml"
 DEFAULT_MARKET_PATH = DATA_DIR / "market.csv"
 DEFAULT_PEER_PATH = DATA_DIR / "peers.csv"
+
+# 抽取层（finai_web）产出的流水线输入。形状是：
+#     {"opening_balance": {11 个科目}, "peers": {代码: {5 个指标}}, "provenance": {...}}
+# 由 `python -m finai_web build` 生成，全部落在 data/ 下（不进 git）。
+DEFAULT_EXTRACTED_PAYLOAD = DATA_DIR / "extracted" / "pipeline_input.json"
+
+# 数据源开关。默认 config，即行为与本文件注释里写的完全一致；
+# 设为 extracted 时，[opening_balance] 与 peers 改读抽取结果。
+DATA_SOURCE_ENV = "FINAI_DATA_SOURCE"
+SOURCE_CONFIG = "config"
+SOURCE_EXTRACTED = "extracted"
 
 # 可比公司财务文件允许出现的列。多出别的列就报错，能挡住表头拼错。
 PEER_FIELDS = frozenset(
@@ -300,6 +313,11 @@ def _opening_from(cfg: dict[str, Any], path: str | Path) -> BalanceSheetState:
         path,
         "opening_balance",
     )
+    return _require_balanced(opening, path)
+
+
+def _require_balanced(opening: BalanceSheetState, path: str | Path) -> BalanceSheetState:
+    """配平检查。不管是手填的还是年报抽的，都要过这一关。"""
     gap = opening.balance_gap
     if abs(gap) > 1e-6:
         raise ConfigError(
@@ -317,13 +335,78 @@ def _opening_from(cfg: dict[str, Any], path: str | Path) -> BalanceSheetState:
     return opening
 
 
-def load_opening_balance(path: str | Path = DEFAULT_CONFIG_PATH) -> BalanceSheetState:
+def resolve_data_source(explicit: str | None = None) -> str:
+    """这次用哪一路数据源：`config`（手填文件）或 `extracted`（年报抽取结果）。
+
+    优先级：显式传参 > 环境变量 FINAI_DATA_SOURCE > 默认 config。
+
+    为什么默认必须是 config：仓库里的单元测试断言的是 data/ 下手填数据的
+    具体数值。如果默认行为随「本地有没有抽取结果」自动变化，测试与复现
+    就会时绿时红 —— 那种不确定性比多敲一个环境变量贵得多。
+    """
+    raw = (
+        explicit if explicit is not None else os.environ.get(DATA_SOURCE_ENV, "")
+    ).strip()
+    return SOURCE_EXTRACTED if raw == SOURCE_EXTRACTED else SOURCE_CONFIG
+
+
+def load_pipeline_input(path: str | Path | None = None) -> dict[str, Any]:
+    """读抽取层生成的流水线输入。文件不在时**报错而不是回退**。
+
+    回退是这里最危险的行为：使用者以为在用年报抽出来的数，实际拿手填的数
+    算了一遍，而且不报错 —— 报告里也看不出来。宁可停下。
+    """
+    target = Path(path) if path is not None else DEFAULT_EXTRACTED_PAYLOAD
+    if not target.is_file():
+        raise ConfigError(
+            f"数据源设成了 extracted，但抽取结果不存在：{target}\n"
+            "    先生成它：python -m finai_web build\n"
+            "    （或把环境变量去掉，回到手填的 assumptions.toml / peers.csv）"
+        )
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as err:
+        raise ConfigError(f"{target} 不是合法 JSON：{err}") from err
+    if not isinstance(payload, dict):
+        raise ConfigError(f"{target} 的内容应该是一个 JSON 对象")
+    return payload
+
+
+def load_opening_balance(
+    path: str | Path = DEFAULT_CONFIG_PATH, *, source: str | None = None
+) -> BalanceSheetState:
     """读 [opening_balance] 小节 —— 基期资产负债表，性质是「历史事实」。
 
-    现在从 TOML 读。等抽取层做好之后，这里改成从 financials.json 读，
-    函数签名不变，调用方不用改。
+    两个来源，由 source 决定（`extracted` 时读抽取层的 pipeline_input.json）：
+
+        config      data/assumptions.toml 的 [opening_balance] 小节（手填，默认）
+        extracted   data/extracted/pipeline_input.json 的 opening_balance（年报抽取）
+
+    字段形状完全一致（都是 BalanceSheetState 的 11 个科目），所以两个来源
+    对下游（三表预测、估值）完全等价 —— 换来源不用改任何调用方。
     """
+    if resolve_data_source(source) == SOURCE_EXTRACTED:
+        payload = load_pipeline_input()
+        values = payload.get("opening_balance")
+        if not isinstance(values, dict):
+            raise ConfigError(
+                f"{DEFAULT_EXTRACTED_PAYLOAD} 里没有 opening_balance 小节，"
+                "先跑 python -m finai_web build 重新生成"
+            )
+        payload_path = _payload_label(payload)
+        opening = _build(BalanceSheetState, values, payload_path, "opening_balance")
+        return _require_balanced(opening, payload_path)
     return _opening_from(read_toml(path), path)
+
+
+def _payload_label(payload: dict[str, Any]) -> str:
+    """把抽取来源写成一句话，用在报错与日志里。
+
+    报错信息里必须能看出「这条错是哪一份抽取结果引起的」，
+    否则同一批数据里只有一家公司抽错时，人会去挨个翻 PDF。
+    """
+    generated = str(payload.get("generated_at") or "未知时间")
+    return f"data/extracted/pipeline_input.json（由年报抽取生成，{generated}）"
 
 
 def load_case(
@@ -398,14 +481,51 @@ def load_evidence(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, str]:
 
 
 def load_peer_financials(
-    path: str | Path = DEFAULT_PEER_PATH,
+    path: str | Path = DEFAULT_PEER_PATH, *, source: str | None = None
 ) -> dict[str, PeerFinancials]:
     """读可比公司财务数据，返回 {代码: PeerFinancials}。
 
     与 load_market_snapshot 分开读，因为两个文件的基准日不同：
     市场快照是估值基准日的，这份是最近一个完整年度的。
     合并时按 code 对齐，对不上的公司由适配层提示出来，不在这里报错。
+
+    source=`extracted` 时改读年报抽取结果（data/extracted/pipeline_input.json
+    的 peers 小节）。CSV 与抽取结果给出的是**同一个数据类**，
+    所以适配层与相对估值都感知不到差别。
     """
+    if resolve_data_source(source) == SOURCE_EXTRACTED:
+        payload = load_pipeline_input()
+        peers = payload.get("peers")
+        if not isinstance(peers, dict):
+            raise ConfigError(
+                f"{DEFAULT_EXTRACTED_PAYLOAD} 的 peers 应该是一个对象"
+                "（代码 → 财务指标），先跑 python -m finai_web build 重新生成"
+            )
+        label = _payload_label(payload)
+        if not peers:
+            raise ConfigError(
+                f"{label} 里没有可用的可比公司 —— 抽取记录里除了目标公司之外"
+                "一家都没成功。先看 finai_web extract 的输出，把失败的补上。"
+            )
+        result: dict[str, PeerFinancials] = {}
+        for code, values in peers.items():
+            if not isinstance(values, dict):
+                raise ConfigError(f"{label} 的 peers.{code} 应该是一个对象")
+            unknown = set(values) - set(PEER_FIELDS) - {"code", "as_of"}
+            if unknown:
+                raise ConfigError(
+                    f"{label} 的 peers.{code} 里有无法识别的字段：{sorted(unknown)}\n"
+                    f"    可用字段：{sorted(PEER_FIELDS | {'as_of'})}"
+                )
+            payload_row: dict[str, Any] = {"code": str(code)}
+            payload_row["as_of"] = str(values.get("as_of") or "")
+            for field in PEER_FLOAT_FIELDS:
+                payload_row[field] = _required_float(
+                    values.get(field), field, str(code), label
+                )
+            result[str(code)] = _build(PeerFinancials, payload_row, label, f"peers.{code}")
+        return result
+
     rows = read_csv(path)
     if not rows:
         raise ConfigError(f"{path} 里没有任何数据行")
@@ -483,6 +603,43 @@ def _to_float(
         raise ConfigError(
             f"{path} 第 {row_number} 行的 {field} 不是数字：{value!r}"
         ) from None
+
+
+def _required_float(value: Any, field: str, where: str, path: str | Path) -> float:
+    """抽取结果里的数字：缺了或不是数字都算硬失败。
+
+    与 CSV 那条路径的区别：CSV 允许空单元格取默认值（历史行为不能改），
+    抽取结果是我们自己生成的，出现缺字段说明生成环节有问题 ——
+    在那里默认成 0 会把「没抽到」变成「是 0」，然后一路算进估值里。
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ConfigError(f"{path} 的 {where} 缺 {field}")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{path} 的 {where}.{field} 不是数字：{value!r}") from None
+
+
+def load_target_actuals(source: str | None = None) -> dict[str, Any] | None:
+    """目标公司的「最近一个完整年度实际数」（来自年报抽取）。
+
+    用途：相对估值时，可比公司用的是年报实际数（peer_financials），
+    目标公司原先用的是三表预测第一年（前瞻口径）—— 一边实际、一边预测，
+    算出来的倍数差里就混进了口径差。有了这一份，目标公司与可比公司
+    可以对齐到同一个口径（`pipeline.adapters.apply_actuals`）。
+
+    config 数据源下返回 None：那时候没有年报实际数可用（这是原状）。
+    """
+    if resolve_data_source(source) != SOURCE_EXTRACTED:
+        return None
+    payload = load_pipeline_input()
+    actuals = payload.get("target_actuals")
+    if not isinstance(actuals, dict):
+        raise ConfigError(
+            f"{_payload_label(payload)} 里没有 target_actuals，"
+            "先跑 python -m finai_web build 重新生成"
+        )
+    return actuals
 
 
 def load_market_snapshot(

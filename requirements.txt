@@ -1,0 +1,3 @@
+# 核心路径仅需标准库；以下为可选增强
+pdfplumber>=0.11 ; extra == "pdf"
+requests>=2.31 ; extra == "http"

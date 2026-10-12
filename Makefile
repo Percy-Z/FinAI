@@ -8,7 +8,7 @@
 PYTHON ?= python3
 
 .DEFAULT_GOAL := help
-.PHONY: help install config run demo test test-algorithm test-pipeline test-mcp lint check verify clean
+.PHONY: help install config run demo test test-algorithm test-pipeline test-mcp test-ingest lint check verify clean ingest-check ingest-run market-check
 
 
 help:
@@ -20,6 +20,9 @@ help:
 	@echo "  make web       启动 Web 工作台（浏览器里一键运行）"
 	@echo "  make install   把本项目管理安装为 finai 命令（pip install -e .）"
 	@echo "  make test      跑全部单元测试"
+	@echo "  make ingest-check   取数层自检（依赖、清单、行情表、已下 PDF）"
+	@echo "  make ingest-run     取数一把梭：下年报 → 抽取 → 生成流水线输入"
+	@echo "  make market-check   校验 data/market.csv（Wind/Choice 导出的行情表）"
 	@echo "  make lint      静态检查：mypy + pyflakes + pyright（严格模式）"
 	@echo "  make check     验收最近一次运行的产物（文件齐不齐、报告有没有图）"
 	@echo "  make verify    提交前的全量检查（测试 + 配置 + 完整跑一遍 + 验收产物）"
@@ -62,7 +65,7 @@ run:
 
 
 # 全部单元测试。算法层与框架层分开，方便出问题时定位是哪一边。
-test: test-algorithm test-pipeline test-mcp
+test: test-algorithm test-pipeline test-mcp test-ingest
 
 
 # 算法层：345 个单元测试（其中 22 个需要 matplotlib，没装则跳过）。
@@ -88,6 +91,33 @@ test-mcp:
 	else \
 		echo "（还没有 mcp_server/tests/，跳过）"; \
 	fi
+
+
+# 取数层：验「年报 → 字段 → 流水线输入」这条链路的解析与拼装逻辑。
+# 不联网、不依赖第三方库：网络调用在测试里都换成了假实现。
+test-ingest:
+	@if [ -d finai_web/tests ]; then \
+		$(PYTHON) -m unittest discover -s finai_web/tests; \
+	else \
+		echo "（还没有 finai_web/tests/，跳过）"; \
+	fi
+
+
+# 取数层自检：环境、密钥、清单、行情表、已下 PDF 一屏看完。
+ingest-check:
+	$(PYTHON) -m finai_web check
+
+
+# 取数一把梭：下载年报 → 抽取 → 生成 data/extracted/pipeline_input.json。
+# 跑完想用抽取结果跑流水线：
+#   export FINAI_DATA_SOURCE=extracted && python -m pipeline.run
+ingest-run:
+	$(PYTHON) -m finai_web run
+
+
+# 校验行情表。这张表只能从 Wind/Choice 导出，程序不生成它。
+market-check:
+	$(PYTHON) -m finai_web market --check
 
 
 # 静态检查。项目一直保持三个检查器全绿，所以把它做成一条命令，
