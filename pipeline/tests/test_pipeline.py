@@ -137,6 +137,19 @@ def trace_factory(log_root: Path) -> Callable[[str], tracing.RunTrace]:
     return make
 
 
+def run_pipeline_into(root: Path) -> None:
+    """在指定目录里完整跑一遍流水线：产物与日志都收进去，屏幕输出丢掉。
+
+    两个测试类都要用（一个验产物验收、一个验估值折现用的是哪一份现金流），
+    所以放在模块层，避免各写一份。
+    """
+    with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
+        run, "RunTrace", trace_factory(root / "logs")
+    ):
+        with redirect_stdout(io.StringIO()):
+            run.main()
+
+
 def read_real_config():
     """读仓库里那份真实配置。测的是「配置和算法层能不能对上」。"""
     company, drivers, opening = config.load_case()
@@ -419,6 +432,42 @@ class TestTwoStackReconcile(unittest.TestCase):
                 places=6,
                 msg=f"第 {index} 年 FCFF 不一致：折现路径 {left:.6f}，三表路径 {right:.6f}",
             )
+
+    def per_share_of_fresh_run(self) -> float:
+        """跑一遍完整流水线，取这次的每股价值（产物落临时目录）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        run_pipeline_into(root)
+        run_dir = next((root / "runs").iterdir())
+        payload = json.loads(
+            (run_dir / "03_valuation.json").read_text(encoding="utf-8")
+        )
+        return float(payload["per_share"])
+
+    def test_估值折现用的是三表预测的现金流(self):
+        """改掉三表算出的现金流，估值必须跟着变。
+
+        这件事以前不成立：估值模块自己按单值比率重算一遍现金流，两条路径只靠
+        上一条回归测试盯着数值相等 —— 改三表的序列不会影响估值。现在估值直接
+        吃三表的序列（README 下一步第 2 条），序列一变，每股价值立刻跟着变。
+        """
+        from algorithm.finai.forecast import ThreeStatementForecast
+
+        original = ThreeStatementForecast.fcff_series
+        baseline = self.per_share_of_fresh_run()
+        with mock.patch.object(
+            ThreeStatementForecast,
+            "fcff_series",
+            property(lambda self: [value * 1.2 for value in original.fget(self)]),
+        ):
+            bumped = self.per_share_of_fresh_run()
+        self.assertNotAlmostEqual(
+            baseline,
+            bumped,
+            places=6,
+            msg="三表的现金流改了 20%，估值却没动 —— 说明折现用的还是自己重算的那一份",
+        )
 
     def test_逐年比率无法映射到估值引擎(self):
         """每年不同的资本开支率，在估值模块里「构造那一刻」就会被拒绝。
@@ -1476,13 +1525,7 @@ class TestCheckRun(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        with mock.patch.object(run, "OUTPUT_ROOT", root / "runs"), mock.patch.object(
-            run,
-            "RunTrace",
-            trace_factory(root / "logs"),
-        ):
-            with redirect_stdout(io.StringIO()):
-                run.main()
+        run_pipeline_into(root)
         return root
 
 

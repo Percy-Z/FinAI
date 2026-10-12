@@ -91,6 +91,7 @@ from algorithm.output import (
 
 from .adapters import (
     apply_actuals,
+    cash_flows_from_forecast,
     company_to_market_data,
     drivers_to_assumptions,
     fill_peers_from_financials,
@@ -275,15 +276,28 @@ def stage_valuation(
     wacc: float,
     base_year: int,
     trace: RunTrace,
+    forecast: ThreeStatementForecast,
 ) -> DCFResult:
     """阶段：DCF 估值。
 
     base_year 要单独传进来：估值路径的假设集（ForecastAssumptions）里
     没有这个字段。它只影响产物里年份的标注（写成 1..5 还是 2026..2030），
     不影响任何数值 —— 但报告要读年份，所以还是得给对。
+
+    forecast 是三表预测的结果：折现用的现金流直接取它的 FCFF 序列，
+    估值模块不再自己按单值比率重算一遍（见 dcf.value_dcf 的说明）。
+    这样报告里的现金流与估出来的价值出自同一处，不可能对不上。
     """
     started = time.perf_counter()
-    result = value_dcf(assumptions, market, wacc, base_year=base_year)
+    fcff, ebitda = cash_flows_from_forecast(forecast)
+    result = value_dcf(
+        assumptions,
+        market,
+        wacc,
+        base_year=base_year,
+        fcff_series=fcff,
+        ebitda_series=ebitda,
+    )
     trace.record(
         step="valuation",
         tool="algorithm.finai.dcf.value_dcf",
@@ -293,6 +307,8 @@ def stage_valuation(
             "equity_value": result.equity_value,
             "per_share": result.per_share,
             "implied_return": result.implied_return,
+            # 折现用的是哪一串现金流：来自三表预测，不是估值模块自己重算的
+            "cash_flow_source": "三表预测（forecast.build_forecast）.fcff_series",
             "diagnostics": result.diagnostics,
         },
     )
@@ -664,7 +680,12 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
 
     # 阶段五：估值
     result = stage_valuation(
-        assumptions, market, wacc_summary["value"], drivers.base_year, trace
+        assumptions,
+        market,
+        wacc_summary["value"],
+        drivers.base_year,
+        trace,
+        forecast=forecast,
     )
 
     # 阶段六：敏感性分析

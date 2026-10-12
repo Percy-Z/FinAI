@@ -228,6 +228,21 @@ def fill_peers_from_financials(
     return filled, notes
 
 
+def cash_flows_from_forecast(
+    forecast: ThreeStatementForecast,
+) -> tuple[list[float], list[float]]:
+    """从三表预测里取出估值要折现的两串数：FCFF 与 EBITDA。
+
+    为什么从这里取：估值（algorithm/finai/dcf.py）与三表预测（forecast.py）本来是
+    两套公式，各算各的现金流，只靠回归测试盯着「两边必须相等」。现在折现直接吃
+    三表算出的序列，一致性由来源保证 —— 报告里的现金流和估出来的价值不可能对不上。
+
+    EBITDA 只有「退出倍数法」算终值时才用得上，但它同时会写进产物，
+    所以一并取出来，免得同一个字段在产物里来自两条公式。
+    """
+    return list(forecast.fcff_series), [year.income.ebitda for year in forecast.years]
+
+
 def _demo() -> None:
     """自检：把三样转换各做一遍并打印。python3 -m pipeline.adapters"""
     from algorithm.finai.dcf import project

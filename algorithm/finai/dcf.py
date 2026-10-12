@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from .types import DCFResult, ForecastAssumptions, MarketData
@@ -26,6 +27,11 @@ from .types import DCFResult, ForecastAssumptions, MarketData
 # 终值占企业价值的诊断阈值，来自机构建模惯例
 TERMINAL_SHARE_TOO_HIGH = 0.80
 TERMINAL_SHARE_TOO_LOW = 0.40
+
+# 折现用的现金流（外部传入，现在来自三表预测）与「按假设重算的明细」之间
+# 允许的最大偏差，单位元。两者本来应当相等，超过这个数就说明两套口径开始分叉,
+# 估值结果会把它写进 diagnostics，提醒报告里交代折现取的是哪一套。
+FCFF_RECONCILE_TOLERANCE = 1.0
 
 
 @dataclass
@@ -117,12 +123,54 @@ def value_dcf(
     market: MarketData,
     wacc: float,
     base_year: int | None = None,
+    *,
+    fcff_series: Sequence[float] | None = None,
+    ebitda_series: Sequence[float] | None = None,
 ) -> DCFResult:
-    """主入口：给定经营假设、市场数据和折现率，返回完整估值结果。"""
+    """主入口：给定经营假设、市场数据和折现率，返回完整估值结果。
+
+    fcff_series / ebitda_series 是「外面已经算好的现金流」（可选）。流水线传的是
+    三表预测（forecast.build_forecast）算出来的那一串 —— 折现用的现金流与报表
+    出自同一处，估值模块不再自己按单值比率重算一遍：
+
+        以前  估值模块另有一套公式，与三表预测靠回归测试盯着「两边必须相等」。
+              两套公式只要有一处改动漏了另一处，报告里的现金流和估出来的价值就对不上。
+        现在  估值吃三表算出的序列，一致性由来源保证，而不是靠纪律保证。
+
+    不传时（敏感性分析、反向求解这类要反复重算的场景）仍然按假设现推 —— 那些
+    场景问的就是「假设变了会怎样」，必须能跟着假设重算。
+    """
     if wacc <= 0:
         raise ValueError(f"WACC 必须为正数，收到 {wacc}")
 
     p = project(assumptions, base_year=base_year)
+    notes: list[str] = []
+    if fcff_series is not None:
+        values = [float(value) for value in fcff_series]
+        if len(values) != assumptions.years:
+            raise ValueError(
+                f"传入的现金流有 {len(values)} 年，假设里是 {assumptions.years} 年，两者必须一致"
+            )
+        drift = max(
+            (abs(left - right) for left, right in zip(values, p.fcff)), default=0.0
+        )
+        if drift > FCFF_RECONCILE_TOLERANCE:
+            notes.append(
+                f"折现用的是外部传入的现金流；本模块按假设重算的明细与它最大差 "
+                f"{drift:,.2f} 元，两套口径已经开始分叉 —— "
+                "报告里要说明折现取的是哪一套"
+            )
+        p.fcff = values
+    if ebitda_series is not None:
+        values = [float(value) for value in ebitda_series]
+        if len(values) != assumptions.years:
+            raise ValueError(
+                f"传入的 EBITDA 有 {len(values)} 年，假设里是 {assumptions.years} 年，两者必须一致"
+            )
+        # EBITDA 只用于退出倍数法终值与「隐含退出倍数」，一并吃外部的序列，
+        # 免得同一个数在产物里来自两条公式。
+        p.ebitda = values
+
     df = discount_factors(wacc, assumptions.years, mid_year=assumptions.mid_year)
     pv_fcff = [cf * factor for cf, factor in zip(p.fcff, df)]
     pv_explicit = sum(pv_fcff)
@@ -153,6 +201,7 @@ def value_dcf(
         terminal_value=terminal,
         terminal_method=assumptions.terminal_method,
     )
+    diagnostics.extend(notes)
 
     return DCFResult(
         wacc=wacc,

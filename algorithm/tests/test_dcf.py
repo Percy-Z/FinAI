@@ -268,5 +268,53 @@ class TestInputValidation(unittest.TestCase):
             flat_market(diluted_shares=0.0)
 
 
+class TestExternalCashFlows(unittest.TestCase):
+    """折现可以直接吃外部算好的现金流 —— 流水线现在传的是三表预测的序列。
+
+    以前估值模块自己按单值比率重算一遍现金流，与三表预测是两套公式，只靠回归
+    测试盯着「两边必须相等」。改成吃外部序列之后，一致性由来源保证：折现用的
+    就是三表算出来的那一串。
+    """
+
+    def test_传入的现金流就是折现用的那一串(self):
+        series = [10.0, 20.0, 30.0, 40.0, 50.0]
+        result = value_dcf(
+            flat_assumptions(), flat_market(), wacc=0.10, fcff_series=series
+        )
+        self.assertEqual(result.projection.fcff, series)
+        for index, (value, factor) in enumerate(zip(series, result.discount_factor)):
+            self.assertAlmostEqual(result.pv_fcff[index], value * factor, places=9)
+
+    def test_长度与预测期不一致要报错(self):
+        with self.assertRaises(ValueError):
+            value_dcf(
+                flat_assumptions(), flat_market(), wacc=0.10, fcff_series=[1.0, 2.0]
+            )
+
+    def test_口径分叉时留下诊断(self):
+        """传进来的现金流与本模块重算的明细差得太多时要说话。
+
+        那种情况下报告必须交代折现用的是哪一套，不能悄悄换掉。
+        """
+        baseline = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
+        drifted = [value + 100.0 for value in baseline.projection.fcff]
+        result = value_dcf(
+            flat_assumptions(), flat_market(), wacc=0.10, fcff_series=drifted
+        )
+        self.assertTrue(
+            any("分叉" in note for note in result.diagnostics),
+            f"两套口径差这么多却没留诊断：{result.diagnostics}",
+        )
+
+    def test_不传时仍然按假设现推(self):
+        """敏感性分析与反向求解还在走这条路，不能因为加了参数就把它改掉。"""
+        result = value_dcf(flat_assumptions(), flat_market(), wacc=0.10)
+        self.assertAlmostEqual(result.projection.fcff[0], 15.0, places=9)
+        self.assertFalse(
+            any("分叉" in note for note in result.diagnostics),
+            "没传外部现金流却报了分叉",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
