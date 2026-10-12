@@ -32,6 +32,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .console import safe_console
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "runs"
 
@@ -208,6 +210,7 @@ def check_run(
 
 
 def main(argv: list[str] | None = None) -> int:
+    safe_console()
     args = list(argv if argv is not None else sys.argv[1:])
     require_charts = "--allow-missing-charts" not in args
     args = [a for a in args if not a.startswith("--")]

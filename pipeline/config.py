@@ -48,6 +48,8 @@ from algorithm.finai.forecast import (
 )
 from algorithm.output.narrative import NarrativeRequest
 
+from .console import safe_console
+
 # 默认配置路径。用 __file__ 往上退两级定位仓库根目录，
 # 这样不管当前工作目录在哪都能找对文件。
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -559,6 +561,7 @@ def _describe_series(values: Sequence[float] | float) -> str:
 
 def _demo() -> None:
     """自检：读默认配置并把结果打印出来。python3 -m pipeline.config"""
+    safe_console()
     print(f"配置文件：{DEFAULT_CONFIG_PATH}")
 
     # 只接住 ConfigError —— 配置错是「预料之中的失败」，打印人话就够了。

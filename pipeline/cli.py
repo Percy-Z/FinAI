@@ -27,6 +27,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from .console import safe_console
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.1.0"
 
@@ -144,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    safe_console()
     args = build_parser().parse_args(argv)
     return int(args.func(args))
 

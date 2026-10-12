@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from .console import safe_console
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "runs"
 LOGS_ROOT = REPO_ROOT / "logs"
@@ -750,6 +752,7 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
+    safe_console()
     parser = argparse.ArgumentParser(description="FinAI 本地工作台")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")

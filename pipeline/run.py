@@ -111,6 +111,7 @@ from .config import (
     load_terminal_params,
     load_wacc_params,
 )
+from .console import safe_console
 from .tracing import RunTrace
 
 # 仓库根目录：本文件在 pipeline/ 下，往上退一级就是 FinAI/
@@ -930,6 +931,7 @@ def main() -> int:
 
     两类都必须在日志里留下「这次运行失败过」的证据。
     """
+    safe_console()
     run_id = new_run_id()
     trace = RunTrace(run_id)
     print(f"运行标识  {run_id}")
