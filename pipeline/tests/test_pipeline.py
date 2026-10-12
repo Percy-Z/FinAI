@@ -217,6 +217,19 @@ class TestPathOverrides(unittest.TestCase):
         self.assertEqual(config.DEFAULT_MARKET_PATH, config.DATA_DIR / "market.csv")
         self.assertEqual(config.DEFAULT_PEER_PATH, config.DATA_DIR / "peers.csv")
 
+    def test_目标公司利润口径开关(self) -> None:
+        """默认用年报实际数；设成 forward 改用三表预测的前瞻（归一）口径。
+
+        基期是业绩低谷年时必须能切：长春高新 2025 年归母净利润同比 −94%，
+        拿这个数去乘可比公司倍数，隐含价值只有 8 元，而 DCF 说 76 元 ——
+        两种方法自相矛盾，报告里没法解释。
+        """
+        self.assertTrue(config.use_target_actuals())
+        with mock.patch.dict(os.environ, {"FINAI_TARGET_ACTUALS": "forward"}):
+            self.assertFalse(config.use_target_actuals())
+        with mock.patch.dict(os.environ, {"FINAI_TARGET_ACTUALS": "actual"}):
+            self.assertTrue(config.use_target_actuals())
+
 
 class TestConfigLoads(unittest.TestCase):
     """下面这一组断言的是仓库里的演示夹具 —— 换真实数据请用环境变量指过去。"""

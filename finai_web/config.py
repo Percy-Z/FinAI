@@ -74,7 +74,12 @@ class Paths:
     manifest_json: Path = ROOT / "data" / "manifest.json"
     # 抽取结果 → 流水线输入的汇总文件。pipeline.config 认这一个路径，
     # 而不是去 data/extracted/ 里逐个读文件 —— 一个入口，出错时好排查。
-    pipeline_input: Path = ROOT / "data" / "extracted" / "pipeline_input.json"
+    #
+    # 它跟着 extracted 走（而不是另写一份 ROOT/data/extracted）：否则
+    # FINAI_EXTRACTED_DIR 这个开关只挪走了记录文件，流水线输入还写回仓库里那份 ——
+    # 离线演示、临时目录里跑测试都会覆盖真实数据的流水线输入（2026-10-12 踩过：
+    # 演示公司把长春高新的 pipeline_input.json 覆盖掉了）。
+    pipeline_input: Path = extracted / "pipeline_input.json"
 
     def ensure(self) -> "Paths":
         for directory in (self.data, self.raw_pdf, self.extracted, self.cache):

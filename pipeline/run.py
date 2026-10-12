@@ -116,6 +116,7 @@ from .config import (
     load_terminal_params,
     load_wacc_params,
     resolve_data_source,
+    use_target_actuals,
 )
 from .console import safe_console
 from .tracing import RunTrace
@@ -640,7 +641,9 @@ def _run_once(run_id: str, trace: RunTrace) -> int:
     sensitivity_params = load_sensitivity_params()
     target, peers = load_market_snapshot()
     peer_financials = load_peer_financials(source=source)
-    target_actuals = load_target_actuals(source)
+    # 相对估值的口径开关：默认用年报实际数；基期若是业绩低谷年，设
+    # FINAI_TARGET_ACTUALS=forward 改用三表预测的前瞻（归一口径）
+    target_actuals = load_target_actuals(source) if use_target_actuals() else None
     report_params = load_report_params()
     evidence = load_evidence()
     trace.record(

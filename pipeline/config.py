@@ -91,6 +91,21 @@ DATA_SOURCE_ENV = "FINAI_DATA_SOURCE"
 SOURCE_CONFIG = "config"
 SOURCE_EXTRACTED = "extracted"
 
+# 相对估值里「目标公司的利润口径」用哪一种：
+#   actual（默认）  用年报实际数，与可比公司对齐到同一个「最近一个完整年度」
+#   forward         用三表预测第一年（前瞻口径）
+# 为什么需要这个开关：基期若正好是业绩低谷年（例如长春高新 2025 年归母净利润
+# 同比 −94%），拿实际数去乘可比公司倍数，隐含价值会被压到失真（实测：DCF 说
+# 76 元、相对估值只说 8 元，两种方法自相矛盾）。低谷年份该用归一到正常盈利
+# 水平的前瞻数。
+TARGET_ACTUALS_ENV = "FINAI_TARGET_ACTUALS"
+
+
+def use_target_actuals() -> bool:
+    """目标公司在相对估值里用的是不是「年报实际数」。见上面的常量说明。"""
+    raw = os.environ.get(TARGET_ACTUALS_ENV, "").strip().lower()
+    return raw != "forward"
+
 # 可比公司财务文件允许出现的列。多出别的列就报错，能挡住表头拼错。
 PEER_FIELDS = frozenset(
     {

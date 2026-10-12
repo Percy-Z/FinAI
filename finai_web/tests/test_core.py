@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from finai_web import adapter, cninfo, extract, market, schema
 from finai_web import targets as targets_mod
@@ -509,6 +511,29 @@ class MarketTest(unittest.TestCase):
             )
         self.assertTrue(report.ok)
         self.assertTrue(any("不在行情表里" in warning for warning in report.warnings))
+
+
+class PathsOverrideTest(unittest.TestCase):
+    """FINAI_EXTRACTED_DIR 要连带把流水线输入的路径一起挪走。
+
+    踩过的坑：这个开关原先只挪走抽取记录，流水线输入还写回仓库里那份 ——
+    离线演示（以及任何在临时目录里跑的流程）会把真实数据的 pipeline_input.json
+    覆盖成演示公司，下一条命令读到的就是 A/B/C 三家演示可比公司。
+    """
+
+    def test_抽取目录改了流水线输入也跟着改(self) -> None:
+        from finai_web import config as cfg
+
+        with mock.patch.dict(os.environ, {"FINAI_EXTRACTED_DIR": "X:/tmp/extracted"}):
+            reloaded = importlib.reload(cfg)
+            try:
+                self.assertEqual(reloaded.PATHS.extracted, Path("X:/tmp/extracted"))
+                self.assertEqual(
+                    reloaded.PATHS.pipeline_input,
+                    Path("X:/tmp/extracted/pipeline_input.json"),
+                )
+            finally:
+                importlib.reload(cfg)  # 恢复，别影响后面的用例
 
 
 class RowMatchingTest(unittest.TestCase):
