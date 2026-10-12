@@ -348,6 +348,7 @@
     FILES: FILES,
     status: status,
     trigger: trigger,
+    get: get,
     load: load,
     loadRun: loadRun,
     fileUrl: fileUrl,

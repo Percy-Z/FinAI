@@ -67,6 +67,93 @@ class WebTestBase(unittest.TestCase):
                 err.close()  # 不关会让解释器在退出时报 ResourceWarning
 
 
+    def post(self, path: str, data: bytes = b"") -> tuple[int, str, bytes]:
+        """发一个 POST。取数页是只读的，这条用于验证「写入口不存在」。"""
+        request = urllib.request.Request(self.base + path, data=data, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return response.status, response.headers.get("Content-Type", ""), response.read()
+        except urllib.error.HTTPError as err:
+            try:
+                return err.code, err.headers.get("Content-Type", ""), err.read()
+            finally:
+                err.close()
+
+
+class TestIngest(WebTestBase):
+    """取数页：界面要能说清「这些数是从哪来的」。
+
+    这一页必须是**只读**的 —— 它把现状摊开、告诉你下一步敲哪条命令，下载与抽取
+    留在命令行（要联网、要几分钟，现场演示里让评委干等两分钟的按钮是风险）。
+    所以除了结构完整，这里专门验一条「没有写入口」。
+    """
+
+    def ingest(self) -> dict[str, Any]:
+        code, _, body = self.get("/api/ingest")
+        self.assertEqual(code, 200, body[:200])
+        return json.loads(body)
+
+    def test_接口结构完整(self) -> None:
+        payload = self.ingest()
+        self.assertTrue(payload["available"], payload.get("error", ""))
+        for key in (
+            "source", "targets", "pdfs", "downloads", "records",
+            "pipeline_input", "market",
+        ):
+            self.assertIn(key, payload, f"/api/ingest 少了 {key}")
+        for key in ("path", "exists", "template", "count", "items", "error"):
+            self.assertIn(key, payload["targets"], f"targets 少了 {key}")
+        self.assertIn("active", payload["source"])
+
+    def test_取数是只读的没有写入口(self) -> None:
+        """POST 到取数接口必须 404 —— 界面上不该有能改数据的入口。"""
+        code, _, _ = self.post("/api/ingest")
+        self.assertEqual(code, 404)
+
+    def test_出处条目带页码与原文(self) -> None:
+        """评审问「这个数哪来的」，答案要具体到第几页、原文是什么。"""
+        records = self.ingest()["records"]["items"]
+        if not records:
+            self.skipTest("本机还没有抽取记录，跳过出处检查")
+        for record in records:
+            for key in ("code", "year", "file", "method", "account_count", "accounts"):
+                self.assertIn(key, record, f"抽取记录少了 {key}")
+            for account in record["accounts"]:
+                for key in ("field", "label", "value", "page", "raw"):
+                    self.assertIn(key, account, f"科目出处少了 {key}")
+
+    def test_流水线输入带出处映射(self) -> None:
+        info = self.ingest()["pipeline_input"]
+        if not info["exists"]:
+            self.skipTest("本机还没有生成流水线输入")
+        self.assertTrue(info["companies"], "有流水线输入却没有出处映射")
+        for company in info["companies"]:
+            self.assertIn("code", company)
+            # 目标公司有基期资产负债表（opening），可比公司只有利润类指标（peer）
+            self.assertTrue(
+                company["opening"] or company["peer"],
+                f"{company['code']} 没有任何科目出处",
+            )
+
+    def test_行情表校验结论进了接口(self) -> None:
+        market = self.ingest()["market"]
+        for key in ("path", "exists", "ok", "rows", "errors", "warnings"):
+            self.assertIn(key, market, f"行情表结论少了 {key}")
+
+    def test_数据源进了状态接口(self) -> None:
+        """总览与运行页要显示「这次用的是手填数据还是年报抽取结果」。"""
+        payload = json.loads(self.get("/api/status")[2])
+        self.assertIn("data_source", payload)
+
+    def test_界面里有取数这一页(self) -> None:
+        _, _, pages = self.get("/web/js/pages2.js")
+        # 用 assertTrue 而不是 assertIn：失败时不要把整个 JS 文件打进报告
+        self.assertTrue(
+            "id: 'ingest'" in pages.decode("utf-8"),
+            "前端页面注册表里没有取数页（id: 'ingest'）",
+        )
+
+
 class TestPage(WebTestBase):
     """页面本身：入口要在，脚本别写错到浏览器跑不起来。"""
 

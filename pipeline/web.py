@@ -82,6 +82,9 @@ class RunState:
                 "artifacts": _artifacts(self.run_id) if self.run_id else [],
                 "evidence": _evidence(self.run_id) if self.run_id else [],
                 "metrics": _metrics(self.run_id) if self.run_id else {},
+                # 这次用的是手填数据还是年报抽取结果：总览与取数页都要说清，
+                # 否则「数字哪来的」这件事只能靠人去翻 runs/ 下的清单。
+                "data_source": _data_source(self.run_id),
             }
 
 
@@ -91,12 +94,30 @@ def _read_trace(run_id: str | None) -> list[dict[str, Any]]:
     直接读 trace.jsonl —— 它是流水线本来就写的日志，界面只是换了个方式呈现，
     不额外要求流水线暴露进度回调。
     """
+    return [
+        {
+            "seq": entry.get("seq"),
+            "step": entry.get("step"),
+            "status": entry.get("status"),
+            "duration_s": entry.get("duration_s"),
+            "model": entry.get("model"),
+        }
+        for entry in _trace_entries(run_id)
+    ]
+
+
+def _trace_entries(run_id: str | None) -> list[dict[str, Any]]:
+    """把 trace.jsonl 原样读成字典列表（读不到就是空表）。
+
+    界面要看两个东西：跑到哪一步了（_read_trace），以及这次数据从哪来
+    （_data_source）。两者读同一个文件，所以解析只写一份，各自挑自己要的字段。
+    """
     if not run_id:
         return []
     path = LOGS_ROOT / run_id / "trace.jsonl"
     if not path.exists():
         return []
-    steps: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -104,16 +125,33 @@ def _read_trace(run_id: str | None) -> list[dict[str, Any]]:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        steps.append(
-            {
-                "seq": entry.get("seq"),
-                "step": entry.get("step"),
-                "status": entry.get("status"),
-                "duration_s": entry.get("duration_s"),
-                "model": entry.get("model"),
-            }
-        )
-    return steps
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _data_source(run_id: str | None) -> dict[str, Any]:
+    """这次运行读的是手填文件，还是年报抽取结果。
+
+    记在轨迹里（load_config 那一步的 extra），不另存一份状态 —— 报告清单与界面
+    读的是同一处记录，两边的说法不会打架。
+
+    为什么值得单列：报告里所有数字的来源就取决于这一个开关。评审问「这个数哪来的」，
+    界面必须先能自己说出「这次用的是年报抽取结果」还是「手填的过渡数据」。
+    """
+    for entry in _trace_entries(run_id):
+        if entry.get("step") != "load_config":
+            continue
+        extra = entry.get("extra") or {}
+        switch = str(extra.get("data_source") or "")
+        if not switch:
+            continue
+        return {
+            "switch": switch,
+            "opening_balance": str(extra.get("opening_balance_from") or ""),
+            "peers": str(extra.get("peers_from") or ""),
+        }
+    return {}
 
 
 def _artifacts(run_id: str | None) -> list[dict[str, Any]]:
@@ -298,6 +336,304 @@ def _environment() -> dict[str, Any]:
     }
 
 
+def _rel(path: Path) -> str:
+    """路径显示成仓库内相对路径：界面上短，也不把本机目录结构摊出去。"""
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _short(text: str, limit: int = 140) -> str:
+    """把原文压成一行并截断。出处要看得见，但不能让一页 JSON 撑到几百 KB。"""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _split_pdf_name(stem: str) -> tuple[str, int | None]:
+    """`600519_2024` → ('600519', 2024)。命名不符合约定时只回文件名。"""
+    head, _, tail = stem.rpartition("_")
+    if head and tail.isdigit():
+        return head, int(tail)
+    return stem, None
+
+
+def _provenance_rows(value: Any) -> list[dict[str, str]]:
+    """出处字典 → 列表：界面按顺序渲染，不用管 dict 的键序。"""
+    if not isinstance(value, dict):
+        return []
+    return [{"field": str(key), "provenance": str(item)} for key, item in value.items()]
+
+
+def _peer_values(peers: Any, code: str) -> dict[str, float]:
+    """取这家可比公司最终进流水线的数值（与出处表并排显示）。"""
+    if not isinstance(peers, dict):
+        return {}
+    entry = peers.get(code)
+    if not isinstance(entry, dict):
+        return {}
+    return {
+        str(key): float(value)
+        for key, value in entry.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+
+
+def _ingest_payload() -> dict[str, Any]:
+    """取数层现状：定标清单、年报 PDF、抽取记录、数值出处、行情表校验。
+
+    这一页是**只读**的：它把现状摊开，并说清下一步该敲哪条命令。下载与抽取要联网、
+    要几分钟，留在命令行里 —— 现场演示时一个点下去就等两分钟的按钮是风险，不是功能。
+
+    读的全是本地文件（都在 data/、config/ 下），不发任何网络请求。
+    取数层用延迟导入：pipeline 不该在导入期依赖 finai_web，缺了也得能打开界面。
+    """
+    payload: dict[str, Any] = {
+        "available": False,
+        "error": "",
+        "source": {
+            "env_var": "FINAI_DATA_SOURCE",
+            "active": "config",
+            "last_run": _data_source(STATE.run_id or STATE.last_run),
+        },
+        "targets": {},
+        "pdfs": {},
+        "downloads": {},
+        "records": {},
+        "pipeline_input": {},
+        "market": {},
+    }
+    try:
+        from finai_web import market as market_mod
+        from finai_web import targets as targets_mod
+        from finai_web.config import DATA_SOURCE_ENV, PATHS, data_source
+        from finai_web.downloader import load_manifest
+    except ImportError as err:  # pragma: no cover - 取数层已随仓库提供
+        payload["error"] = f"取数层不可用：{err}"
+        return payload
+
+    payload["available"] = True
+    payload["source"]["env_var"] = DATA_SOURCE_ENV
+    payload["source"]["active"] = data_source()
+
+    # ── 定标公司清单 ────────────────────────────────────────────────
+    targets: list[Any] = []
+    target_error = ""
+    try:
+        targets = targets_mod.read_targets(required=False)
+    except Exception as err:  # noqa: BLE001 - 清单写错了也要能把界面打开
+        target_error = str(err)
+    payload["targets"] = {
+        "path": _rel(PATHS.targets_csv),
+        "exists": PATHS.targets_csv.is_file(),
+        "template": _rel(PATHS.targets_example),
+        "template_exists": PATHS.targets_example.is_file(),
+        "count": len(targets),
+        "items": [
+            {
+                "ticker": target.ticker,
+                "name": target.name,
+                "market": target.market,
+                "years": list(target.years),
+                "has_url": bool(target.annual_report_url),
+            }
+            for target in targets
+        ],
+        "error": target_error,
+    }
+
+    # ── 下好的年报 PDF ──────────────────────────────────────────────
+    pdf_items: list[dict[str, Any]] = []
+    if PATHS.raw_pdf.is_dir():
+        for path in sorted(PATHS.raw_pdf.glob("*.pdf")):
+            code, year = _split_pdf_name(path.stem)
+            pdf_items.append(
+                {"file": path.name, "code": code, "year": year, "bytes": path.stat().st_size}
+            )
+    payload["pdfs"] = {
+        "dir": _rel(PATHS.raw_pdf),
+        "count": len(pdf_items),
+        "items": pdf_items,
+    }
+
+    # ── 下载清单：每份 PDF 的来源 URL 与 sha256 ─────────────────────
+    manifest: dict[str, Any] = {}
+    try:
+        manifest = load_manifest()
+    except Exception:  # noqa: BLE001 - 清单损坏不该让整页打不开
+        manifest = {}
+    raw_entries = manifest.get("entries") if isinstance(manifest, dict) else None
+    if isinstance(raw_entries, dict):
+        raw_entries = list(raw_entries.values())
+    downloads: list[dict[str, Any]] = []
+    for entry in raw_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        downloads.append(
+            {
+                "code": str(entry.get("code") or ""),
+                "year": entry.get("year"),
+                "url": str(entry.get("url") or ""),
+                "sha256": str(entry.get("sha256") or ""),
+                "bytes": int(entry.get("bytes") or 0),
+                "fetched_at": str(entry.get("fetched_at") or ""),
+                "ok": bool(entry.get("ok", True)),
+                "note": str(entry.get("note") or ""),
+            }
+        )
+    payload["downloads"] = {
+        "path": _rel(PATHS.manifest_json),
+        "count": len(downloads),
+        "updated_at": str(manifest.get("updated_at") or "") if isinstance(manifest, dict) else "",
+        "items": downloads,
+    }
+
+    # ── 抽取记录：每个科目的值、页码与原文 ──────────────────────────
+    records: list[dict[str, Any]] = []
+    if PATHS.extracted.is_dir():
+        for path in sorted(PATHS.extracted.glob("*.json")):
+            # 汇总文件由下一段单独读，避免同一份数据出现两次、说法还可能不一致
+            if path.name == "pipeline_input.json":
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            accounts = record.get("accounts") or {}
+            account_items: list[dict[str, Any]] = []
+            if isinstance(accounts, dict):
+                for field, raw in accounts.items():
+                    if not isinstance(raw, dict):
+                        continue
+                    account_items.append(
+                        {
+                            "field": str(field),
+                            "label": str(raw.get("label") or ""),
+                            "value": raw.get("value_yuan"),
+                            "unit": str(raw.get("unit") or ""),
+                            "page": raw.get("page"),
+                            "raw": _short(str(raw.get("raw_text") or "")),
+                            "note": str(raw.get("note") or ""),
+                        }
+                    )
+            records.append(
+                {
+                    "file": path.name,
+                    "code": str(record.get("code") or ""),
+                    "name": str(record.get("name") or ""),
+                    "year": record.get("year"),
+                    "period": str(record.get("period") or ""),
+                    "method": str(record.get("method") or ""),
+                    "backend": str(record.get("backend") or ""),
+                    "pdf": str(record.get("pdf") or ""),
+                    "source_url": str(record.get("source_url") or ""),
+                    "sha256": str(record.get("sha256") or ""),
+                    "pages": record.get("pages"),
+                    "has_text_layer": record.get("has_text_layer"),
+                    "extracted_at": str(record.get("extracted_at") or ""),
+                    "account_count": len(account_items),
+                    "accounts": account_items,
+                    "missing_accounts": [str(x) for x in (record.get("missing_accounts") or [])],
+                    "notes": [str(x) for x in (record.get("notes") or [])],
+                }
+            )
+    payload["records"] = {
+        "dir": _rel(PATHS.extracted),
+        "count": len(records),
+        "items": records,
+    }
+
+    # ── 流水线输入：每个科目是「读到的」还是「倒挤的」 ──────────────
+    input_path = PATHS.pipeline_input
+    info: dict[str, Any] = {
+        "path": _rel(input_path),
+        "exists": input_path.is_file(),
+        "generated_at": "",
+        "target": "",
+        "peer_codes": [],
+        "companies": [],
+        "error": "",
+    }
+    if input_path.is_file():
+        try:
+            data = json.loads(input_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as err:
+            info["error"] = str(err)
+            data = {}
+        if isinstance(data, dict):
+            info["generated_at"] = str(data.get("generated_at") or "")
+            actuals = data.get("target_actuals") or {}
+            if isinstance(actuals, dict):
+                info["target"] = str(actuals.get("code") or "")
+            peers = data.get("peers") or {}
+            if isinstance(peers, dict):
+                info["peer_codes"] = sorted(str(code) for code in peers)
+            provenance = data.get("provenance") or {}
+            if isinstance(provenance, dict):
+                for code, entry in provenance.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    info["companies"].append(
+                        {
+                            "code": str(code),
+                            "year": entry.get("year"),
+                            "period": str(entry.get("period") or ""),
+                            "method": str(entry.get("method") or ""),
+                            "pdf": str(entry.get("pdf") or ""),
+                            "source_url": str(entry.get("source_url") or ""),
+                            "sha256": str(entry.get("sha256") or ""),
+                            "opening": _provenance_rows(entry.get("opening_provenance")),
+                            "peer": _provenance_rows(entry.get("peer_provenance")),
+                            # 可比公司的指标值：出处表里有些字段在抽取记录里
+                            # 没有同名科目（例如 EBIT 是由利润总额加利息费用推出来的），
+                            # 界面要有个地方取到最终进流水线的那个数，否则会出现
+                            # 「出处写着年报直接读取、取值却是空」的矛盾画面。
+                            "peer_values": _peer_values(peers, str(code)),
+                            "notes": [str(x) for x in (entry.get("notes") or [])],
+                            "skipped": str(entry.get("skipped") or ""),
+                        }
+                    )
+    payload["pipeline_input"] = info
+
+    # ── 行情表：股价与股本要人工从 Wind / Choice 导出，这里只报校验结论 ──
+    market_path = PATHS.market_csv
+    market_info: dict[str, Any] = {
+        "path": _rel(market_path),
+        "exists": market_path.is_file(),
+        "ok": False,
+        "rows": 0,
+        "target": "",
+        "peer_count": 0,
+        "errors": [],
+        "warnings": [],
+        "error": "",
+    }
+    if market_path.is_file():
+        try:
+            report = market_mod.validate(market_path, targets=targets or None)
+            target = getattr(report, "target", None) or {}
+            peers = getattr(report, "peers", None) or []
+            market_info.update(
+                {
+                    "ok": bool(report.ok),
+                    "rows": len(report.rows),
+                    "errors": [str(x) for x in report.errors],
+                    "warnings": [str(x) for x in report.warnings],
+                    "target": str(target.get("code") or "") if isinstance(target, dict) else "",
+                    "peer_count": len(peers),
+                }
+            )
+        except Exception as err:  # noqa: BLE001 - 行情表格式错也要把结论说出来
+            market_info["error"] = str(err)
+    else:
+        market_info["error"] = "行情表不存在：股价与摊薄股数要从 Wind / Choice 导出"
+    payload["market"] = market_info
+
+    return payload
+
+
 def _initial_state() -> RunState:
     """初始状态指向最近一次运行 —— 打开界面就该看到上一次的结果，
     而不是一片空白等着人点按钮。第一次使用时没有历史运行，保持空。
@@ -391,6 +727,10 @@ class Handler(BaseHTTPRequestHandler):
             payload["environment"] = _environment()
             payload["recent"] = _recent_runs()
             self._json(payload)
+            return
+        if path == "/api/ingest":
+            # 只读：取数页只看现状，下载与抽取留在命令行（见 _ingest_payload）
+            self._json(_ingest_payload())
             return
         if path.startswith("/web/"):
             self._serve_under(WEB_ROOT, path, "/web/")

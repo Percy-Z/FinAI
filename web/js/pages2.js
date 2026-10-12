@@ -944,6 +944,291 @@
     }
   };
 
+  /* ══════════════════════════════════════════════════════════════════
+     页面 13：取数（定标公司 → 年报）
+
+     这一页回答评审最容易问的那个问题：这些数是从哪来的。
+     定标清单 → 年报 PDF → 抽取记录（每个科目带页码与原文）→ 流水线输入 → 行情表校验，
+     整条链摊开摆着：一个数字能点到第几页、原文是什么、哪些是倒挤出来的。
+
+     它是**只读**的：下载与抽取要联网、要几分钟，留在命令行里跑。界面上给的是
+     「现状 + 下一步敲哪条命令」—— 一个点下去就干等两分钟的按钮，在现场演示里
+     是风险，不是功能。
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 仓库内相对路径 → 能直接粘进 cmd 的 Windows 路径 */
+  function winPath(p) { return String(p || '').replace(/\//g, '\\'); }
+
+  function recordOfIngest(d, code) {
+    var hit = null;
+    ((d.records && d.records.items) || []).forEach(function (r) {
+      if (!hit && String(r.code) === String(code)) hit = r;
+    });
+    return hit;
+  }
+
+  function hasPdfOf(d, code) {
+    return ((d.pdfs && d.pdfs.items) || []).some(function (p) {
+      return String(p.code) === String(code);
+    });
+  }
+
+  function recordAccount(record, field) {
+    var hit = null;
+    ((record && record.accounts) || []).forEach(function (a) {
+      if (!hit && String(a.field) === String(field)) hit = a;
+    });
+    return hit;
+  }
+
+  /* 出处表：一个科目一行 —— 年报直接读到 / 倒挤出来，并给出页码与原文。
+     倒挤的字段在年报里没有同名科目，页码那列留空是正常的，不是漏了。
+     目标公司有基期资产负债表（11 个科目），可比公司只有 5 个利润类指标，
+     两者分开列，免得看的人以为可比公司"少了六个科目"。 */
+  function provenanceTable(company) {
+    var out = [];
+    if ((company.opening || []).length) {
+      out.push('<div class="tbl-note">基期资产负债表</div>' +
+        rowsTable(company, company.opening));
+    }
+    if ((company.peer || []).length) {
+      out.push('<div class="tbl-note">可比公司指标</div>' +
+        rowsTable(company, company.peer, company.peer_values));
+    }
+    return out.join('');
+  }
+
+  /* values：字段 → 数值。抽取记录里没有同名科目时用它兜底 —— 否则会出现
+     「出处写着年报直接读取、取值却是空」的画面，看着像漏抽了。 */
+  function rowsTable(company, rows, values) {
+    values = values || {};
+    return '<div class="tbl-wrap"><table class="tbl responsive"><thead><tr>' +
+      '<th>流水线字段</th><th class="num">取值</th><th>出处</th><th>页码 / 原文</th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function (row) {
+        var acc = recordAccount(company.record, row.field);
+        var derived = String(row.provenance).indexOf('derived') === 0;
+        var value = (acc && acc.value != null) ? acc.value
+          : (values[row.field] != null ? values[row.field] : null);
+        return '<tr>' +
+          '<td class="mono" data-label="字段">' + esc(row.field) + '</td>' +
+          '<td class="num" data-label="取值">' +
+          (value != null ? F.money(value) : '<span class="muted">—</span>') + '</td>' +
+          '<td data-label="出处">' + (derived
+            ? '<span class="badge infer">倒挤</span> <span class="mono small dim">' +
+              esc(row.provenance) + '</span>'
+            : '<span class="badge pass">年报直接读取</span>') + '</td>' +
+          '<td data-label="页码/原文">' + (acc && acc.page != null
+            ? '<span class="mono">第 ' + esc(String(acc.page)) + ' 页</span>' +
+              (acc.raw ? '<div class="small dim">' + esc(acc.raw) + '</div>' : '')
+            : '<span class="muted">—</span>') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  function ingestDetail(d) {
+    if (!d || !d.available) {
+      return P.emptyBlock('alert', '取数层不可用',
+        (d && d.error) || '仓库里没有 finai_web 取数层', '');
+    }
+    var t = d.targets || {}, out = [];
+    var records = (d.records && d.records.items) || [];
+    var pdfs = (d.pdfs && d.pdfs.items) || [];
+    var downloads = (d.downloads && d.downloads.items) || [];
+    var input = d.pipeline_input || {};
+    var market = d.market || {};
+
+    /* ── 一屏看清现在准备到哪一步 ───────────────────────────────── */
+    out.push('<div class="grid g-4">' +
+      kpi('定标公司', String(t.count || 0), '家',
+        t.exists ? '<span class="muted">' + esc(t.path) + '</span>'
+          : '<span class="badge warn">还没有清单</span>', { icon: 'listChecks' }) +
+      kpi('年报 PDF', String(pdfs.length), '份',
+        '<span class="muted">下载清单 ' + downloads.length + ' 条</span>', { icon: 'download' }) +
+      kpi('抽取记录', String(records.length), '家',
+        '<span class="muted">' + esc((d.records && d.records.dir) || '') + '</span>', { icon: 'file' }) +
+      kpi('行情表', market.ok ? '通过' : (market.exists ? '不通过' : '未提供'), '',
+        market.exists ? '<span class="muted">' + esc(market.path) + '</span>'
+          : '<span class="badge warn">需要人工导出</span>',
+        { hero: true, icon: 'table' }) +
+      '</div>');
+
+    /* ── 定标清单 ──────────────────────────────────────────────── */
+    if (!t.exists) {
+      out.push('<div class="mt14">' + card('定标公司清单', 'listChecks',
+        P.emptyBlock('listChecks', '还没有定标公司清单',
+          '取数从一份清单开始：把模板复制成 ' + t.path + '，填上要估的公司与年份区间，再跑一次取数。') +
+        '<div class="row wrap mt10" style="gap:10px">' +
+        '<span class="hash" data-copy="' + esc('copy ' + winPath(t.template) + ' ' + winPath(t.path)) +
+        '" title="点击复制命令">copy ' + esc(winPath(t.template)) + ' ' + esc(winPath(t.path)) + '</span>' +
+        '<span class="muted small">模板：' + esc(t.template) +
+        (t.template_exists ? '' : '（模板文件也缺了）') + '</span>' +
+        '</div>', {}) + '</div>');
+    } else {
+      out.push('<div class="mt14">' + card('定标公司清单', 'listChecks',
+        '<div class="tbl-wrap"><table class="tbl responsive"><thead><tr>' +
+        '<th>代码</th><th>名称</th><th>年份</th><th>年报 PDF</th><th>抽取</th><th>方法</th>' +
+        '</tr></thead><tbody>' +
+        (t.items || []).map(function (item) {
+          var rec = recordOfIngest(d, item.ticker);
+          return '<tr>' +
+            '<td class="mono" data-label="代码">' + esc(item.ticker) + '</td>' +
+            '<td data-label="名称">' + esc(item.name || '—') + '</td>' +
+            '<td class="mono small" data-label="年份">' +
+            esc((item.years || []).join(' / ') || '—') + '</td>' +
+            '<td data-label="年报 PDF">' + (hasPdfOf(d, item.ticker)
+              ? '<span class="badge pass">已入库</span>'
+              : '<span class="badge neutral">未下载</span>') + '</td>' +
+            '<td data-label="抽取">' + (rec
+              ? '<span class="badge pass">' + F.int(rec.account_count) + ' 个科目</span>'
+              : '<span class="badge neutral">未抽取</span>') + '</td>' +
+            '<td class="small dim" data-label="方法">' + esc((rec && rec.method) || '—') + '</td>' +
+            '</tr>';
+        }).join('') + '</tbody></table></div>' +
+        (t.error ? '<div class="banner warn" style="margin-top:10px">' + Icons.svg('alert') +
+          '<div>清单读取有问题：' + esc(t.error) + '</div></div>' : '') +
+        '<div class="tbl-note">共 ' + (t.items || []).length +
+        ' 家。年报通常在次年披露，年份区间要写披露年份所在的那一年。</div>', {}) + '</div>');
+    }
+
+    /* ── 数值出处：每个数字的页码与原文 ────────────────────────── */
+    if (input.exists && (input.companies || []).length) {
+      var blocks = (input.companies || []).map(function (company) {
+        company.record = recordOfIngest(d, company.code);
+        return '<details class="acc" open><summary>' +
+          '<span class="badge neutral">' + esc(company.code) + '</span> ' +
+          '<b>' + esc((company.record && company.record.name) || company.code) + '</b> ' +
+          '<span class="muted small">' + esc(company.period || '') +
+          ' · 方法 ' + esc(company.method || '—') + '</span></summary>' +
+          (company.sha256 || company.source_url
+            ? '<div class="row wrap small" style="gap:10px;margin-bottom:8px">' +
+              (company.sha256 ? '<span class="muted">PDF sha256</span>' + hashChip(company.sha256) : '') +
+              (company.source_url ? '<span class="muted">来源</span>' +
+                '<span class="mono small">' + esc(company.source_url) + '</span>' : '') +
+              '</div>' : '') +
+          provenanceTable(company) +
+          ((company.notes || []).length ? '<div class="tbl-note">' +
+            company.notes.map(function (n) { return '· ' + esc(n); }).join('<br>') + '</div>' : '') +
+          '</details>';
+      }).join('');
+      out.push('<div class="mt14">' + card('这些数字是从哪来的', 'file',
+        '<div class="row wrap" style="gap:10px;margin-bottom:10px">' +
+        '<span class="badge neutral">' + esc(input.path) + '</span>' +
+        '<span class="muted small">生成于 ' + esc(F.dt(input.generated_at) || '—') +
+        '；「倒挤」= 年报里没有同名科目，由其他科目相减得到</span></div>' +
+        blocks, {}) + '</div>');
+    } else {
+      out.push('<div class="mt14">' + card('这些数字是从哪来的', 'file',
+        P.emptyBlock('file', '还没有「年报 → 流水线输入」这一步',
+          '跑完取数后，这里会列出每个科目的出处：年报第几页、原文是什么、哪些是倒挤出来的。') +
+        '<div class="row wrap mt10" style="gap:10px">' +
+        '<span class="hash" data-copy="python -m finai_web run" title="点击复制">' +
+        'python -m finai_web run</span>' +
+        '<span class="muted small">联网下载年报并抽取。只想先看效果，可以跑离线样例 ' +
+        '<span class="mono">python finai_web/examples/offline_demo.py</span></span>' +
+        '</div>', {}) + '</div>');
+    }
+
+    /* ── 行情表校验 ────────────────────────────────────────────── */
+    var marketBody;
+    if (!market.exists) {
+      marketBody = P.emptyBlock('table', '还没有行情表',
+        '股价、摊薄股数与有息负债是终端数据，程序不生成，要从 Wind / Choice 导出到 ' +
+        market.path + '。') +
+        '<div class="row wrap mt10" style="gap:10px">' +
+        '<span class="hash" data-copy="python -m finai_web market --template" title="点击复制">' +
+        'python -m finai_web market --template</span></div>';
+    } else {
+      marketBody = kvRows([
+        ['结论', market.ok
+          ? '<span class="badge pass">通过</span>'
+          : '<span class="badge fail">不通过</span>'],
+        ['数据行', F.int(market.rows) + ' 行'],
+        ['目标 / 可比', esc(market.target || '—') + ' / ' + F.int(market.peer_count) + ' 家']
+      ]) +
+      ((market.errors || []).length
+        ? '<div class="banner fail" style="margin-top:10px">' + Icons.svg('alert') +
+          '<div>' + market.errors.map(function (e) { return '· ' + esc(e); }).join('<br>') +
+          '</div></div>' : '') +
+      ((market.warnings || []).length
+        ? '<div class="tbl-note">' +
+          market.warnings.map(function (w) { return '· ' + esc(w); }).join('<br>') + '</div>' : '') +
+      (market.error ? '<div class="tbl-note">' + esc(market.error) + '</div>' : '');
+    }
+    out.push('<div class="mt14">' + card('行情表校验', 'table', marketBody, {}) + '</div>');
+
+    /* ── 下载清单：来源 URL 与哈希（数据来源可核验的凭证） ─────── */
+    if (downloads.length) {
+      out.push('<div class="mt14">' + card('年报下载清单', 'download',
+        '<div class="tbl-wrap"><table class="tbl responsive"><thead><tr>' +
+        '<th>代码</th><th>年份</th><th>来源</th><th>sha256</th><th class="num">大小</th>' +
+        '</tr></thead><tbody>' +
+        downloads.map(function (item) {
+          return '<tr>' +
+            '<td class="mono" data-label="代码">' + esc(item.code) + '</td>' +
+            '<td class="mono" data-label="年份">' +
+            esc(String(item.year == null ? '—' : item.year)) + '</td>' +
+            '<td class="small" data-label="来源">' + (item.url
+              ? '<a class="mono small" href="' + esc(item.url) +
+                '" target="_blank" rel="noopener">' + esc(F.short(item.url, 46)) + '</a>'
+              : '<span class="muted">—</span>') + '</td>' +
+            '<td data-label="sha256">' + hashChip(item.sha256) + '</td>' +
+            '<td class="num" data-label="大小">' +
+            (item.bytes ? F.moneyShort(item.bytes) + ' ' + F.moneyUnit(item.bytes) : '—') +
+            '</td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        '<div class="tbl-note">这份清单就是「数据来源可核验」的凭证：来源 URL + 文件哈希，' +
+        '报告附录里的出处指向同一份记录。</div>', {}) + '</div>');
+    }
+
+    return out.join('');
+  }
+
+  var ingest = {
+    id: 'ingest', nav: '取数', icon: 'database', group: '数据准备',
+    title: '取数（定标公司 → 年报）',
+    sub: function () { return '定标公司 → 年报 PDF → 结构化科目 → 流水线输入'; },
+    render: function (c) {
+      var src = (c.status && c.status.data_source) || {};
+      var sourceValue = src.switch === 'extracted'
+        ? '<span class="badge pass">年报抽取结果</span>'
+        : (src.switch ? '<span class="badge neutral">手填过渡数据</span>'
+          : '<span class="muted">还没有运行记录</span>');
+      var out = [];
+      out.push(demoBanner(c.data));
+      out.push(card('本次运行的数据来源', 'database',
+        '<div class="grid g-6-6">' +
+        kvRows([
+          ['数据源', sourceValue],
+          ['基期资产负债表', src.opening_balance
+            ? esc(src.opening_balance) : '<span class="muted">—</span>'],
+          ['可比公司财务', src.peers ? esc(src.peers) : '<span class="muted">—</span>']
+        ]) +
+        '<div class="tbl-note" style="margin-top:10px">切到年报抽取结果：把环境变量设为 ' +
+        '<span class="hash" data-copy="FINAI_DATA_SOURCE=extracted" title="点击复制">' +
+        'FINAI_DATA_SOURCE=extracted</span>，再跑 <span class="mono">python -m pipeline.run</span>。' +
+        '不设置时读 <span class="mono">data/assumptions.toml</span> 与 ' +
+        '<span class="mono">data/peers.csv</span>。这一页只看现状：' +
+        '下载与抽取在命令行里跑，界面不触发任何网络请求。</div></div>', {}));
+      out.push('<div id="ingestDetail" class="mt14">' +
+        '<div class="skel skel-card" style="height:160px"></div></div>');
+      return out.join('');
+    },
+    mount: function (root) {
+      var box = root.querySelector('#ingestDetail');
+      if (!box) return;
+      API.get('/api/ingest').then(function (d) {
+        box.innerHTML = ingestDetail(d);
+      }).catch(function (err) {
+        box.innerHTML = P.emptyBlock('alert', '取数层信息读不到',
+          '本地服务没有返回 /api/ingest：' + String((err && err.message) || err), '');
+      });
+    }
+  };
+
   P.list = P.list.concat([comps, validation, report, evidence, runs, settings]);
+  /* 「取数」排在导航最前面：它是整条链路的第一步（取数 → 估值 → 分析 → 交付）。
+     页面定义在本文件里，所以用 unshift，而不是回头改 pages.js 的数组字面量。 */
+  P.list.unshift(ingest);
+
   P.md2html = md2html;
 })(window);
