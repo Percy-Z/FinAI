@@ -38,6 +38,8 @@ from .downloader import (
 )
 from .firecrawl import Firecrawl, FirecrawlUnavailable
 
+from pipeline.console import safe_console
+
 
 def _print_outcome(outcome: FetchOutcome) -> None:
     if outcome.ok:
@@ -437,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    safe_console()
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
         return int(args.func(args))

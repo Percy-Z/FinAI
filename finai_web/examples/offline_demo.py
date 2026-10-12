@@ -29,6 +29,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from finai_web import adapter, extract  # noqa: E402  （要先把仓库根加进 sys.path）
 from finai_web.config import PATHS  # noqa: E402
+from pipeline.console import safe_console  # noqa: E402
 
 # 目标公司 T：基期数字与 data/assumptions.toml 的 [opening_balance] 一致，
 # 这样「抽取跑出来的数」和「手填的数」可以直接对账。
@@ -98,6 +99,7 @@ def peer_pages(code: str, values: dict[str, float]) -> list[str]:
 
 
 def main() -> int:
+    safe_console()
     PATHS.ensure()
     print("离线演示：人造年报页文本 → 抽取结果 → 流水线输入")
     print(f"  产出目录  {PATHS.extracted}")
