@@ -555,6 +555,18 @@ def parse_sections(content: str) -> tuple[dict[str, str], list[str]]:
 
 _NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
+# 负号有三种写法：ASCII 的 `-`、全角减号 `－`（U+FF0D）、数学减号 `−`（U+2212）。
+# 年报与台账里常混用（例如「同比 −10.27%」），大模型多半输出 ASCII 的 `-`。
+# 不统一的话，事实表里存的是「−10.27」、正文写的是「-10.27」，校验会当成两个数
+# —— 2026-10-13 实测：一份报告的 4 处「事实表之外的数字」全是这个原因。
+_MINUS_NORMALIZE = str.maketrans({"\u2212": "-", "\uff0d": "-"})
+
+
+def _numbers_in(text: str) -> list[str]:
+    """抠出一段文字里的数字，先把几种负号统一成 ASCII 减号。"""
+    return _NUMBER_PATTERN.findall(text.translate(_MINUS_NORMALIZE))
+
+
 # 区间写法：7.32-12.87、9.58 - 9.77、2026—2030。
 # 扫描数字前必须先把这种连字符去掉，否则会被当成负号 ——
 # 实测一份报告里因此产生 10 处「事实表之外的数字」，全是误报，
@@ -593,7 +605,7 @@ def verify_numbers(
                 collect(item)
             return
         if isinstance(value, str):
-            for token in _NUMBER_PATTERN.findall(value):
+            for token in _numbers_in(value):
                 try:
                     allowed.add(float(token))
                 except ValueError:
@@ -606,8 +618,13 @@ def verify_numbers(
         if value.is_integer() and (1900 <= value <= 2100 or abs(value) < 100):
             return True
         for candidate in allowed:
-            if abs(candidate - value) <= tolerance:
-                return True
+            # 单位换算：事实表里存的是「元」，正文习惯写「万元 / 亿元」。
+            # 不给这一层，真实公司的报告会满篇误报 —— 实测一份报告 6 处
+            # 「事实表之外的数字」里有 5 处是「33,676,107,746.71 元 → 336.76 亿元」
+            # 这种换算（演示数据只有几百元，看不出这个问题）。
+            for factor in (1.0, 1e4, 1e8):
+                if abs(candidate - value * factor) <= tolerance * factor:
+                    return True
             # 百分比写法：事实表里是 0.7425，正文写 74.25%
             if abs(candidate * 100 - value) <= tolerance * 100:
                 return True
@@ -617,7 +634,7 @@ def verify_numbers(
     for name, text in sections.items():
         # 先把区间连接符换成顿号，再扫数字 —— 顺序不能反
         cleaned = _RANGE_PATTERN.sub("至", text)
-        for token in _NUMBER_PATTERN.findall(cleaned):
+        for token in _numbers_in(cleaned):
             try:
                 value = float(token)
             except ValueError:

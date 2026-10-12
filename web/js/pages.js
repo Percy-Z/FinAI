@@ -555,12 +555,18 @@
         ['权益', [['股本', 'share_capital'], ['留存收益', 'retained_earnings'],
                   ['少数股东权益', 'minority_equity']]]
       ];
-      var obScale = 1, obUnit = '元';
+      var obScale = 1, obUnit = '元', obDigits = 2;
       if (ob) {
         var obAssets = (ob.cash || 0) + (ob.accounts_receivable || 0) + (ob.inventory || 0) +
           (ob.fixed_assets || 0) + (ob.other_non_current_assets || 0);
-        if (Math.abs(obAssets) >= 1e8) { obScale = 1e8; obUnit = '亿元'; }
+        if (Math.abs(obAssets) >= 1e8) { obScale = 1e8; obUnit = '亿元'; obDigits = 4; }
       }
+      /* 配平容差：输入框里的数字是按显示精度四舍五入过的（亿元 4 位 = 1 万元），
+         11 个科目各自最多差半个末位，相加就可能到「半个末位 × 科目数」。
+         不放这个容差，百亿级的真实报表会显示成「差额 0.01 亿元、不平 ✕」——
+         那是显示精度的错觉，不是数据不平（2026-10-13 走查抓到）。
+         流水线那边的容差是 0.005 元，因为它读的是文件里的精确值。 */
+      var obTolerance = Math.max(0.005, obScale * Math.pow(10, -obDigits) * 0.5 * 13);
       if (ob) {
         var obHtml = obGroups.map(function (grp) {
           var cols = Math.min(4, grp[1].length);
@@ -568,7 +574,7 @@
             '<div class="field-row" style="grid-template-columns:repeat(' + cols + ',minmax(0,1fr))">' +
             grp[1].map(function (f) {
               var v = ob[f[1]];
-              var shown = (v == null) ? '' : (v / obScale).toFixed(2);
+              var shown = (v == null) ? '' : (v / obScale).toFixed(obDigits);
               return '<div class="field"><label>' + esc(f[0]) + '</label>' +
                 '<input class="input" type="text" inputmode="decimal" data-bs="1" ' +
                 'data-param="opening_balance.' + f[1] + '" value="' + esc(shown) + '"></div>';
@@ -576,7 +582,9 @@
         }).join('');
         left.push('<div class="fieldset mt14"><div class="legend"><span class="idx">04</span>期初资产负债表' +
           '<span class="sub">对应 [opening_balance] · 单位：' + obUnit + '</span></div>' + obHtml +
-          '<div id="bsBalance" class="mt12" data-scale="' + obScale + '" data-unit="' + esc(obUnit) + '"></div>' +
+          '<div id="bsBalance" class="mt12" data-scale="' + obScale +
+          '" data-unit="' + esc(obUnit) + '" data-digits="' + obDigits +
+          '" data-tol="' + obTolerance + '"></div>' +
           '<div class="row wrap mt8">' +
           '<button class="btn sm ghost" id="copyBalance" type="button">' + Icons.svg('copy') +
           '复制为 TOML 片段</button>' +
@@ -620,6 +628,10 @@
       var bsPanel = root.querySelector('#bsBalance');
       var obScale = bsPanel ? (Number(bsPanel.getAttribute('data-scale')) || 1) : 1;
       var obUnit = bsPanel ? (bsPanel.getAttribute('data-unit') || '元') : '元';
+      var obDigits = bsPanel ? (Number(bsPanel.getAttribute('data-digits')) || 2) : 2;
+      /* 容差来自显示精度（见上面的 obTolerance 注释）：表单里显示的是四舍五入后的值，
+         用 0 容差判「平」会把显示精度误判成数据不平。 */
+      var obTolerance = bsPanel ? (Number(bsPanel.getAttribute('data-tol')) || 0.005) : 0.005;
 
       var OB_KEYS = ['cash', 'accounts_receivable', 'inventory', 'fixed_assets',
         'other_non_current_assets', 'accounts_payable', 'interest_bearing_debt',
@@ -641,7 +653,7 @@
         return { assets: assets, liab: liab, equity: equity, gap: assets - (liab + equity) };
       }
       function balanceOk(b) {
-        return Math.abs(b.gap) <= Math.max(1, Math.abs(b.assets) * 1e-9);
+        return Math.abs(b.gap) <= obTolerance;
       }
       function paintBalance() {
         if (!bsPanel) return;
@@ -651,9 +663,11 @@
           /* 必须除回显示单位：样本量级为「元」时倍率是 1，看不出问题，
              换成上亿的真实公司就会显示成 196,020,000,000 亿元。 */
           return (x / obScale).toLocaleString('zh-CN',
-            { minimumFractionDigits: 2, maximumFractionDigits: 2 }) +
+            { minimumFractionDigits: obDigits, maximumFractionDigits: obDigits }) +
             ' ' + obUnit;
         };
+        var tolText = (obTolerance / obScale).toLocaleString('zh-CN',
+          { minimumFractionDigits: obDigits, maximumFractionDigits: obDigits });
         bsPanel.dataset.ok = ok ? '1' : '0';
         bsPanel.innerHTML = '<div class="statbar">' +
           '<span>资产合计 <b>' + fmt(b.assets) + '</b></span>' +
@@ -663,6 +677,9 @@
           '<span class="' + (ok ? 'delta up' : 'delta down') + '">差额 <b>' + fmt(b.gap) + '</b></span>' +
           '<span class="badge ' + (ok ? 'pass' : 'fail') + '">' + (ok ? '配平 ✓' : '不平 ✕') + '</span>' +
           '</div>';
+        bsPanel.innerHTML += '<div class="tbl-note">显示精度 ' + obUnit +
+          '（' + obDigits + ' 位小数），差额在 ±' + tolText + ' ' + obUnit +
+          ' 以内视为平 —— 表单里的数按这个精度显示，差额多半是舍入，不是数据错。</div>';
       }
 
       function rules() {

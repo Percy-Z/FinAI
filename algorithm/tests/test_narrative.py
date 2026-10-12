@@ -263,7 +263,37 @@ class TestVerifyNumbers(unittest.TestCase):
 
     def test_invented_large_number_is_caught(self):
         warnings = verify_numbers({"a": "对应企业价值 1234.5 元。"}, self.facts)
+        self.assertTrue(warnings, "事实表里没有 1234.5，应该报出来")
         self.assertEqual(len(warnings), 1)
+
+    def test_负号写法不同不算错(self):
+        """事实表用的是数学减号（−）、正文用 ASCII 减号（-），是同一个数。
+
+        真实案例（2026-10-13）：台账里写「同比 −10.27%」，大模型在报告里写
+        「-10.27%」，数字校验把 4 处全报成「事实表之外的数字」。
+        """
+        facts = {"evidence": {"drivers.revenue_growth": "2025 年同比 −10.27%（年报第 87 页）"}}
+        sections = {"company_overview": "公司收入同比 -10.27%，与上年一致。", "review": "下滑 −10.27%"}
+        self.assertEqual(verify_numbers(sections, facts), [])
+
+    def test_单位换算不算新数字(self):
+        """事实表存「元」、正文写「亿元」，是同一个数。
+
+        真实案例（2026-10-13）：企业价值 33,676,107,746.71 元 被写成「336.76 亿元」、
+        净债务 −308,930,352.93 元 写成「−3.09 亿元」，全被报成「事实表之外的数字」——
+        一份报告 6 处误报里 5 处是这个原因。演示数据只有几百元，所以一直没暴露。
+        """
+        facts = {
+            "valuation": {
+                "enterprise_value": 33676107746.71,
+                "equity_value": 31124077800.00,
+                "net_debt": -308930352.93,
+            }
+        }
+        sections = {
+            "valuation_analysis": "企业价值 336.76 亿元、权益价值 311.24 亿元、净债务 -3.09 亿元。"
+        }
+        self.assertEqual(verify_numbers(sections, facts), [])
 
     def test_multiple_invented_numbers_are_all_reported(self):
         warnings = verify_numbers({"a": "分别约为 3.33 和 6.66。"}, self.facts)
