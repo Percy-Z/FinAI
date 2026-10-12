@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import unittest
@@ -69,14 +70,40 @@ class WebTestBase(unittest.TestCase):
 class TestPage(WebTestBase):
     """页面本身：入口要在，脚本别写错到浏览器跑不起来。"""
 
-    def test_首页能打开且带复现凭证区(self) -> None:
+    def test_首页能打开且脚本都挂得上(self) -> None:
+        """首页的契约：壳页打得开，它引用的每个脚本都取得到、不是空的。
+
+        这条以前断言的是 HTML 里写死的 evidence-card / quick-report —— 那时首页
+        由服务端渲染。现在首页换成了壳页（web/index.html），内容改由前端脚本渲染，
+        那几个标记不再出现在 HTML 里，但**这条测试真正要拦的东西没变**：
+        入口打得开、脚本路径没写错。脚本 src 写错一个字，浏览器打开就是一片白，
+        而服务端的这条断言是唯一能提前发现它的地方。
+
+        顺带保住原来那条断言的意图：「复现凭证」这一页仍然要在页面注册表里 ——
+        它是竞赛「过程可追溯、结果可复现」在界面上的入口。
+        """
         status, content_type, body = self.get("/")
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
         text = body.decode("utf-8")
-        self.assertIn("evidence-card", text)
-        self.assertIn('id="evidence"', text)
-        self.assertIn("quick-report", text)
+
+        # 壳页的三个挂载点：应用根节点、路由渲染区、证据抽屉
+        for marker in ('id="app"', 'id="view"', 'id="drawer"'):
+            self.assertIn(marker, text, f"首页缺少挂载点 {marker}")
+
+        # 首页引用的每个脚本都要真的取得到，而且有内容
+        sources = re.findall(r'<script[^>]+src="([^"]+)"', text)
+        self.assertTrue(sources, "首页一个脚本都没引用，壳页多半被改坏了")
+        for src in sources:
+            code, kind, payload = self.get(src)
+            self.assertEqual(code, 200, f"首页引用的脚本取不到：{src}")
+            self.assertIn("javascript", kind)
+            self.assertTrue(payload.strip(), f"{src} 是空文件")
+
+        # 复现凭证页仍在页面注册表里
+        _, _, pages = self.get("/web/js/pages2.js")
+        self.assertIn("'evidence'", pages.decode("utf-8"))
+
         # 根地址也要能进
         self.assertEqual(self.get("/index.html")[0], 200)
 
