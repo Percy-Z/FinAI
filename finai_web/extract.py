@@ -168,6 +168,103 @@ def _iter_lines(page_text: str) -> Iterable[str]:
             yield line
 
 
+# 行首修饰：序号、项目符号、编号（"1." "（1）" "•"）。真实年报的报表行偶尔带这些
+# 前缀，科目名本身还是从它们之后开始。
+_ROW_LEAD = re.compile(
+    r"^(?:[（(]?\s*[0-9一二三四五六七八九十]{1,3}\s*[）)、.．]?|[•·▪※-])\s*"
+)
+
+
+def _row_head(line: str) -> tuple[str, str] | None:
+    """把一行拆成 (科目名, 数字那一段)；不是「科目名 + 数字」这种表行就返回 None。
+
+    为什么必须这么严：真实年报里拿科目名做子串匹配是灾难现场 ——
+
+        「非流动负债合计」里含「负债合计」    → 抽到非流动负债，倒挤出的差额变负数
+        「固定资产改造」里含「固定资产」      → 抽到现金流量表的科目
+        「报告期末，高新地产总资产72.27亿元」 → 一句叙述被当成报表数字
+
+    这三类在演示用的合成数据里都不会出现，真实年报上第一条就中（000661 实测）。
+    所以规则收紧成两条：科目名从行首开始（允许序号这类前缀），紧跟着就是数字。
+
+    注意顺序：**先去行首序号，再找数字**。利润表里的行常写成「1.归属于母公司股东的
+    净利润 154,971,452.80」，序号里的 1 会被当成数字，把整行判成「没有科目名」而丢掉
+    （000661 的归母净利润就是这么丢的）。
+    """
+    text = _ROW_LEAD.sub("", line).strip()
+    match = _NUMBER.search(text)
+    if match is None:
+        return None
+    head = text[: match.start()].strip().strip("：: 　").strip()
+    if not head:
+        return None
+    return head, text[match.start() :]
+
+
+# 报表表头 → 这一节属于哪张表。真实年报按「合并资产负债表 → 母公司资产负债表 →
+# 合并利润表 → 母公司利润表 → …」排下来，每张表通常跨 2 到 3 页。
+_STATEMENT_MARKERS: tuple[tuple[str, str], ...] = (
+    ("合并资产负债表", "consolidated-balance"),
+    ("母公司资产负债表", "parent-balance"),
+    ("合并利润表", "consolidated-income"),
+    ("母公司利润表", "parent-income"),
+    ("合并现金流量表", "consolidated-cashflow"),
+    ("母公司现金流量表", "parent-cashflow"),
+)
+
+
+def _statement_segments(pages: Sequence[str]) -> list[list[tuple[int, str]]]:
+    """给每一页标出「从第几行起属于哪张报表」。
+
+    为什么需要这一层：只看「这一页有没有『合并』二字」会被报表混排骗到。
+    000661（长春高新 2025 年报）里，母公司资产负债表的「负债合计 2.9 亿」正好和
+    「合并利润表」的表头印在同一页 —— 那一页含「合并」，于是母公司口径的负债
+    被打上高置信度，把合并口径的 52 亿挤掉了。
+
+    做法分两步。先剔掉两类假表头：
+
+        目录页    一页里列了好几张表的名字（「财务报表……合并资产负债表 81」）
+        附注标题  「七、合并财务报表项目注释」里又出现一次「合并资产负债表」，
+                  那是讲某个科目的一节，不是报表本身
+
+    所以：一页里出现两个及以上表名就当目录页跳过；同一个表名只认第一次出现。
+
+    然后把归属精确到**行**：一页里可能有「上一张表的尾行 + 下一张表的表头」，
+    表头之前的那几行仍旧属于上一张表（真实年报就是这么排的）。
+    """
+    heads: dict[str, int] = {}
+    for index, text in enumerate(pages):
+        found = [kind for marker, kind in _STATEMENT_MARKERS if marker in text]
+        if len(found) > 1:
+            continue  # 目录页：一页列了好几张表的名字
+        if not found:
+            continue
+        heads.setdefault(found[0], index)
+
+    out: list[list[tuple[int, str]]] = []
+    current = ""
+    for index, text in enumerate(pages):
+        segments: list[tuple[int, str]] = [(0, current)]
+        for line_index, line in enumerate(text.splitlines()):
+            for marker, kind in _STATEMENT_MARKERS:
+                if heads.get(kind) == index and marker in line:
+                    segments.append((line_index, kind))
+        segments.sort(key=lambda item: item[0])
+        out.append(segments)
+        current = segments[-1][1]
+    return out
+
+
+def _statement_at(segments: Sequence[tuple[int, str]], line_index: int) -> str:
+    """取某一行的报表归属：最后一个「起点不晚于这一行」的段。"""
+    found = ""
+    for start, kind in segments:
+        if start > line_index:
+            break
+        found = kind
+    return found
+
+
 def scan_pages(
     pages: Sequence[str],
     accounts: Sequence[str] | None = None,
@@ -187,29 +284,73 @@ def scan_pages(
         if accounts is None or account.name in accounts
     }
     candidates: dict[str, list[Hit]] = {}
+    statements = _statement_segments(pages)
+
+    # 报表单位：年报一般只在第一张表上写一次「单位：元」，后面几张不重复写。
+    # 全篇找一次作为回退 —— 没有这个回退，利润表那种不写单位的页会被压到
+    # 0.5 置信度，叙述句里的数字就会顶上来（000661 的归母净利润就是这样抽错的）。
+    report_scale, report_unit = 1.0, "未标注"
+    for text in pages:
+        page_scale, page_unit = detect_scale(text)
+        if page_unit != "未标注":
+            report_scale, report_unit = page_scale, page_unit
+            break
 
     for page_number, page_text in enumerate(pages, start=1):
         if not page_text:
             continue
-        scale, unit_name = detect_scale(page_text)
         is_consolidated = "合并" in page_text
+        segments = statements[page_number - 1]
+        scale, unit_name = detect_scale(page_text)
+        if unit_name == "未标注" and report_unit != "未标注":
+            scale, unit_name = report_scale, report_unit
         for name, account in wanted.items():
-            for line in _iter_lines(page_text):
-                label = next((item for item in account.labels if item in line), None)
-                if label is None:
+            # 资产负债表与利润表的科目按「所在报表」排优先级：
+            #     本表合并页（0.95）> 没标出报表的页（旧规则）> 母公司表（0.35）
+            #     > 别的报表页（0.30）
+            # 不做硬排除：有些报告（以及本仓库的离线样例）只在第一张表写了表头，
+            # 硬排除会把后面的科目整片漏掉。打分只决定「同名行之间谁赢」——
+            # 真实年报里母公司表的负债合计与合并利润表同页，正是靠这个排序才压得住。
+            # 现金流量表科目（折旧摊销等）主要来自补充资料与附注，按全篇扫描。
+            strict = account.section in ("balance", "income")
+            consolidated = f"consolidated-{account.section}"
+            parent = f"parent-{account.section}"
+            for line_index, raw_line in enumerate(page_text.splitlines()):
+                line = raw_line.strip()
+                if not line:
                     continue
-                tail = line.split(label, 1)[1]
+                statement = _statement_at(segments, line_index)
+                row = _row_head(line)
+                if row is None:
+                    continue
+                head, tail = row
+                if head not in account.labels:
+                    continue
+                label = head
                 if any(key in tail[:6] for key in _DERIVED_TAIL):
                     continue
                 value = _parse_number(tail)
                 if value is None:
                     continue
-                confidence = 0.9 if is_consolidated else 0.6
+                if strict and statement == consolidated:
+                    confidence = 0.95
+                elif strict and statement == parent:
+                    confidence = 0.35
+                elif strict and statement:
+                    confidence = 0.30
+                else:
+                    confidence = 0.9 if is_consolidated else 0.6
                 if unit_name == "未标注":
                     confidence = min(confidence, 0.5)
                 if name == "revenue" and label == "营业收入" and "营业总收入" in page_text:
                     # 两行都在的页面，营业收入是分项，营业总收入才是我们要的
                     confidence = min(confidence, 0.7)
+                if strict and statement == parent:
+                    note = "来自母公司报表，不是合并口径"
+                elif is_consolidated:
+                    note = ""
+                else:
+                    note = "本页没有『合并』二字，可能是母公司报表"
                 candidates.setdefault(name, []).append(
                     Hit(
                         account=name,
@@ -220,7 +361,7 @@ def scan_pages(
                         unit=unit_name,
                         scale=scale,
                         confidence=confidence,
-                        note="" if is_consolidated else "本页没有『合并』二字，可能是母公司报表",
+                        note=note,
                     )
                 )
                 break

@@ -511,6 +511,96 @@ class MarketTest(unittest.TestCase):
         self.assertTrue(any("不在行情表里" in warning for warning in report.warnings))
 
 
+class RowMatchingTest(unittest.TestCase):
+    """真实年报的陷阱：科目名不能用子串匹配。
+
+    下面几页的行文抄的是 000661 长春高新 2025 年年度报告里真实出现过的样子：
+
+        「非流动负债合计」里含「负债合计」   → 抽到非流动负债，倒挤出的差额变负
+        「固定资产改造」里含「固定资产」     → 抽到现金流量表的科目
+        「报告期末，高新地产总资产72.27亿元」→ 一句叙述被当成报表数据
+
+    这三类误匹配在演示用的合成数据上遇不到，真实年报上第一条就中。
+    """
+
+    PAGES = (
+        # 第 1 页：主要控股参股公司分析，一句叙述里提到子公司的总资产
+        "3、主要控股参股公司分析\n"
+        "报告期末，高新地产总资产72.27亿元，净资产24.81亿元，资产负债率65.66%。\n",
+        # 第 2 页：合并资产负债表（我们真正要的那张表）
+        "合并资产负债表\n单位：元\n"
+        "货币资金 2,163,960,335.12 6,097,332,986.00\n"
+        "应收账款 2,030,861,178.45 2,721,104,819.36\n"
+        "固定资产 4,500,000,000.00 4,600,000,000.00\n"
+        "资产总计 30,000,000,000.00 31,000,000,000.00\n"
+        "应付账款 1,200,000,000.00 1,300,000,000.00\n"
+        "流动负债合计 3,000,000,000.00 3,100,000,000.00\n"
+        "非流动负债合计 245,938,105.89 2,716,067.33\n"
+        "负债合计 8,000,000,000.00 8,100,000,000.00\n",
+        # 第 3 页：现金流量表附注，里面也有「固定资产」开头的其他科目
+        "固定资产改造 74,558,669.29 20,206,214.31\n"
+        "固定资产折旧 300,000,000.00 280,000,000.00\n",
+    )
+
+    def hits(self):
+        return extract.scan_pages(self.PAGES)
+
+    def test_不被子串带偏(self):
+        found = self.hits()
+        self.assertEqual(found["total_liabilities"].value_yuan, 8_000_000_000.00)
+        self.assertEqual(found["fixed_assets"].value_yuan, 4_500_000_000.00)
+
+    def test_叙述句不算报表行(self):
+        found = self.hits()
+        self.assertEqual(found["total_assets"].value_yuan, 30_000_000_000.00)
+        self.assertNotIn("高新地产", found["total_assets"].raw_text)
+
+    def test_同样的行仍然能抽到(self):
+        found = self.hits()
+        self.assertEqual(found["cash"].value_yuan, 2_163_960_335.12)
+        self.assertEqual(found["accounts_receivable"].value_yuan, 2_030_861_178.45)
+        self.assertEqual(found["accounts_payable"].value_yuan, 1_200_000_000.00)
+
+    # 真实年报的排法是「合并资产负债表 → 母公司资产负债表 → 合并利润表 → …」，
+    # 而且一张表的尾部常常和下一张表的表头同页（000661 就是这样混排的）。
+    PAGES_MIXED = (
+        "合并资产负债表\n单位：元\n货币资金 100 110\n应付账款 40 45\n",
+        "资产总计 300 310\n负债合计 141 150\n所有者权益合计 159 160\n",
+        "母公司资产负债表\n单位：元\n货币资金 5 6\n",
+        "负债合计 2 3\n合并利润表\n单位：元\n",  # 母公司表的尾行 + 下一张表的表头
+        "营业总收入 1000 900\n",
+    )
+
+    def test_合并与母公司混排时取合并口径(self):
+        found = extract.scan_pages(self.PAGES_MIXED)
+        self.assertEqual(found["total_liabilities"].value_yuan, 141)
+        self.assertEqual(found["accounts_payable"].value_yuan, 40)
+        self.assertEqual(found["cash"].value_yuan, 100)
+        self.assertEqual(found["total_assets"].value_yuan, 300)
+
+    def test_利润表也按合并口径取(self):
+        found = extract.scan_pages(self.PAGES_MIXED)
+        self.assertEqual(found["revenue"].value_yuan, 1000)
+
+    # 年报里还有两类假表头：目录页一页列好几张表的名字；附注标题里又出现一次
+    # 「合并资产负债表项目注释」。两个都会把后面整片页误标成某张报表。
+    PAGES_TOC = (
+        "二、财务报表\n合并资产负债表 81\n母公司资产负债表 84\n母公司利润表 90\n",
+        "合并资产负债表\n单位：元\n货币资金 100 110\n应付账款 40 45\n",
+        "负债合计 50 55\n所有者权益合计 200 210\n",
+        "母公司资产负债表\n单位：元\n货币资金 5 6\n",
+        "负债合计 2 3\n",
+        "七、合并财务报表项目注释\n合并资产负债表项目注释\n"
+        "货币资金 100 110\n应付账款 999 998\n负债合计 50 55\n",
+    )
+
+    def test_目录页与附注标题不算报表表头(self):
+        found = extract.scan_pages(self.PAGES_TOC)
+        self.assertEqual(found["total_liabilities"].value_yuan, 50)
+        self.assertEqual(found["accounts_payable"].value_yuan, 40)
+        self.assertEqual(found["cash"].value_yuan, 100)
+
+
 class ConsoleEncodingTest(unittest.TestCase):
     """中文 Windows 的控制台是 GBK，入口脚本不能因为打不出字就崩。
 
