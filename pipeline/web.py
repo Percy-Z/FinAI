@@ -266,7 +266,7 @@ def _evidence(run_id: str | None) -> list[dict[str, Any]]:
         }
 
     return [
-        item("打开报告 PDF", "十二页 A4，LaTeX 排版",
+        item("打开报告 PDF", "A4 报告书，LaTeX 排版（没装 LaTeX 时为 reportlab 版）",
              run_dir / "19_report.pdf", f"/runs/{run_id}/19_report.pdf"),
         item("打开报告网页", "图内嵌的单文件 HTML",
              run_dir / "18_report.html", f"/runs/{run_id}/18_report.html"),

@@ -18,9 +18,10 @@
     流水线在任何一种情况下都能跑完。
 
 字体
-    ctexart 的 fontset=macnew 会把正文映射到宋体、标题映射到黑体；
-    Linux/Windows 上 ctex 会自动换成本机有的字体组合。
-    不写死字体名，是为了让这份代码在评委的机器上也能编出来。
+    字体集按平台选（见下面的 fontset()）：macOS 用 macnew、Windows 用 windows、
+    其它用 fandol。**不能写死一个** —— ctex 的 fontset 不会自动换，写死 macnew
+    在 Windows 上会直接报「字体找不到」，而且失败后会静默退回 reportlab，
+    排版换了却没人发现（2026-10-12 踩过这个坑，测试里钉住了这条）。
 """
 
 from __future__ import annotations
@@ -28,12 +29,28 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Sequence
 
 from .report import Block, ReportContext
 
 LATEX_NUMBER = "19"
+
+# PATH 里找不到引擎时，再按这份清单翻一遍安装目录。
+#
+# 为什么需要：MiKTeX 装完只把 bin 目录写进**用户 PATH**，而已经开着的终端与进程
+# 读的还是旧环境 —— 从那种终端启动工作台，LaTeX 就又找不到了，报告会静默退回
+# reportlab（PDF 还在，排版换了，看不出来）。多认几个常见位置，比要求使用者
+# 「重启终端」可靠。
+_INSTALL_DIRS = (
+    Path("/Library/TeX/texbin"),  # macOS（MacTeX）
+    Path("/usr/local/bin"),
+    Path("/usr/bin"),
+    Path.home() / "AppData/Local/Programs/MiKTeX/miktex/bin/x64",  # Windows 用户级
+    Path("C:/Program Files/MiKTeX/miktex/bin/x64"),
+    Path("C:/Program Files (x86)/MiKTeX/miktex/bin/x64"),
+)
 
 # 图注。用文件名当图注太难看，这里按图表编号映射成中文说明；
 # 认不出的文件名退回用 alt 文本，不会丢信息。
@@ -165,6 +182,7 @@ def render_latex(
 ) -> str:
     """把结构化块渲染成一份完整的 LaTeX 文档。"""
     preamble = _PREAMBLE.format(
+        fontset=fontset(),
         title=_escape(title),
         company=_escape(context.company_name),
         code=_escape(context.company_code),
@@ -253,7 +271,7 @@ def render_latex(
 
 _PREAMBLE = r"""% 本文件由 algorithm/output/latex.py 自动生成，请勿手工修改。
 % 编译：xelatex 19_report.tex（跑两遍，第二遍是为了目录与交叉引用）
-\documentclass[11pt,a4paper,fontset=macnew]{{ctexart}}
+\documentclass[11pt,a4paper,fontset={fontset}]{{ctexart}}
 
 \usepackage[margin=2.2cm,top=2.4cm,bottom=2.4cm]{{geometry}}
 \usepackage{{booktabs}}
@@ -329,12 +347,41 @@ _PREAMBLE = r"""% 本文件由 algorithm/output/latex.py 自动生成，请勿�
 """
 
 
+def fontset() -> str:
+    """按平台选 ctex 的字体集。
+
+    踩过的坑：这里以前写死 ``fontset=macnew``（在 macOS 上正好把正文映到宋体、
+    标题映到黑体），搬到 Windows 上编译时 fontspec 直接报「字体找不到」，
+    而 LaTeX 失败后会静默退回 reportlab —— 排版换了却没人发现。
+
+        macOS   macnew   系统自带的宋体/黑体
+        Windows windows  宋体 / 黑体（SimSun / SimHei）
+        其它    fandol   TeX 发行版自带的 Fandol 系列（Linux 常用）
+    """
+    if sys.platform == "darwin":
+        return "macnew"
+    if sys.platform == "win32":
+        return "windows"
+    return "fandol"
+
+
 def find_engine() -> str | None:
-    """找一个能编中文的引擎。xelatex 优先，lualatex 也行。"""
-    for name in ("xelatex", "lualatex"):
+    """找一个能编中文的引擎。xelatex 优先，lualatex 也行。
+
+    先查 PATH，再查 _INSTALL_DIRS —— 后者是为「装完 MiKTeX 但当前进程还是旧 PATH」
+    这种情况准备的。
+    """
+    names = ("xelatex", "lualatex")
+    for name in names:
         path = shutil.which(name)
         if path:
             return path
+    for directory in _INSTALL_DIRS:
+        for name in names:
+            for suffix in (".exe", ""):
+                candidate = directory / f"{name}{suffix}"
+                if candidate.is_file():
+                    return str(candidate)
     return None
 
 

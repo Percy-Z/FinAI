@@ -35,7 +35,7 @@ make verify
 
 ```
 lint      静态检查（mypy + pyflakes + pyright 严格模式）
-test      488 个单元测试
+test      546 个单元测试（算法层 412 + 框架层 92 + 取数层 30 + MCP 12）
 config    读一遍配置并自检
 run       跑完整流水线（含大模型撰写报告，约 2 分钟）
 check     验收产物：文件齐不齐、报告有没有引用全部图
@@ -56,13 +56,39 @@ check     验收产物：文件齐不齐、报告有没有引用全部图
 10_run_manifest.json       运行清单（含全部产物的 sha256）
 17_report.md               估值报告（Markdown，文字源）
 18_report.html             估值报告（自包含 HTML，图内嵌）
-19_report.pdf              估值报告（A4 十二页，LaTeX 排版）
+19_report.pdf              估值报告（A4，LaTeX 排版；没装 LaTeX 时退回 reportlab）
 report.tex                 19 号 PDF 的 LaTeX 源
 charts/                    六张分析图（11-16 号）
 ```
 
 另外 `logs/<运行编号>/` 下有 `trace.jsonl`（逐步执行轨迹）与
 `narrative.json`（大模型的原始问答）。
+
+### 可选依赖：LaTeX（决定报告 PDF 的排版）
+
+装了 LaTeX 就出「LaTeX 排版」那版报告书（表格用 booktabs 三线表、图表浮动体、
+页眉页脚），没装就自动退回 reportlab 渲染 —— 两条路内容一致，只是版式不同。
+流水线在任何一种情况下都能跑完，报告 PDF 也一定会有。
+
+```bash
+# Windows：用户级安装，不需要管理员，装完把 bin 目录写进用户 PATH
+winget install MiKTeX.MiKTeX
+
+# macOS
+brew install --cask mactex-no-gui      # 或完整版 mactex
+
+# Linux（Debian/Ubuntu）
+sudo apt install texlive-xetex texlive-lang-chinese texlive-latex-extra
+```
+
+两个坑，代码里都已经处理（`algorithm/output/latex.py`）：
+
+1. **字体集不能写死**。ctex 的 fontset 选项不会自动换：写死 macnew 在 Windows 上
+   直接报「字体找不到」。现在按平台选（Windows 用 windows、macOS 用 macnew、
+   其它用 fandol）。
+2. **PATH 不一定马上生效**。MiKTeX 装完只把 bin 目录写进用户 PATH，已经开着的
+   终端读的还是旧环境。所以引擎查找除了 PATH，还会认几个常见安装位置 ——
+   否则报告会悄悄退回 reportlab，版式换了没人知道。
 
 ## 三、现场演示（决赛用）
 
@@ -71,7 +97,7 @@ make demo
 ```
 
 这个目标做三件事：跑一遍完整流水线、打印产物清单、把报告 PDF 打开。
-**从零到十二页报告大约两分钟**，其中大部分是大模型在推理与撰写。
+**从零到一份完整报告大约两分钟**，其中大部分是大模型在推理与撰写。
 
 如果现场网络不稳或没有 API key，先执行 `export DEEPSEEK_API_KEY=`（清空）
 再 `make demo` —— 会在 20 秒内产出「数据版本报告」：数字、表格、图、
