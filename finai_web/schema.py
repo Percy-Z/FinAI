@@ -94,7 +94,12 @@ ACCOUNTS: tuple[Account, ...] = (
         ("所有者权益合计", "股东权益合计", "所有者权益（或股东权益）合计"),
         "balance",
     ),
-    Account("share_capital", ("股本", "实收资本"), "balance", "股本 / 实收资本"),
+    Account(
+        "share_capital",
+        ("股本", "实收资本", "实收资本（或股本）", "实收资本(或股本)"),
+        "balance",
+        "股本 / 实收资本；年报里两种写法都有",
+    ),
     # ── 利润表 ───────────────────────────────────────────────────────
     Account("revenue", ("营业总收入", "营业收入"), "income"),
     Account("operating_cost", ("营业成本",), "income"),

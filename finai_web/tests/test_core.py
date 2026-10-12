@@ -615,7 +615,10 @@ class ConsoleEncodingTest(unittest.TestCase):
     """
 
     def run_in_gbk_console(
-        self, args: list[str], timeout: int = 120
+        self,
+        args: list[str],
+        timeout: int = 120,
+        env_extra: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """在 GBK 环境下跑一个子进程并取回输出（编码 GBK + errors strict）。"""
         env = dict(os.environ)
@@ -623,6 +626,7 @@ class ConsoleEncodingTest(unittest.TestCase):
         # 这两个会把子进程带偏（UTF-8 模式、数据源），与要测的东西无关
         for name in ("PYTHONUTF8", "FINAI_DATA_SOURCE"):
             env.pop(name, None)
+        env.update(env_extra or {})
         return subprocess.run(
             args,
             cwd=REPO_ROOT,
@@ -634,13 +638,21 @@ class ConsoleEncodingTest(unittest.TestCase):
         )
 
     def test_离线演示在_gbk_控制台下不会崩(self) -> None:
-        """离线演示要打「✓ 代码 年份 科目数」—— 那一行过去会直接把脚本打断。"""
-        done = self.run_in_gbk_console(
-            [
-                sys.executable,
-                str(REPO_ROOT / "finai_web" / "examples" / "offline_demo.py"),
-            ]
-        )
+        """离线演示要打「✓ 代码 年份 科目数」—— 那一行过去会直接把脚本打断。
+
+        产物写到临时目录（FINAI_EXTRACTED_DIR）：这个脚本会造出 T/A/B/C 四份
+        演示记录，直接落在 data/extracted/ 的话，会把它们混进下一次
+        `finai_web build` 的流水线输入里（真实公司旁边多出几家演示公司）。
+        测试不该污染工作数据。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            done = self.run_in_gbk_console(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "finai_web" / "examples" / "offline_demo.py"),
+                ],
+                env_extra={"FINAI_EXTRACTED_DIR": tmp},
+            )
         self.assertEqual(done.returncode, 0, done.stdout[-2000:] + done.stderr[-2000:])
         self.assertIn("pipeline_input.json", done.stdout)
 

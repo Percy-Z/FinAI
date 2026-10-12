@@ -406,6 +406,12 @@ def compile_latex(
             cwd=source.parent,
             capture_output=True,
             text=True,
+            # 必须显式指定编码：xelatex 的输出里有中文（它会把源文件的行回显出来），
+            # 而 text=True 默认按本地编码（中文 Windows 是 GBK）解码 —— 读到 UTF-8
+            # 字节就抛 UnicodeDecodeError，异常发生在读取线程里，日志被截断，
+            # 编译失败时最需要的那几行诊断反而看不到。
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )

@@ -43,6 +43,17 @@ from .statements import (
 )
 from .types import require_finite, require_positive
 
+# 基期资产负债表「算平」的容差，单位元。
+#
+# 为什么不是 1e-6：报表以元为单位、动辄上百亿，双精度在这个量级上的最小间隔（ULP）
+# 本身就有几微元 —— 300 亿元时 ULP ≈ 6.7e-06 元。拿 1e-6 当阈值，会把纯粹的浮点
+# 表示误差判成「数据不平」。真实案例：长春高新 2025 年报的基期表，两边都是
+# 30,080,522,676.54 元，求和后差 3.8e-06 元，就被原来的阈值拦下了。
+#
+# 年报金额只精确到分，所以按「半分钱」卡：真错到 1 分钱都能拦得住，
+# 而浮点残差（微元级）放行。
+BALANCE_TOLERANCE = 0.005
+
 
 def _as_tuple(value: Sequence[float] | float, years: int, name: str) -> tuple[float, ...]:
     """把标量广播成序列，或者校验序列长度。"""
@@ -369,8 +380,7 @@ def build_forecast(
         opening=opening, drivers=drivers, source=source
     )
 
-    tolerance = 1e-6
-    if abs(opening.balance_gap) > tolerance:
+    if abs(opening.balance_gap) > BALANCE_TOLERANCE:
         raise ValueError(
             f"基期资产负债表本身不平，差额 {opening.balance_gap:,.2f}，"
             "先修正基期数据再预测"

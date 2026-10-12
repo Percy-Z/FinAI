@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -180,7 +182,45 @@ class CsvFixture(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestPathOverrides(unittest.TestCase):
+    """输入路径可以用环境变量指到别的数据集：真实公司与演示夹具并存。
+
+    仓库里的三个输入文件同时是单元测试的夹具，真实公司的数据不能直接覆盖它们
+    （覆盖了测试就整片失败，而失败原因是「夹具变了」）。所以真实数据放自己的目录，
+    用 FINAI_ASSUMPTIONS / FINAI_MARKET_CSV / FINAI_PEERS_CSV 指过去。
+    """
+
+    def test_三个输入路径都跟着环境变量走(self) -> None:
+        overrides = {
+            "FINAI_ASSUMPTIONS": "X:/real/assumptions.toml",
+            "FINAI_MARKET_CSV": "X:/real/market.csv",
+            "FINAI_PEERS_CSV": "X:/real/peers.csv",
+        }
+        try:
+            with mock.patch.dict(os.environ, overrides):
+                reloaded = importlib.reload(config)
+                self.assertEqual(
+                    reloaded.DEFAULT_CONFIG_PATH, Path("X:/real/assumptions.toml")
+                )
+                self.assertEqual(
+                    reloaded.DEFAULT_MARKET_PATH, Path("X:/real/market.csv")
+                )
+                self.assertEqual(
+                    reloaded.DEFAULT_PEER_PATH, Path("X:/real/peers.csv")
+                )
+        finally:
+            # 必须等 with 退出（环境变量恢复）之后再 reload，否则模块里留着覆盖后的路径
+            importlib.reload(config)
+
+    def test_不设环境变量时仍然是仓库里的演示数据(self) -> None:
+        self.assertEqual(config.DEFAULT_CONFIG_PATH, config.DATA_DIR / "assumptions.toml")
+        self.assertEqual(config.DEFAULT_MARKET_PATH, config.DATA_DIR / "market.csv")
+        self.assertEqual(config.DEFAULT_PEER_PATH, config.DATA_DIR / "peers.csv")
+
+
 class TestConfigLoads(unittest.TestCase):
+    """下面这一组断言的是仓库里的演示夹具 —— 换真实数据请用环境变量指过去。"""
+
     def test_三个小节都读得出来(self):
         company, drivers, opening, params, terminal, target, peers = read_real_config()
         self.assertEqual(company.code, "T")

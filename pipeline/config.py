@@ -44,6 +44,7 @@ from typing import Any, Sequence
 
 from algorithm.finai.comps import CompanyMetrics
 from algorithm.finai.forecast import (
+    BALANCE_TOLERANCE,
     BalanceSheetState,
     ForecastDrivers,
     as_series,
@@ -55,9 +56,29 @@ from .console import safe_console
 # 默认配置路径。用 __file__ 往上退两级定位仓库根目录，
 # 这样不管当前工作目录在哪都能找对文件。
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DEFAULT_CONFIG_PATH = DATA_DIR / "assumptions.toml"
-DEFAULT_MARKET_PATH = DATA_DIR / "market.csv"
-DEFAULT_PEER_PATH = DATA_DIR / "peers.csv"
+
+
+def _env_path(name: str, default: Path) -> Path:
+    """输入文件路径允许用环境变量覆盖，默认是仓库里那份演示数据。
+
+    为什么要有这个开关：`data/assumptions.toml`、`market.csv`、`peers.csv` 同时是
+    **单元测试的夹具** —— 测试断言的是它们的量级与内容（公司代码、按元计的差额、
+    靠改这几行 CSV 造出来的坏样本）。换真实公司的数据时如果直接覆盖这三个文件，
+    测试会整片失败，而且失败原因是「夹具变了」，不是代码坏了。
+
+    所以真实数据放自己的目录，用环境变量指过去：
+
+        FINAI_ASSUMPTIONS   假设文件的路径
+        FINAI_MARKET_CSV    行情表的路径（与取数层同名，保持一致）
+        FINAI_PEERS_CSV     可比公司财务数据的路径
+    """
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser() if raw else default
+
+
+DEFAULT_CONFIG_PATH = _env_path("FINAI_ASSUMPTIONS", DATA_DIR / "assumptions.toml")
+DEFAULT_MARKET_PATH = _env_path("FINAI_MARKET_CSV", DATA_DIR / "market.csv")
+DEFAULT_PEER_PATH = _env_path("FINAI_PEERS_CSV", DATA_DIR / "peers.csv")
 
 # 抽取层（finai_web）产出的流水线输入。形状是：
 #     {"opening_balance": {11 个科目}, "peers": {代码: {5 个指标}}, "provenance": {...}}
@@ -305,7 +326,8 @@ def _opening_from(cfg: dict[str, Any], path: str | Path) -> BalanceSheetState:
     不是代码问题。如果不在这里拦，它会一路走到三表预测里才炸，报错是
     一段 Python 堆栈，只说「差额 45」，不说是哪个文件的哪几个科目。
 
-    容差与算法层保持一致（1e-6）：这里通过了，三表预测就一定能通过。
+    容差与算法层共用同一个常量（BALANCE_TOLERANCE）：这里通过了，三表预测就一定能
+    通过 —— 两边各写一个阈值，迟早会分叉。
     """
     opening = _build(
         BalanceSheetState,
@@ -319,7 +341,7 @@ def _opening_from(cfg: dict[str, Any], path: str | Path) -> BalanceSheetState:
 def _require_balanced(opening: BalanceSheetState, path: str | Path) -> BalanceSheetState:
     """配平检查。不管是手填的还是年报抽的，都要过这一关。"""
     gap = opening.balance_gap
-    if abs(gap) > 1e-6:
+    if abs(gap) > BALANCE_TOLERANCE:
         raise ConfigError(
             f"{path} 的 [opening_balance] 不平：\n"
             f"    资产总计  {opening.total_assets:>16,.2f}\n"

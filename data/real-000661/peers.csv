@@ -1,0 +1,11 @@
+# FinAI 可比公司财务数据（由 finai_web 从年报抽取结果生成）
+#
+# 本文件是生成物，不要手改 —— 手改的内容下次 `finai ingest build` 会被覆盖。
+# 生成命令：python -m finai_web build
+# 口径与 data/peers.csv 一致：金额单位元，期间见 as_of 列。
+# 每家的数值出处（页码、原文、是否倒挤）见 data/extracted/pipeline_input.json 的 provenance。
+#
+code,revenue,net_profit_attributable,book_equity_attributable,ebit,ebitda,as_of
+300009,2646519767.58,735192705.68,4558015051.29,835092783.60,870688932.94,2026A
+300357,1062404471.43,380940984.34,2619452220.07,433498226.32,470610540.00,2026A
+688278,3695567867.63,1031236252.58,3449578652.54,1176799298.77,1198204780.48,2026A

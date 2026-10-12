@@ -28,6 +28,7 @@ from dataclasses import replace
 
 from algorithm.finai.dcf import enterprise_value
 from algorithm.finai.forecast import (
+    BALANCE_TOLERANCE,
     BalanceSheetState,
     ForecastDrivers,
     build_forecast,
@@ -373,6 +374,63 @@ class TestValidationLoop(unittest.TestCase):
         )
         report = run_checks(broken)
         self.assertIn("BS-03", [check.check_id for check in report.failures])
+
+
+class TestBalanceTolerance(unittest.TestCase):
+    """百亿级报表的浮点残差不该被判成「数据不平」。
+
+    真实案例（2026-10-12）：长春高新 2025 年报的基期表，资产侧与负债权益侧都是
+    30,080,522,676.54 元，双精度求和后差 3.8e-06 元 —— 比该量级的最小间隔
+    （ULP ≈ 6.7e-06 元）还小，属于浮点表示误差，但原来的 1e-6 阈值直接把它拦下，
+    真实公司口径根本进不了流水线。
+
+    改成按「半分钱」卡：年报金额只精确到分，真错到 1 分钱仍要拦得住。
+    """
+
+    OPENING = {
+        "cash": 2163960335.12,
+        "accounts_receivable": 2030861178.45,
+        "inventory": 5833469318.15,
+        "fixed_assets": 7262297034.86,
+        "other_non_current_assets": 12789934809.96,
+        "accounts_payable": 711682080.85,
+        "interest_bearing_debt": 1855029982.19,
+        "other_non_current_liabilities": 2644290134.80,
+        "share_capital": 407937529.00,
+        "retained_earnings": 21600620590.50,
+        "minority_equity": 2860962359.20,
+    }
+
+    def drivers(self) -> ForecastDrivers:
+        return ForecastDrivers(
+            revenue_base=12083140489.05,
+            base_year=2025,
+            years=5,
+            revenue_growth=(0.03, 0.05, 0.05, 0.04, 0.03),
+            gross_margin=0.83,
+            opex_pct_revenue=0.75,
+            da_pct_revenue=0.0633,
+            capex_pct_revenue=0.0633,
+            ar_pct_revenue=0.1680739523,
+            inventory_pct_revenue=0.4827775795,
+            ap_pct_revenue=0.0588987674,
+            interest_rate_on_debt=0.0233,
+            tax_rate=0.25,
+            dividend_payout_ratio=0.415,
+        )
+
+    def test_百亿级浮点残差算平(self):
+        opening = BalanceSheetState(**self.OPENING)
+        self.assertLess(abs(opening.balance_gap), BALANCE_TOLERANCE)
+        self.assertGreater(abs(opening.balance_gap), 0.0)  # 残差确实存在，不是零
+        build_forecast(opening, self.drivers())  # 不该抛异常
+
+    def test_真错到一分钱仍然拦得住(self):
+        tweaked = dict(self.OPENING)
+        tweaked["other_non_current_assets"] += 0.01
+        opening = BalanceSheetState(**tweaked)
+        with self.assertRaises(ValueError):
+            build_forecast(opening, self.drivers())
 
 
 if __name__ == "__main__":

@@ -174,9 +174,22 @@ _ROW_LEAD = re.compile(
     r"^(?:[（(]?\s*[0-9一二三四五六七八九十]{1,3}\s*[）)、.．]?|[•·▪※-])\s*"
 )
 
+# 科目名与金额之间常夹一列「附注」（七、38 / 五.12 / 附注三、5）。不剥掉它，
+# 附注里的序号会被当成金额 —— 688278 的资产负馈表整片抽不到就是这个原因。
+_NOTE_REF = re.compile(
+    r"^\s*[（(]?\s*(?:附注|注[：:]?)?\s*[一二三四五六七八九十百]{1,4}\s*[、.．,，]?\s*\d{1,4}\s*[)）]?\s+"
+)
 
-def _row_head(line: str) -> tuple[str, str] | None:
-    """把一行拆成 (科目名, 数字那一段)；不是「科目名 + 数字」这种表行就返回 None。
+
+def _row_value(
+    line: str, labels: Sequence[str], next_line: str | None = None
+) -> tuple[str, float, str] | None:
+    """这一行是某个科目的表行吗？是就返回 (命中的科目名, 数值, 原文片段)。
+
+    判定三条，缺一不可：
+        ① 科目名从行首开始（允许「1.」这类序号前缀）
+        ② 科目名与数字之间只允许出现一列附注（剥掉），不能有别的东西
+        ③ 剥完之后紧跟一个数字
 
     为什么必须这么严：真实年报里拿科目名做子串匹配是灾难现场 ——
 
@@ -185,20 +198,75 @@ def _row_head(line: str) -> tuple[str, str] | None:
         「报告期末，高新地产总资产72.27亿元」 → 一句叙述被当成报表数字
 
     这三类在演示用的合成数据里都不会出现，真实年报上第一条就中（000661 实测）。
-    所以规则收紧成两条：科目名从行首开始（允许序号这类前缀），紧跟着就是数字。
 
-    注意顺序：**先去行首序号，再找数字**。利润表里的行常写成「1.归属于母公司股东的
-    净利润 154,971,452.80」，序号里的 1 会被当成数字，把整行判成「没有科目名」而丢掉
-    （000661 的归母净利润就是这么丢的）。
+    next_line 是「科目名被排版拆行」的那条兜底：688278 的归母净资产排成了
+        「归属于母公司所有者权益」/「3,449,578,652.54 …」/「（或股东权益）合计」
+    三行 —— 前半截 + 金额 + 后半截。这时按「这一行是某个标签的前半截、下一行是
+    金额」认下来，并在原文里标明是拼出来的。
     """
     text = _ROW_LEAD.sub("", line).strip()
-    match = _NUMBER.search(text)
-    if match is None:
+    label = next((item for item in labels if text.startswith(item)), None)
+    if label is not None:
+        tail = text[len(label) :]
+        if any(key in tail[:6] for key in _DERIVED_TAIL):
+            return None  # 「应收账款周转率 3.2」这类衍生指标
+        trimmed = _NOTE_REF.sub("", tail, count=1).lstrip()
+        if _NUMBER.match(trimmed) is None:
+            return None
+        value = _parse_number(trimmed)
+        if value is None:
+            return None
+        return label, value, text[:160]
+
+    if next_line is None or not text:
         return None
-    head = text[: match.start()].strip().strip("：: 　").strip()
-    if not head:
+    prefix = next((item for item in labels if item.startswith(text)), None)
+    if prefix is None:
+        return None  # 「应收账款周转率 3.2」这类衍生指标
+    numbers = _NOTE_REF.sub("", next_line.strip(), count=1).lstrip()
+    if _NUMBER.match(numbers) is None:
         return None
-    return head, text[match.start() :]
+    value = _parse_number(numbers)
+    if value is None:
+        return None
+    return prefix, value, f"{text} {numbers[:60]}"
+
+
+def _row_candidates(page_text: str) -> Iterable[tuple[int, str, str | None]]:
+    """逐行产出候选表行；标签单独占一行时，与后面两行拼起来再试一次。
+
+    年报里长科目名常被排版拆行：「1.归属于母公司股东的净利润」一行、金额在下一行；
+    「归属于母公司所有者权益」+「合计 24,869,…」。只按单行匹配会整条丢掉 ——
+    688278 的归母净利润与归母净资产就是这么丢的。第三个返回值是「下一行的原文」，
+    给「科目名被拆成前半截 + 金额 + 后半截」的情况用。
+    """
+    lines = page_text.splitlines()
+    for index, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        following = ""
+        for extra in (1, 2):
+            if index + extra >= len(lines):
+                break
+            candidate = lines[index + extra].strip()
+            if candidate:
+                following = candidate
+                break
+        yield index, line, following or None
+        # 判断「这一行有没有数字」要先把行首序号去掉：否则「1.归属于母公司股东的净利润」
+        # 会被那个 1 当成已有数字，跨行拼接就永远不会触发（688278 实测）。
+        if _NUMBER.search(_ROW_LEAD.sub("", line)) is not None:
+            continue
+        merged = line
+        for extra in (1, 2):
+            if index + extra >= len(lines):
+                break
+            piece = lines[index + extra].strip()
+            if not piece:
+                break
+            merged = f"{merged}{piece}"
+            yield index, merged, piece
 
 
 # 报表表头 → 这一节属于哪张表。真实年报按「合并资产负债表 → 母公司资产负债表 →
@@ -315,23 +383,12 @@ def scan_pages(
             strict = account.section in ("balance", "income")
             consolidated = f"consolidated-{account.section}"
             parent = f"parent-{account.section}"
-            for line_index, raw_line in enumerate(page_text.splitlines()):
-                line = raw_line.strip()
-                if not line:
-                    continue
+            for line_index, line, following in _row_candidates(page_text):
                 statement = _statement_at(segments, line_index)
-                row = _row_head(line)
+                row = _row_value(line, account.labels, following)
                 if row is None:
                     continue
-                head, tail = row
-                if head not in account.labels:
-                    continue
-                label = head
-                if any(key in tail[:6] for key in _DERIVED_TAIL):
-                    continue
-                value = _parse_number(tail)
-                if value is None:
-                    continue
+                label, value, raw_text = row
                 if strict and statement == consolidated:
                     confidence = 0.95
                 elif strict and statement == parent:
@@ -356,7 +413,7 @@ def scan_pages(
                         account=name,
                         label=label,
                         value_yuan=value * scale,
-                        raw_text=line[:160],
+                        raw_text=raw_text,
                         page=page_number,
                         unit=unit_name,
                         scale=scale,
