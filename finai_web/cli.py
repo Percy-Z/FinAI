@@ -247,7 +247,15 @@ def cmd_build(args: argparse.Namespace) -> int:
         if target_code:
             print(f"目标公司取自 market.csv：{target_code}")
 
-    payload = adapter.build_pipeline_input(records, target_code=target_code)
+    payload = adapter.build_pipeline_input(
+        records, target_code=target_code, fx_rate=args.fx
+    )
+    fx = payload.get("fx") or {}
+    if fx.get("converted"):
+        print(
+            f"\n币种换算：{fx['from']} → {fx['to']}，汇率 {fx['rate']}"
+            "（汇率由你提供；换算是线性的，不含汇兑损益的会计处理）"
+        )
     path = adapter.write_pipeline_input(payload)
     peers_path = PATHS.peers_csv if args.sync_peers else PATHS.peers_extracted
     peers_written = adapter.write_peers_csv(payload["peers"].values(), peers_path)
@@ -278,14 +286,23 @@ def cmd_build(args: argparse.Namespace) -> int:
     print(f"  平衡差额  {total_assets - total_liabilities - total_equity:>20,.2f}  （应为 0）")
     print(f"\n可比公司 {len(payload['peers'])} 家：{'、'.join(sorted(payload['peers'])) or '—'}")
 
-    differences = adapter.compare_with_toml(opening)
-    if differences:
-        print("\n与手填的 [opening_balance] 比对（差异 > 1 元）：")
-        for line in differences:
-            print(f"  {line}")
-        print("  差异不代表谁错 —— 但切换数据源前，请确认差的是「年报口径 vs 手填口径」。")
+    # 逐项比对只在「抽的这家 == 配置里那家」时才有意义。
+    # 拿华为的年报去跟示例公司 T 的 55 元比，只会打印一堆几十亿的差额，
+    # 看着像出了大问题，其实只是两家公司。
+    if payload.get("target_code") and _config_company_code() not in ("", payload["target_code"]):
+        print(
+            f"\n（抽取的是 {payload['target_code']}，而 data/assumptions.toml 描述的是"
+            f" {_config_company_code()} —— 不同公司，跳过逐项比对）"
+        )
     else:
-        print("\n与手填的 [opening_balance] 一致（差异 ≤ 1 元）。")
+        differences = adapter.compare_with_toml(opening)
+        if differences:
+            print("\n与手填的 [opening_balance] 比对（差异 > 1 元）：")
+            for line in differences:
+                print(f"  {line}")
+            print("  差异不代表谁错 —— 但切换数据源前，请确认差的是「年报口径 vs 手填口径」。")
+        else:
+            print("\n与手填的 [opening_balance] 一致（差异 ≤ 1 元）。")
 
     print(f"\n已写出：{path}")
     print(f"已写出：{peers_written}")
@@ -309,6 +326,16 @@ def _market_target_code() -> str | None:
         if (row.get("role") or "").strip().lower() == "target":
             return (row.get("code") or "").strip() or None
     return None
+
+
+def _config_company_code() -> str:
+    """data/assumptions.toml 里 [company].code —— 用来判断抽的是不是同一家。"""
+    try:
+        from pipeline.config import load_company
+
+        return load_company().code.strip()
+    except Exception:  # noqa: BLE001 - 读不到就不比对，不影响主流程
+        return ""
 
 
 def cmd_market(args: argparse.Namespace) -> int:
@@ -411,6 +438,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_build = sub.add_parser("build", help="汇总成流水线输入")
     p_build.add_argument("--target", default=None, help="目标公司代码（默认取 market.csv 的 target）")
+    p_build.add_argument(
+        "--fx",
+        type=float,
+        default=None,
+        help="报表币种不是人民币时的汇率（例如 1 USD = 7.15 CNY 就写 7.15）",
+    )
     p_build.add_argument(
         "--sync-peers",
         action="store_true",

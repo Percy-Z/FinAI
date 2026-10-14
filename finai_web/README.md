@@ -102,6 +102,21 @@ $env:FINAI_DATA_SOURCE="extracted"; python -m pipeline.run
 ## 单位与口径
 
 - 年报常见的「单位：千元 / 万元」在抽取时统一换算成**元**（`extract.detect_scale`）。
+- **英文年报也认**：美国 10-K 的科目名（`Total net sales` / `Total assets` /
+  `Term debt` …）、`In millions` 这类单位写法、以及弯引号（`shareholders’ equity`）
+  都在科目表与归一化里覆盖了。报表页按 `CONSOLIDATED BALANCE SHEETS` /
+  `CONSOLIDATED STATEMENTS OF OPERATIONS` 这类标题识别。
+- **币种必须显式换算**：流水线以人民币元为单位。若年报是别的币种（例如 Apple 的
+  美元百万），`build` 必须给汇率，否则直接报错 —— 把「美元百万」当「人民币元」
+  算进估值是最危险的静默错误：
+  ```powershell
+  python -m finai_web build --target AAPL --fx 7.15   # 1 USD = 7.15 CNY
+  ```
+  换算是线性的，不含汇兑损益的会计处理；汇率由使用者提供，本模块不联网取汇率。
+  同一批记录里混用多种币种会被拒绝（按币种分批 build，或用 `FINAI_EXTRACTED_DIR`
+  指到不同目录）。
+- **期间口径写到日**：美国财年不是自然年，记录里会带上确切期末
+  （Apple FY2025 → `2025-09-27`），`peers.csv` 的 `as_of` 用它而不是「2025A」。
 - 流水线要 11 个资产负债表科目，年报上没有正好这 11 个标题，所以：
 
   | 流水线字段 | 来源 |

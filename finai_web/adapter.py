@@ -46,6 +46,61 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def _scale(values: Mapping[str, Any], rate: float) -> dict[str, Any]:
+    """把金额按汇率换算；非数字字段（code / as_of）原样保留。"""
+    if rate == 1.0:
+        return dict(values)
+    return {
+        key: (float(value) * rate if isinstance(value, (int, float)) else value)
+        for key, value in values.items()
+    }
+
+
+def _resolve_fx(
+    records: Mapping[str, Mapping[str, Any]],
+    target_code: str,
+    *,
+    fx_rate: float | None,
+    base_currency: str,
+) -> dict[str, Any]:
+    """确定要不要换算、按什么汇率换算，并把结果记下来。
+
+    规则：
+        - 报表币种 == 目标币种（默认人民币）→ 不换算，rate = 1.0
+        - 报表币种 != 目标币种 → 必须显式给 fx_rate，否则报错（不猜汇率）
+        - 同一批记录币种不一致 → 报错（一半美元一半人民币，换出来的表没法用）
+    """
+    currencies = {
+        str(record.get("currency") or "").upper()
+        for record in records.values()
+        if record.get("currency")
+    }
+    if len(currencies) > 1:
+        raise AdapterError(
+            "抽取记录里出现了多种币种：" + "、".join(sorted(currencies))
+            + "。请把同一批公司放在同一种币种下，或分别建两份输入。"
+        )
+    currency = currencies.pop() if currencies else base_currency
+    if not currency:
+        currency = base_currency
+    if currency == base_currency:
+        return {"from": currency, "to": base_currency, "rate": 1.0, "converted": False}
+    if fx_rate is None or fx_rate <= 0:
+        raise AdapterError(
+            f"这份报表以 {currency} 计价，而流水线的单位约定是 {base_currency}。\n"
+            f"    必须显式给汇率（本模块不猜、也不假设 1:1）：\n"
+            f"        python -m finai_web build --target {target_code} --fx <1 {currency} 等于多少 {base_currency}>\n"
+            "    例如 1 USD = 7.15 CNY 就写 --fx 7.15。"
+        )
+    return {
+        "from": currency,
+        "to": base_currency,
+        "rate": float(fx_rate),
+        "converted": True,
+        "note": "金额已按该汇率换算；汇率由使用者提供，本模块不联网取汇率",
+    }
+
+
 def opening_balance_from(record: Mapping[str, Any]) -> dict[str, float]:
     """一条抽取记录 → `BalanceSheetState` 的构造参数。"""
     block = record.get("opening_balance")
@@ -78,7 +133,13 @@ def peer_from(record: Mapping[str, Any], *, as_of: str | None = None) -> dict[st
     row: dict[str, Any] = {"code": str(record.get("code") or "")}
     for name in schema.PEER_FIELDS:
         row[name] = float(values[name])
-    row["as_of"] = as_of or str(record.get("period") or f"{record.get('year')}A")
+    # 期间口径：优先写报表期末的确切日期（美国财年不是自然年，
+    # 「2025A」会让人以为是 2025-12-31）；没有期末日期时退回「2025A」这种写法。
+    row["as_of"] = (
+        as_of
+        or str(record.get("period_end") or "")
+        or str(record.get("period") or f"{record.get('year')}A")
+    )
     return row
 
 
@@ -87,6 +148,8 @@ def build_pipeline_input(
     *,
     target_code: str | None = None,
     generated_at: str | None = None,
+    fx_rate: float | None = None,
+    base_currency: str = "CNY",
 ) -> dict[str, Any]:
     """把逐条抽取记录汇总成流水线要的那一份输入。
 
@@ -94,6 +157,12 @@ def build_pipeline_input(
     其余进 peers。目标公司同时给出 `target_actuals`，
     供相对估值把目标公司的利润指标也换成**最近一个完整年度的实际数** ——
     这样目标与可比才是同一个口径（明细见 pipeline/adapters.py 的说明）。
+
+    币种（fx_rate）
+        流水线的单位约定是人民币元。如果年报用别的货币计价（例如美国 10-K 的
+        美元百万），必须显式给汇率，这里会统一换算并在 `fx` 里留痕；
+        不给汇率就报错 —— 把「美元百万」当成「人民币元」直接算进估值，
+        数字看着正常，结论会差一个数量级，而且没人看得出来。
     """
     if not records:
         raise AdapterError(
@@ -111,11 +180,14 @@ def build_pipeline_input(
         target_code = str(next(iter(newest)))
 
     target_record = newest[target_code]
+    fx = _resolve_fx(newest, target_code, fx_rate=fx_rate, base_currency=base_currency)
     payload: dict[str, Any] = {
         "version": 1,
         "generated_at": generated_at or _now(),
-        "opening_balance": opening_balance_from(target_record),
-        "target_actuals": peer_from(target_record),
+        "target_code": target_code,
+        "fx": fx,
+        "opening_balance": _scale(opening_balance_from(target_record), fx["rate"]),
+        "target_actuals": _scale(peer_from(target_record), fx["rate"]),
         "peers": {},
         "provenance": {},
     }
@@ -136,7 +208,7 @@ def build_pipeline_input(
         if str(code) == target_code:
             continue
         try:
-            payload["peers"][str(code)] = peer_from(record)
+            payload["peers"][str(code)] = _scale(peer_from(record), fx["rate"])
         except AdapterError as err:
             # 可比公司缺指标只跳过这一家：少一家可比不影响整条流水线，
             # 但必须写进 provenance，报告里要说得出「为什么这家没进表」。

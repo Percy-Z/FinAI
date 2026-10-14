@@ -260,6 +260,330 @@ class SchemaTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 真实年报版式（华为 2025 年报里踩出来的规则）
+# ---------------------------------------------------------------------------
+
+SUMMARY_PAGE = """五年财务摘要
+单位：百万元
+总资产 190,961 1,290,149
+净利润 9,732 68,036
+"""
+
+BALANCE_PAGE = """概要合并财务状况表
+（人民币百万元） 附注 2025年 2024年
+12月31日 12月31日
+物业、厂房及设备 14 189,578 176,565
+存货及其他合同成本 19 195,046 179,139
+应收账款及应收票据 21 3,959 4,664
+现金及现金等价物 23 150,364 146,265
+资产总计 1,334,930 1,290,149
+本公司所有者应占权益 597,034 544,416
+非控制性权益 3,086 203
+权益合计 600,120 544,619
+借款 24 219,861 237,508
+租赁负债 7,954 7,974
+非流动负债合计 232,203 250,252
+借款 24 19,423 27,363
+应付账款及应付票据 25 113,886 105,077
+租赁负债 3,730 3,481
+负债合计 734,810 745,530
+"""
+
+INCOME_PAGE = """概要合并利润及其他综合收益表
+（人民币百万元） 附注 2025年 2024年
+收入 8 880,941 862,072
+税前利润 81,401 70,869
+所得税 12 (13,365) (8,295)
+净利润 68,036 62,574
+净利润归属于：
+本公司所有者 67,104 62,491
+非控制性权益 932 83
+财务收入及财务费用 11 (15,821) (8,255)
+"""
+
+PROSE_PAGE = """股本结构说明
+总出资相当于公司总股本的比例约0.59%。
+"""
+
+HUAWEI_VALUES = {
+    "cash": 150_364.0,
+    "accounts_receivable": 130_753.0,
+    "inventory": 195_046.0,
+    "fixed_assets": 189_578.0,
+    "total_assets": 1_334_930.0,
+    "accounts_payable": 113_886.0,
+    "total_liabilities": 734_810.0,
+    "equity_attributable": 597_034.0,
+    "minority_equity": 3_086.0,
+    "borrowings": 239_284.0,
+    "lease_liabilities": 11_684.0,
+}
+
+
+class RealReportLayoutTest(unittest.TestCase):
+    """这些都是从真实年报里踩出来的规则，改抽取逻辑时要靠它们兜住。"""
+
+    def test_跳过附注编号取金额(self) -> None:
+        """「物业、厂房及设备 14 189,578」里 14 是附注号，不是金额。"""
+        hits = extract.scan_pages([BALANCE_PAGE])
+        self.assertEqual(hits["fixed_assets"].value_yuan, 189_578 * 1_000_000)
+        self.assertIn("跳过附注编号 14", hits["fixed_assets"].note)
+
+    def test_认人民币百万元(self) -> None:
+        hits = extract.scan_pages([BALANCE_PAGE])
+        self.assertEqual(hits["cash"].unit, "百万元")
+        self.assertEqual(hits["cash"].value_yuan, 150_364 * 1_000_000)
+
+    def test_正文页优先于摘要页(self) -> None:
+        """摘要在第 1 页、正文在第 2 页时，必须取正文的数。"""
+        hits = extract.scan_pages([SUMMARY_PAGE, BALANCE_PAGE])
+        self.assertEqual(hits["total_assets"].value_yuan, 1_334_930 * 1_000_000)
+        self.assertEqual(hits["total_assets"].page, 2)
+
+    def test_同名科目按报表归属选(self) -> None:
+        """非控制性权益：利润表里是少数股东损益 932，资产负债表里是 3,086。"""
+        hits = extract.scan_pages([INCOME_PAGE, BALANCE_PAGE])
+        self.assertEqual(hits["minority_equity"].value_yuan, 3_086 * 1_000_000)
+        self.assertEqual(hits["minority_equity"].page, 2)
+
+    def test_负债合计不被流动非流动合计顶掉(self) -> None:
+        hits = extract.scan_pages([BALANCE_PAGE])
+        self.assertEqual(hits["total_liabilities"].value_yuan, 734_810 * 1_000_000)
+
+    def test_拆成两段的科目要相加(self) -> None:
+        """借款分非流动 219,861 与流动 19,423 两段列示，两段都要算。"""
+        hits = extract.scan_pages([BALANCE_PAGE])
+        self.assertEqual(hits["borrowings"].value_yuan, (219_861 + 19_423) * 1_000_000)
+        self.assertEqual(hits["lease_liabilities"].value_yuan, (7_954 + 3_730) * 1_000_000)
+
+    def test_跨行科目靠版面规则抽(self) -> None:
+        """华为的归母净利润写作「净利润归属于：/ 本公司所有者 67,104」。"""
+        hits = extract.scan_pages([INCOME_PAGE])
+        self.assertEqual(hits["net_profit_attributable"].value_yuan, 67_104 * 1_000_000)
+        self.assertIn("版面规则", hits["net_profit_attributable"].note)
+
+    def test_散文里的短标签不算科目(self) -> None:
+        """「总出资相当于公司总股本的比例约0.59%」不是「股本 = 0.59 元」。"""
+        hits = extract.scan_pages([PROSE_PAGE])
+        self.assertNotIn("share_capital", hits)
+
+    def test_有息负债两套口径不混用(self) -> None:
+        """IFRS 口径抽到「借款」时，不该再把 M&A 页的「短期借款」加进来。"""
+        values = dict(HUAWEI_VALUES)
+        values["short_term_debt"] = 239_284.0  # 摘要页的重复数，必须被忽略
+        built = schema.build_opening_balance(values)
+        self.assertAlmostEqual(built.values["interest_bearing_debt"], 250_968.0)
+        self.assertIn("IFRS 口径", built.provenance["interest_bearing_debt"])
+
+    def test_华为这笔账能配平(self) -> None:
+        built = schema.build_opening_balance(dict(HUAWEI_VALUES))
+        v = built.values
+        assets = sum(v[name] for name in schema.OPENING_FIELDS[:5])
+        liabilities = (
+            v["accounts_payable"]
+            + v["interest_bearing_debt"]
+            + v["other_non_current_liabilities"]
+        )
+        equity = v["share_capital"] + v["retained_earnings"] + v["minority_equity"]
+        self.assertAlmostEqual(assets, 1_334_930.0)
+        self.assertAlmostEqual(assets - liabilities - equity, 0.0, places=6)
+
+    def test_EBIT用财务费用加回并取绝对值(self) -> None:
+        built = schema.build_peer_metrics(
+            {
+                "revenue": 880_941.0,
+                "net_profit_attributable": 67_104.0,
+                "equity_attributable": 597_034.0,
+                "total_profit": 81_401.0,
+                "net_profit": 68_036.0,
+                "income_tax": -13_365.0,      # IFRS 式：括号里的负数
+                "finance_expense": -15_821.0,
+            }
+        )
+        self.assertAlmostEqual(built.values["ebit"], 81_401.0 + 15_821.0)
+        # 交叉验证：EBIT 应等于「营业利润 96,937 + 应占联合营公司业绩 285」
+        self.assertAlmostEqual(built.values["ebit"], 96_937.0 + 285.0)
+
+
+# ---------------------------------------------------------------------------
+# 接流水线
+# ---------------------------------------------------------------------------
+
+
+# 美国 10-K 版式（Apple 2025 年报里踩出来的）。注意：引号是弯引号，
+# 金额单位是「million」，报表标题是 CONSOLIDATED ...，这些都得能认。
+APPLE_BALANCE = """Apple Inc.
+CONSOLIDATED BALANCE SHEETS
+(In millions, except number of shares, which are reflected in thousands, and par value)
+September 27, September 28,
+2025 2024
+ASSETS:
+Cash and cash equivalents $ 35,934 $ 29,943
+Accounts receivable, net 39,777 33,410
+Inventories 5,718 7,286
+Property, plant and equipment, net 49,834 45,680
+Total assets $ 359,241 $ 364,980
+LIABILITIES AND SHAREHOLDERS\u2019 EQUITY:
+Accounts payable $ 69,860 $ 68,960
+Commercial paper 7,979 9,967
+Term debt 12,350 10,912
+Total current liabilities 165,631 176,392
+Term debt 78,328 85,750
+Total liabilities 285,508 308,030
+Total shareholders\u2019 equity 73,733 56,950
+Total liabilities and shareholders\u2019 equity $ 359,241 $ 364,980
+"""
+
+APPLE_INCOME = """Apple Inc.
+CONSOLIDATED STATEMENTS OF OPERATIONS
+(In millions, except number of shares)
+Years ended
+September 27, September 28, September 30,
+2025 2024 2023
+Net sales:
+Products $ 307,003 $ 294,866 $ 298,085
+Services 109,158 96,169 85,200
+Total net sales 416,161 391,035 383,285
+Total cost of sales 220,960 210,352 214,137
+Operating income 133,050 123,216 114,301
+Other income/(expense), net (321) 269 (565)
+Income before provision for income taxes 132,729 123,485 113,736
+Provision for income taxes 20,719 29,749 16,741
+Net income $ 112,010 $ 93,736 $ 96,995
+"""
+
+APPLE_CASHFLOW = """Apple Inc.
+CONSOLIDATED STATEMENTS OF CASH FLOWS
+(In millions)
+Operating activities:
+Net income 112,010 93,736 96,995
+Depreciation and amortization 11,698 11,445 11,519
+Cash generated by operating activities 111,482 118,254 110,543
+"""
+
+
+class USReportLayoutTest(unittest.TestCase):
+    """美国 10-K：英文科目名、弯引号、百万美元、CONSOLIDATED 标题。"""
+
+    def test_认百万美元而不是千股(self) -> None:
+        """表头同时写着 In millions 与 in thousands（股数），金额要按百万。"""
+        hits = extract.scan_pages([APPLE_BALANCE])
+        self.assertEqual(hits["cash"].unit, "millions")
+        self.assertEqual(hits["cash"].value_yuan, 35_934 * 1_000_000)
+
+    def test_认弯引号的股东权益(self) -> None:
+        hits = extract.scan_pages([APPLE_BALANCE])
+        self.assertEqual(hits["equity_attributable"].value_yuan, 73_733 * 1_000_000)
+
+    def test_负债合计不被负债与权益合计顶掉(self) -> None:
+        hits = extract.scan_pages([APPLE_BALANCE])
+        self.assertEqual(hits["total_liabilities"].value_yuan, 285_508 * 1_000_000)
+
+    def test_Term_debt分两段要相加(self) -> None:
+        hits = extract.scan_pages([APPLE_BALANCE])
+        self.assertEqual(hits["term_debt"].value_yuan, (12_350 + 78_328) * 1_000_000)
+
+    def test_收入取合并口径而不是分部(self) -> None:
+        """Products/Services 是分项，Total net sales 才是收入。"""
+        hits = extract.scan_pages([APPLE_INCOME])
+        self.assertEqual(hits["revenue"].value_yuan, 416_161 * 1_000_000)
+
+    def test_合并口径英文也认(self) -> None:
+        hits = extract.scan_pages([APPLE_BALANCE])
+        self.assertGreaterEqual(hits["cash"].confidence, 0.9)
+        self.assertNotIn("母公司报表", hits["cash"].note)
+
+    def test_没有利息信息时EBIT取营业利润(self) -> None:
+        values = {
+            "revenue": 416_161.0,
+            "equity_attributable": 73_733.0,
+            "net_profit": 112_010.0,
+            "total_profit": 132_729.0,
+            "income_tax": 20_719.0,
+            "operating_income": 133_050.0,
+            "depreciation_fixed_assets": 11_698.0,
+        }
+        built = schema.build_peer_metrics(values)
+        self.assertAlmostEqual(built.values["net_profit_attributable"], 112_010.0)
+        self.assertAlmostEqual(built.values["ebit"], 133_050.0)
+        self.assertAlmostEqual(built.values["ebitda"], 133_050.0 + 11_698.0)
+
+    def test_美国口径的有息负债(self) -> None:
+        built = schema.build_opening_balance(
+            {
+                "cash": 35_934.0,
+                "accounts_receivable": 39_777.0,
+                "inventory": 5_718.0,
+                "fixed_assets": 49_834.0,
+                "total_assets": 359_241.0,
+                "accounts_payable": 69_860.0,
+                "total_liabilities": 285_508.0,
+                "equity_attributable": 73_733.0,
+                "commercial_paper": 7_979.0,
+                "term_debt": 90_678.0,
+            }
+        )
+        v = built.values
+        self.assertAlmostEqual(v["interest_bearing_debt"], 98_657.0)
+        assets = sum(v[name] for name in schema.OPENING_FIELDS[:5])
+        liabilities = v["accounts_payable"] + v["interest_bearing_debt"] + v["other_non_current_liabilities"]
+        equity = v["share_capital"] + v["retained_earnings"] + v["minority_equity"]
+        self.assertAlmostEqual(assets - liabilities - equity, 0.0, places=6)
+
+    def test_币种识别(self) -> None:
+        self.assertEqual(extract.detect_currency([APPLE_BALANCE]), "USD")
+        self.assertEqual(extract.detect_currency(["单位：元 货币资金 1"]), "")
+        self.assertEqual(extract.detect_currency(["（人民币百万元）"]), "CNY")
+
+    def test_期末日期按财年而不是自然年(self) -> None:
+        """Apple 的 FY2025 止于 9 月 27 日，不能写成 2025-12-31。"""
+        pages = ["For the fiscal year ended September 27, 2025", APPLE_INCOME]
+        self.assertEqual(extract.detect_period_end(pages), "2025-09-27")
+        self.assertEqual(
+            extract.detect_period_end(["本报告期截至2024年12月31日"]), "2024-12-31"
+        )
+
+    def test_as_of_用确切期末(self) -> None:
+        record = extract.build_record(
+            code="AAPL",
+            name="Apple",
+            year=2025,
+            pages=["For the fiscal year ended September 27, 2025", APPLE_BALANCE, APPLE_INCOME],
+        )
+        row = adapter.peer_from(record)
+        self.assertEqual(row["as_of"], "2025-09-27")
+
+    def _usd_record(self, code: str = "AAPL") -> dict:
+        record = extract.build_record(code=code, name="Apple", year=2025, pages=[APPLE_BALANCE, APPLE_INCOME])
+        record["currency"] = "USD"
+        return record
+
+    def test_外币报表不给汇率就报错(self) -> None:
+        """把「美元百万」当「人民币元」直接用，是最危险的静默错误。"""
+        with self.assertRaises(adapter.AdapterError) as ctx:
+            adapter.build_pipeline_input([self._usd_record()], target_code="AAPL")
+        self.assertIn("必须显式给汇率", str(ctx.exception))
+
+    def test_给汇率后按汇率换算并留痕(self) -> None:
+        payload = adapter.build_pipeline_input(
+            [self._usd_record()], target_code="AAPL", fx_rate=7.0
+        )
+        self.assertEqual(payload["fx"]["from"], "USD")
+        self.assertEqual(payload["fx"]["rate"], 7.0)
+        # 现金 35,934（百万美元）→ 35,934 × 1e6 × 7.0 元
+        self.assertAlmostEqual(payload["opening_balance"]["cash"], 35_934 * 1_000_000 * 7.0)
+        self.assertAlmostEqual(payload["target_actuals"]["revenue"], 416_161 * 1_000_000 * 7.0)
+
+    def test_人民币报表不受影响(self) -> None:
+        record = extract.build_record(
+            code="600519", name="贵州茅台", year=2024, pages=[PAGE_1, PAGE_2]
+        )
+        payload = adapter.build_pipeline_input([record], target_code="600519")
+        self.assertFalse(payload["fx"]["converted"])
+        self.assertEqual(payload["fx"]["rate"], 1.0)
+
+
+# ---------------------------------------------------------------------------
 # 接流水线
 # ---------------------------------------------------------------------------
 

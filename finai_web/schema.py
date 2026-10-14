@@ -42,12 +42,37 @@ class Account:
     labels 按优先级排列：第一个是年报上的标准写法，后面的是变体。
     抽取时按顺序找，找到就用 —— 顺序很重要，「营业收入」必须排在
     「营业总收入」之后，否则会把总收入的数当成收入。
+
+    aggregate=True 表示这个科目在同一页上可能出现多次、且应当相加：
+    报表会把同一个标题拆成「非流动」与「流动」两段列示（华为的「借款」
+    就是非流动 219,861 + 流动 19,423），只取一处会漏掉另一处。
     """
 
     name: str
     labels: tuple[str, ...]
     section: str  # balance / income / cashflow
     note: str = ""
+    aggregate: bool = False
+
+
+# 这些标签必须出现在行首才算命中。
+# 理由：「收入」这种两字标签太通用，「其他收入」「利息收入」「递延收入」都会撞上，
+# 只有行首的「收入 880,941」才是利润表的收入行。
+# 做成标签级的集合而不是科目级的开关 —— 同一个科目下「营业总收入」是安全的
+# （A 股报表里它前面可能还有「一、」这类序号，不能要求行首），只有裸标签要加锚。
+# 加进来的是「短标签」，它们在正文里到处都是，只有出现在行首才是报表科目：
+#   收入      —— 其他收入 / 利息收入 / 合同收入
+#   所得税    —— 递延所得税资产 / 应交所得税
+#   负债合计  —— 流动负债合计 / 非流动负债合计（这两个只差两个字，值差 3 倍）
+#   股本      —— 总股本 / 股本溢价（华为第 111 页「总出资相当于公司总股本的比例约0.59%」
+#               就被当成「股本 = 0.59 元」抽进来过）
+# 英文短标签同理：
+#   Net income    —— Net income attributable to noncontrolling interests
+#   Total assets  —— Total assets held for sale
+#   Total liabilities —— Total liabilities and shareholders' equity（这两个差一个「且」，值差 26%）
+ANCHORED_LABELS: frozenset[str] = frozenset(
+    {"收入", "负债合计", "所得税", "股本", "Net income", "Total assets", "Total liabilities"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +84,35 @@ class Account:
 # ---------------------------------------------------------------------------
 ACCOUNTS: tuple[Account, ...] = (
     # ── 资产负债表：资产侧 ────────────────────────────────────────────
-    Account("cash", ("货币资金",), "balance", "现金及现金等价物的近似；年报现金表另有口径"),
-    Account("accounts_receivable", ("应收账款",), "balance"),
-    Account("inventory", ("存货",), "balance"),
-    Account("fixed_assets", ("固定资产",), "balance"),
-    Account("total_assets", ("资产总计", "总资产"), "balance"),
+    Account(
+        "cash",
+        ("货币资金", "现金及现金等价物", "Cash and cash equivalents"),
+        "balance",
+        "A 股写「货币资金」；华为这类 IFRS 口径写「现金及现金等价物」",
+    ),
+    Account(
+        "accounts_receivable",
+        ("应收账款", "Accounts receivable"),
+        "balance",
+        "含「应收账款及应收票据」；流动与非流动两段都要算",
+        aggregate=True,
+    ),
+    Account(
+        "inventory",
+        ("存货", "Inventories"),
+        "balance",
+        "含「存货及其他合同成本」",
+        aggregate=True,
+    ),
+    Account(
+        "fixed_assets",
+        ("固定资产", "物业、厂房及设备", "Property, plant and equipment"),
+        "balance",
+        "IFRS 口径叫「物业、厂房及设备」",
+    ),
+    Account("total_assets", ("资产总计", "总资产", "Total assets"), "balance"),
     # ── 资产负债表：负债侧 ────────────────────────────────────────────
-    Account("accounts_payable", ("应付账款",), "balance"),
+    Account("accounts_payable", ("应付账款", "Accounts payable"), "balance"),
     Account("short_term_debt", ("短期借款",), "balance"),
     Account(
         "current_portion_of_debt",
@@ -75,7 +122,35 @@ ACCOUNTS: tuple[Account, ...] = (
     ),
     Account("long_term_debt", ("长期借款",), "balance"),
     Account("bonds_payable", ("应付债券",), "balance"),
-    Account("total_liabilities", ("负债合计",), "balance"),
+    Account(
+        "borrowings",
+        ("借款",),
+        "balance",
+        "IFRS 口径的「借款」（不分长短，报表分两段列示，须相加）",
+        aggregate=True,
+    ),
+    Account(
+        "lease_liabilities",
+        ("租赁负债",),
+        "balance",
+        "租赁负债也算有息负债；同样分两段列示",
+        aggregate=True,
+    ),
+    Account(
+        "commercial_paper",
+        ("Commercial paper",),
+        "balance",
+        "美国 10-K 口径：商业票据是最短期的一档有息负债",
+        aggregate=True,
+    ),
+    Account(
+        "term_debt",
+        ("Term debt",),
+        "balance",
+        "美国 10-K 口径：Term debt 会分流动与非流动两段列示，须相加",
+        aggregate=True,
+    ),
+    Account("total_liabilities", ("负债合计", "Total liabilities"), "balance"),
     # ── 资产负债表：权益侧 ────────────────────────────────────────────
     Account(
         "equity_attributable",
@@ -84,20 +159,42 @@ ACCOUNTS: tuple[Account, ...] = (
             "归属于母公司股东权益合计",
             "归属于母公司所有者权益（或股东权益）合计",
             "归属于上市公司股东的所有者权益",
+            "本公司所有者应占权益",
+            "Total shareholders' equity",
+            "Total stockholders' equity",
         ),
         "balance",
         "归母净资产；可比公司 PB 的分母",
     ),
-    Account("minority_equity", ("少数股东权益",), "balance"),
+    Account(
+        "minority_equity",
+        ("少数股东权益", "非控制性权益", "Noncontrolling interests", "Non-controlling interests"),
+        "balance",
+    ),
     Account(
         "total_equity",
-        ("所有者权益合计", "股东权益合计", "所有者权益（或股东权益）合计"),
+        (
+            "所有者权益合计",
+            "股东权益合计",
+            "所有者权益（或股东权益）合计",
+            "权益合计",
+            "Total equity",
+        ),
         "balance",
     ),
     Account("share_capital", ("股本", "实收资本"), "balance", "股本 / 实收资本"),
     # ── 利润表 ───────────────────────────────────────────────────────
-    Account("revenue", ("营业总收入", "营业收入"), "income"),
-    Account("operating_cost", ("营业成本",), "income"),
+    Account(
+        "revenue",
+        ("营业总收入", "营业收入", "收入", "Total net sales", "Net sales", "Revenue"),
+        "income",
+        "IFRS 口径直接写「收入」；该标签要求出现在行首，避免命中「其他收入」",
+    ),
+    Account(
+        "operating_cost",
+        ("营业成本", "Total cost of sales", "Cost of sales", "Cost of revenue"),
+        "income",
+    ),
     Account(
         "net_profit_attributable",
         (
@@ -105,23 +202,66 @@ ACCOUNTS: tuple[Account, ...] = (
             "归属于母公司所有者的净利润",
             "归属于上市公司股东的净利润",
             "归属于母公司所有者的综合收益总额",
+            "Net income attributable to",
+        ),
+        "income",
+        "美国公司多数没有少数股东权益，归母净利润就是 Net income（由 CONTEXT_RULES 兜底）",
+    ),
+    Account("net_profit", ("净利润", "Net income", "Net earnings"), "income"),
+    # 利润总额：A 股写「利润总额」，IFRS 式报表写「税前利润」
+    Account(
+        "total_profit",
+        (
+            "利润总额",
+            "税前利润",
+            "Income before provision for income taxes",
+            "Income before income taxes",
+            "Pretax income",
         ),
         "income",
     ),
-    Account("net_profit", ("净利润",), "income"),
-    Account("total_profit", ("利润总额",), "income"),
-    Account("income_tax", ("所得税费用",), "income"),
+    # 所得税：「所得税」要行首锚定，否则会命中「递延所得税资产/负债」那两行
+    Account(
+        "income_tax",
+        ("所得税费用", "所得税", "Provision for income taxes", "Income tax expense"),
+        "income",
+    ),
     Account("interest_expense", ("利息费用", "利息支出"), "income", "EBIT 的加回项"),
     Account("finance_expense", ("财务费用",), "income", "没有单独披露利息费用时的替代品"),
+    Account(
+        "operating_income",
+        ("营业利润", "Operating income"),
+        "income",
+        "利息费用无法单独取到时，用营业利润近似 EBIT（美国 10-K 常见：利息混在 Other income 里）",
+    ),
+    Account(
+        "minority_profit",
+        ("少数股东损益", "Net income attributable to noncontrolling interests"),
+        "income",
+        "少数股东损益；用来从合并净利润倒算归母净利润",
+    ),
     # ── 现金流量表 / 附注：折旧摊销 ───────────────────────────────────
     Account(
         "depreciation_fixed_assets",
-        ("固定资产折旧、油气资产折耗、生产性生物资产折旧", "固定资产折旧"),
+        (
+            "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+            "固定资产折旧",
+            "Depreciation and amortization",
+            "Depreciation",
+        ),
         "cashflow",
     ),
-    Account("amortization_intangible", ("无形资产摊销",), "cashflow"),
+    Account("amortization_intangible", ("无形资产摊销", "Amortization"), "cashflow"),
     Account("amortization_lt_prepaid", ("长期待摊费用摊销",), "cashflow"),
-    Account("operating_cash_flow", ("经营活动产生的现金流量净额",), "cashflow"),
+    Account(
+        "operating_cash_flow",
+        (
+            "经营活动产生的现金流量净额",
+            "Cash generated by operating activities",
+            "Net cash provided by operating activities",
+        ),
+        "cashflow",
+    ),
 )
 
 ACCOUNT_NAMES: tuple[str, ...] = tuple(account.name for account in ACCOUNTS)
@@ -157,12 +297,41 @@ PEER_FIELDS: tuple[str, ...] = (
 )
 
 # 有息负债的构成。年报不会写「有息负债」四个字，得自己按科目加。
-INTEREST_BEARING_PARTS: tuple[str, ...] = (
+#
+# 两套口径，**只能选一套**：混着加会把同一笔债算两遍。
+#   A 股口径   短期借款 + 一年内到期的非流动负债 + 长期借款 + 应付债券
+#   IFRS 口径  借款（不分长短，报表分两段列示）+ 租赁负债
+# 华为 2025 年报用的是后一套（且租赁负债也计入负债），所以按「哪种抽到用哪种」。
+INTEREST_BEARING_PARTS_ASHARE: tuple[str, ...] = (
     "short_term_debt",
     "current_portion_of_debt",
     "long_term_debt",
     "bonds_payable",
 )
+
+INTEREST_BEARING_PARTS_IFRS: tuple[str, ...] = (
+    "borrowings",
+    "lease_liabilities",
+)
+
+# 美国 10-K 口径：商业票据 + Term debt（Term debt 分流动与非流动两段列示）
+INTEREST_BEARING_PARTS_US: tuple[str, ...] = (
+    "commercial_paper",
+    "term_debt",
+)
+
+# 三套口径，按「哪套抽到用哪套」的顺序排列（顺序即优先级）。
+INTEREST_BEARING_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("美国 10-K 口径（商业票据 + Term debt）", INTEREST_BEARING_PARTS_US),
+    ("IFRS 口径（借款 + 租赁负债）", INTEREST_BEARING_PARTS_IFRS),
+    (
+        "A 股口径（短期借款 + 一年内到期的非流动负债 + 长期借款 + 应付债券）",
+        INTEREST_BEARING_PARTS_ASHARE,
+    ),
+)
+
+# 兼容旧名字（外部若引用了 INTEREST_BEARING_PARTS，行为是 A 股口径）
+INTEREST_BEARING_PARTS: tuple[str, ...] = INTEREST_BEARING_PARTS_ASHARE
 
 # 折旧摊销的三块（现金流量表补充资料）。缺哪块就少加哪块，并在 provenance 里说明。
 DA_PARTS: tuple[str, ...] = (
@@ -180,7 +349,6 @@ REQUIRED_FOR_OPENING: tuple[str, ...] = (
     "total_assets",
     "accounts_payable",
     "total_liabilities",
-    "share_capital",
 )
 
 REQUIRED_FOR_PEER: tuple[str, ...] = (
@@ -227,6 +395,40 @@ class Built:
         }
 
 
+@dataclass(frozen=True)
+class ContextRule:
+    """跨行取数规则：有些报表把科目名和数字拆在两行。
+
+    华为的合并利润表就是这样（2025 年报第 70 页）：
+
+        净利润归属于：
+        本公司所有者            67,104    62,491
+        非控制性权益               932        83
+
+    「归属于母公司股东的净利润」这个名字在表里根本没出现 —— 数字在
+    下一行的「本公司所有者」后面。单行匹配永远抽不到这种版式，
+    只能按「先看到触发词，再在接下来的几行里找取值标签」来找。
+
+    规则刻意写得窄：只在触发词真的出现时才生效，避免误伤别的报表。
+    """
+
+    trigger: str
+    account: str
+    value_label: str
+    lookahead: int = 3
+    confidence: float = 0.8
+
+
+# 目前只有一条，是从真实年报里踩出来的。以后遇到新写法往这里加。
+CONTEXT_RULES: tuple[ContextRule, ...] = (
+    ContextRule(
+        trigger="净利润归属于",
+        account="net_profit_attributable",
+        value_label="本公司所有者",
+    ),
+)
+
+
 def _missing(values: Mapping[str, float], names: Sequence[str]) -> list[str]:
     return [name for name in names if values.get(name) is None]
 
@@ -260,9 +462,26 @@ def build_opening_balance(values: Mapping[str, float]) -> Built:
     p = built.provenance
 
     # 能直接抄的
-    for name in ("cash", "accounts_receivable", "inventory", "fixed_assets", "accounts_payable", "share_capital"):
+    for name in ("cash", "accounts_receivable", "inventory", "fixed_assets", "accounts_payable"):
         v[name] = float(values[name])
         p[name] = "read"
+
+    # 股本：有些主体（例如华为投资控股有限公司）不是股份公司，报表上根本没有
+    # 「股本」这一行。这时按 0 处理、把全部归母权益记进留存收益 —— 对
+    # 三表预测的用途（share_capital + retained_earnings = 归母权益）没有影响，
+    # 只是把「股本 / 留存收益」这条内部切分换了个位置，并且会留提示。
+    share_capital = _number(values, "share_capital")
+    if share_capital in (None, 0.0):
+        v["share_capital"] = 0.0
+        p["share_capital"] = "default(0)"
+        built.notes.append(
+            "没有取到可靠的「股本 / 实收资本」（非股份公司本来就没有这一行；"
+            "美国 10-K 则常把面值、股数与金额拆成两行，单行匹配取不到），"
+            "按 0 处理，全部归母权益计入留存收益。报告里若需要区分股本，请从附注补数。"
+        )
+    else:
+        v["share_capital"] = share_capital
+        p["share_capital"] = "read"
 
     minority = _number(values, "minority_equity")
     v["minority_equity"] = 0.0 if minority is None else minority
@@ -283,15 +502,25 @@ def build_opening_balance(values: Mapping[str, float]) -> Built:
             "大概率是某个科目抽错了（例如把母公司报表的数当成合并报表）。请核对原文。"
         )
 
-    # 有息负债
-    debt, used = _sum_present(values, INTEREST_BEARING_PARTS)
+    # 有息负债：按抽到的口径选一套，不混用（混用会把同一笔债算两遍）。
+    style, parts = next(
+        (
+            (label, bucket)
+            for label, bucket in INTEREST_BEARING_BUCKETS
+            if any(values.get(name) is not None for name in bucket)
+        ),
+        ("A 股口径（短期借款 + 一年内到期的非流动负债 + 长期借款 + 应付债券）",
+         INTEREST_BEARING_PARTS_ASHARE),
+    )
+    debt, used = _sum_present(values, parts)
     v["interest_bearing_debt"] = debt
     if used:
-        p["interest_bearing_debt"] = "derived(sum of " + " + ".join(used) + ")"
-        if len(used) != len(INTEREST_BEARING_PARTS):
-            skipped = [name for name in INTEREST_BEARING_PARTS if name not in used]
+        p["interest_bearing_debt"] = f"derived({style}: " + " + ".join(used) + ")"
+        if len(used) != len(parts):
+            skipped = [name for name in parts if name not in used]
             built.notes.append(
-                "有息负债只含 " + "、".join(used) + "；年报里没抽到 " + "、".join(skipped)
+                f"有息负债按{style}算，只含 " + "、".join(used)
+                + "；年报里没抽到 " + "、".join(skipped)
             )
     else:
         v["interest_bearing_debt"] = 0.0
@@ -355,7 +584,29 @@ def build_peer_metrics(values: Mapping[str, float]) -> Built:
     """
     built = Built()
 
-    missing = _missing(values, REQUIRED_FOR_PEER)
+    # 归母净利润：年报有三种写法
+    #   1. 直接写「归属于母公司股东的净利润」→ 标签能抽到（A 股、华为）
+    #   2. 写「Net income attributable to noncontrolling interests」→ 用净利润减掉它
+    #   3. 压根没有少数股东权益（Apple 这类）→ 净利润就是归母净利润
+    # 第 2、3 种都要在这里兜住，否则整条可比公司指标会因为没有「归母净利润」而失败。
+    resolved = dict(values)
+    if resolved.get("net_profit_attributable") is None:
+        net_profit_value = resolved.get("net_profit")
+        minority_profit = resolved.get("minority_profit")
+        if net_profit_value is not None:
+            if minority_profit is not None:
+                resolved["net_profit_attributable"] = net_profit_value - abs(minority_profit)
+                built.notes.append(
+                    "归母净利润 = 净利润 − 少数股东损益（年报没有单独写归母净利润这一行）"
+                )
+            else:
+                resolved["net_profit_attributable"] = net_profit_value
+                built.notes.append(
+                    "年报没有披露少数股东损益，归母净利润按合并净利润处理 —— "
+                    "若公司确有少数股东，这里会高估归母净利润"
+                )
+
+    missing = _missing(resolved, REQUIRED_FOR_PEER)
     if missing:
         raise SchemaError(
             "年报里这些科目没抽到，可比公司指标算不出来："
@@ -365,44 +616,80 @@ def build_peer_metrics(values: Mapping[str, float]) -> Built:
 
     v = built.values
     p = built.provenance
-    v["revenue"] = float(values["revenue"])
-    v["net_profit_attributable"] = float(values["net_profit_attributable"])
-    v["book_equity_attributable"] = float(values["equity_attributable"])
-    for name in ("revenue", "net_profit_attributable", "book_equity_attributable"):
-        p[name] = "read"
-
-    interest = _number(values, "interest_expense")
-    if interest is not None:
-        p["interest_expense"] = "read(利息费用)"
+    v["revenue"] = float(resolved["revenue"])
+    v["net_profit_attributable"] = float(resolved["net_profit_attributable"])
+    v["book_equity_attributable"] = float(resolved["equity_attributable"])
+    p["revenue"] = "read"
+    p["book_equity_attributable"] = "read"
+    if values.get("net_profit_attributable") is not None:
+        p["net_profit_attributable"] = "read"
+    elif values.get("minority_profit") is not None:
+        p["net_profit_attributable"] = "derived(净利润 − 少数股东损益)"
     else:
-        interest = _number(values, "finance_expense")
-        if interest is not None:
-            p["interest_expense"] = "read(财务费用替代)"
+        p["net_profit_attributable"] = "derived(按合并净利润)"
+
+    # 利息加回：优先取利润表上的「财务费用」，取绝对值。
+    #
+    # 为什么不是优先附注里的「利息费用」：附注的利息费用通常只覆盖**部分**债务
+    # （例如只算借款、不含租赁负债），拿它加回会低估 EBIT。利润表上的财务费用
+    # 是同一口径的完整数（华为 2025 年报第 70 页：财务收入及财务费用 15,821；
+    # 加回后 EBIT = 97,222，正好等于「营业利润 96,937 + 应占联合营公司业绩 285」，
+    # 可交叉验证）。
+    #
+    # 取绝对值的原因：两张常见的列示方式都会踩坑 —— 利润表把财务费用放在括号里
+    # （负数），附注里又把利息支出写成正数。用绝对值加回，两种写法都对。
+    raw_interest = _number(values, "finance_expense")
+    source = "财务费用"
+    if raw_interest is not None:
+        built.notes.append(
+            "利息加回用的是利润表「财务费用」—— 里面含汇兑损益与手续费，"
+            "EBIT / EBITDA 会略有偏差"
+        )
+    else:
+        raw_interest = _number(values, "interest_expense")
+        source = "利息费用"
+        if raw_interest is not None:
             built.notes.append(
-                "利息费用没有单独披露，用「财务费用」替代 —— 里面含汇兑损益与手续费，"
-                "EBIT / EBITDA 会略有偏差"
+                "利润表没有「财务费用」，利息加回改用附注里的「利息费用」—— "
+                "附注口径通常只覆盖部分债务，EBIT / EBITDA 可能偏低"
+            )
+    operating_income = _number(values, "operating_income")
+    if raw_interest is None:
+        interest = 0.0
+        p["interest_expense"] = "default(0)"
+        if operating_income is not None:
+            built.notes.append(
+                "利润表里没有单独的利息费用/财务费用（美国 10-K 常把利息并进 "
+                "Other income/(expense)），EBIT 直接取「营业利润」"
             )
         else:
-            interest = 0.0
-            p["interest_expense"] = "default(0)"
             built.notes.append("没有利息费用也没有财务费用，按 0 处理（可能低估 EBIT）")
+    else:
+        interest = abs(raw_interest)
+        p["interest_expense"] = f"read({source}，加回时取绝对值)"
 
     total_profit = _number(values, "total_profit")
     income_tax = _number(values, "income_tax")
     net_profit = _number(values, "net_profit")
 
-    if total_profit is not None:
+    if raw_interest is None and operating_income is not None:
+        # 没有利息信息可加回时，营业利润本身就是最接近 EBIT 的口径
+        ebit = operating_income
+        p["ebit"] = "read(营业利润，作为 EBIT 的近似)"
+    elif total_profit is not None:
         ebit = total_profit + interest
         p["ebit"] = "derived(利润总额 + 利息费用)"
         if income_tax is not None and net_profit is not None:
-            implied = net_profit + income_tax
+            # 所得税的符号两种列示方式相反：A 股把「所得税费用」写成正数，
+            # IFRS 式报表把它放在括号里（负数）。取绝对值后两种都能对上。
+            implied = net_profit + abs(income_tax)
             if abs(implied - total_profit) > max(1.0, abs(total_profit) * 0.01):
                 built.notes.append(
                     f"利润总额 {total_profit:,.0f} 与「净利润 + 所得税」{implied:,.0f} 差得较多，"
                     "可能是抽到了母公司报表或不同年度的数，建议核对原文"
                 )
     elif net_profit is not None and income_tax is not None:
-        ebit = net_profit + income_tax + interest
+        ebit = net_profit + abs(income_tax) + interest
         p["ebit"] = "derived(净利润 + 所得税费用 + 利息费用)"
     else:
         # 退无可退：用归母净利润近似。宁可标出来，也不要悄悄用。

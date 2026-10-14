@@ -96,6 +96,8 @@ apikey*.txt
 # ---------------------------------------------------------------------------
 /data/raw_pdf/
 /data/extracted/
+# 按币种/按批次分出来的旁路目录（例如演示带汇率换算时用的 data/extracted_aapl/）
+/data/extracted_*/
 /data/cache/
 /data/manifest.json
 # 算法侧（输出层）的运行产物：时间戳目录不入库（每次跑 pipeline_demo 都会新建一个），
