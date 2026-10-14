@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 import time
 import webbrowser
@@ -404,12 +405,25 @@ def _ingest_payload() -> dict[str, Any]:
         "market": {},
     }
     try:
+        # 取数层是仓库里的兄弟包（finai_web/），不是从 pip 装进来的。
+        # 工作台可能从别的目录启动 —— 那时 sys.path 上只有「已安装的包」，而
+        # 可编辑安装如果是在 finai_web 加进 pyproject 之前做的，映射里就没有它，
+        # 取数页会显示成「取数层不可用」（2026-10-14 用户实测踩到）。
+        # 把仓库根加进 sys.path 兜住这种情况：界面要么能用，要么给出照着就能做的
+        # 下一步，不能只甩一句 No module named。
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
         from finai_web import market as market_mod
         from finai_web import targets as targets_mod
         from finai_web.config import DATA_SOURCE_ENV, PATHS, data_source
         from finai_web.downloader import load_manifest
     except ImportError as err:  # pragma: no cover - 取数层已随仓库提供
-        payload["error"] = f"取数层不可用：{err}"
+        payload["error"] = (
+            f"取数层不可用：{err}。两种修法："
+            "① 从仓库根目录启动工作台（先 cd 到 FinAI，再 python -m pipeline.web）；"
+            "② 重装一次可编辑包（python -m pip install -e .）—— "
+            "旧的可编辑安装是在 finai_web 加进 pyproject 之前做的，映射里没有它。"
+        )
         return payload
 
     payload["available"] = True
