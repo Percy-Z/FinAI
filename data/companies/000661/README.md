@@ -4,31 +4,34 @@
 `data/market.csv`、`data/peers.csv`）分开存放 —— 那三个文件同时是单元测试的夹具，
 直接覆盖会让测试整片失败，而失败原因是「夹具变了」，不是代码坏了。
 
+2026-10-15 起改成「一家公司一个目录」（`FINAI_COMPANY_DIR`）。这份数据集原先散在
+`data/real-000661/` 与平铺的 `data/raw_pdf`、`data/extracted` 下，用
+`python -m finai_web company --migrate 000661 --yes` 收拢到这里。
+
 ## 怎么跑
 
 ```powershell
-$env:FINAI_ASSUMPTIONS = "data/real-000661/assumptions.toml"
-$env:FINAI_MARKET_CSV  = "data/real-000661/market.csv"
-$env:FINAI_PEERS_CSV   = "data/real-000661/peers.csv"    # 仅 config 数据源用得到
-$env:FINAI_DATA_SOURCE = "extracted"                     # 基期表与可比公司取年报抽取结果
-$env:FINAI_TARGET_ACTUALS = "forward"                    # 相对估值用前瞻（归一口径），见下
+$env:FINAI_COMPANY_DIR = "data/companies/000661"
+$env:FINAI_DATA_SOURCE = "extracted"     # 基期表与可比公司取年报抽取结果
+$env:FINAI_TARGET_ACTUALS = "forward"    # 相对估值用前瞻（归一口径），见下
 python -m pipeline.run
 ```
 
-工作台同理：先设好这几个环境变量再 `python -m pipeline.web`。
+工作台同理：先设好这三个环境变量再 `python -m pipeline.web`，然后在取数页的
+「已经取过数的公司」里点这一家。
 
 ## 数据从哪来
 
 | 内容 | 来源 |
 | --- | --- |
-| 年报 PDF 与抽取结果 | 巨潮资讯网（`data/manifest.json` 有下载 URL 与 sha256，`data/extracted/*.json` 每个数字都带页码与原文） |
+| 年报 PDF 与抽取结果 | 巨潮资讯网（`manifest.json` 有下载 URL 与 sha256，`extracted/*.json` 每个数字都带页码与原文） |
 | 长春高新 2025 年合并营业总收入、利润、费用 | 年报第 87–88 页 |
 | 基期资产负债表 11 个科目 | 年报第 81–84 页（合并资产负债表） |
 | 折旧摊销、资本开支 | 年报第 93 页（现金流量表）与第 159 页（补充资料） |
 | 分红比例 | 年报第 58 页（每 10 股派 1.60 元） |
-| 股价与总股本 | 收盘价 2026-09-30（东方财富行情接口）、总股本 4.079 亿股（年报第 84 页） |
+| 股价与总股本 | 收盘价 2026-09-30（东方财富、腾讯两个行情接口交叉核对）、总股本 4.079 亿股（年报第 84 页） |
 
-可比公司：安科生物（300009）、我武生物（300357）、特宝生物（688278），均取 2025 年年报。
+可比公司：安科生物（300009）、我武生物（300357）、特保生物（688278），均取 2025 年年报。
 
 ## 口径决策（2026-10-12 定）
 
@@ -47,3 +50,12 @@ python -m pipeline.run
 **仍然是最大假设的是资本开支**：本模型按「维持性资本开支 ≈ 折旧摊销（4.54%）」，
 而 2024/2025 年实际资本开支都在 21.8~22.0 亿元（占收入 16%~18%，扩产高峰）。
 报告第 9 节与敏感性分析必须体现这一点（见 `assumptions.toml` 的 `[evidence]`）。
+
+## 迁移后的复核记录（2026-10-15）
+
+同一套输入，用新的公司目录路径重跑，结论与迁移前一致：
+WACC 8.775%、每股 **76.296 元**、隐含回报 6.22%、终值占比 75.5%
+（运行编号 `20261014T233351728`）。
+
+`assumptions.toml` 是**人写过、逐条写了依据**的文件：工作台的取数向导覆盖它之前会
+自动备份成 `assumptions.<时间戳>.bak`，并且把人写的 `[evidence]` 条目原样保留。

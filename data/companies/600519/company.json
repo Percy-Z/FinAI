@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "resolved_from": "贵州茅台",
+  "resolved_at": "2026-10-15T00:48:44+08:00",
+  "as_of": "",
+  "target": {
+    "code": "600519",
+    "name": "贵州茅台",
+    "org_id": "gssh0600519",
+    "market": "CN",
+    "column": "",
+    "years": [
+      2026,
+      2025
+    ],
+    "annual_report_url": ""
+  },
+  "peers": [
+    {
+      "code": "000858",
+      "name": "五粮液",
+      "org_id": "gssz0000858",
+      "market": "CN",
+      "column": "",
+      "years": [
+        2026
+      ],
+      "annual_report_url": ""
+    },
+    {
+      "code": "000568",
+      "name": "泸州老窖",
+      "org_id": "gssz0000568",
+      "market": "CN",
+      "column": "",
+      "years": [
+        2026
+      ],
+      "annual_report_url": ""
+    }
+  ],
+  "notes": []
+}

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "resolved_from": "长春高新",
+  "resolved_at": "2026-10-14T23:33:35+08:00",
+  "as_of": "",
+  "target": {
+    "code": "000661",
+    "name": "长春高新",
+    "org_id": "gssz0000661",
+    "market": "CN",
+    "column": "",
+    "years": [
+      2026
+    ],
+    "annual_report_url": ""
+  },
+  "peers": [
+    {
+      "code": "300009",
+      "name": "安科生物",
+      "org_id": "9900008310",
+      "market": "CN",
+      "column": "",
+      "years": [
+        2026
+      ],
+      "annual_report_url": ""
+    },
+    {
+      "code": "300357",
+      "name": "我武生物",
+      "org_id": "9900022712",
+      "market": "CN",
+      "column": "",
+      "years": [
+        2026
+      ],
+      "annual_report_url": ""
+    },
+    {
+      "code": "688278",
+      "name": "特宝生物",
+      "org_id": "9900038966",
+      "market": "CN",
+      "column": "",
+      "years": [
+        2026
+      ],
+      "annual_report_url": ""
+    }
+  ],
+  "notes": [
+    "由 finai_web company --migrate 从平铺数据集迁移而来"
+  ]
+}

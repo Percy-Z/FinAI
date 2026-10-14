@@ -1,0 +1,7 @@
+# 本文件由 company.json 生成，不要手改 —— 改 company.json 或在工作台里重选。
+# 生成它的命令：python -m finai_web company --sync <公司目录>
+# years 是**披露年份**（2025 年年报在 2026 年披露，写 2026）。
+ticker,name,market,org_id,years,annual_report_url
+600519,贵州茅台,CN,gssh0600519,2026;2025,
+000858,五粮液,CN,gssz0000858,2026,
+000568,泸州老窖,CN,gssz0000568,2026,

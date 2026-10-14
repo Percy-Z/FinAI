@@ -180,6 +180,48 @@ _NOTE_REF = re.compile(
     r"^\s*[（(]?\s*(?:附注|注[：:]?)?\s*[一二三四五六七八九十百]{1,4}\s*[、.．,，]?\s*\d{1,4}\s*[)）]?\s+"
 )
 
+# 附注列的第二种写法：**只有序号，没有章节号** ——「利息支出  45  175,775,959.12」。
+# 茅台就按这种排法，不剥掉会把 45 当成利息支出（2026-10-15 实测：600519 的 11 个
+# 科目里有 8 个抽到的是附注序号）。
+_BARE_NOTE = re.compile(r"^[（(]?\s*(\d{1,4})\s*[)）]?\s+(?=\S)")
+
+# 「更像金额」的数：四位以上、带千分位、或者带小数点
+_AMOUNT_LIKE = re.compile(r"[（(]?\s*-?(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+\.\d)")
+
+# 数字后面紧跟中文标题：附注目录里的「所得税费用(1). 所得税费用表」。
+# 那个 (1) 会被 _parse_number 当成负一（会计上括号表示负数），于是抽到一个 -1。
+_HEADING_TAIL = re.compile(r"^[.．、,，)）\s]*[\u4e00-\u9fff]")
+
+# 多大的数以下才算「像附注序号」。判标题行时要用它把「58,334,693.18 元」这种
+# 真金额排除掉 —— 那种行的数后面也跟中文（单位），不能一律拒掉。
+_NOTE_INDEX_LIMIT = 1000
+
+
+def _is_heading_row(trimmed: str, number: "re.Match[str]", value: float) -> bool:
+    """这一行是附注目录里的标题行吗（「所得税费用(1). 所得税费用表」）。"""
+    if abs(value) >= _NOTE_INDEX_LIMIT:
+        return False
+    return bool(_HEADING_TAIL.match(trimmed[number.end() :]))
+
+
+def _strip_note(text: str) -> str:
+    """剥掉科目名与金额之间的附注列（两种写法都认）。
+
+    剥的条件很紧：那个小整数后面**还跟着一个更像金额的数**才敢剥。
+    否则「股本 1000」这种真金额会被误剥掉，改成取后一列的数（那是上一年度的数）。
+    """
+    trimmed = _NOTE_REF.sub("", text, count=1).lstrip()
+    match = _BARE_NOTE.match(trimmed)
+    if not match:
+        return trimmed
+    rest = trimmed[match.end() :]
+    if not _AMOUNT_LIKE.match(rest):
+        return trimmed
+    candidate = match.group(1)
+    if len(candidate) >= 4 and int(candidate) > 300:
+        return trimmed  # 四位以上的大整数不像附注序号
+    return rest
+
 
 def _row_value(
     line: str, labels: Sequence[str], next_line: str | None = None
@@ -210,12 +252,15 @@ def _row_value(
         tail = text[len(label) :]
         if any(key in tail[:6] for key in _DERIVED_TAIL):
             return None  # 「应收账款周转率 3.2」这类衍生指标
-        trimmed = _NOTE_REF.sub("", tail, count=1).lstrip()
-        if _NUMBER.match(trimmed) is None:
+        trimmed = _strip_note(tail)
+        number = _NUMBER.match(trimmed)
+        if number is None:
             return None
         value = _parse_number(trimmed)
         if value is None:
             return None
+        if _is_heading_row(trimmed, number, value):
+            return None  # 「所得税费用(1).所得税费用表」这类附注目录行
         return label, value, text[:160]
 
     if next_line is None or not text:
@@ -223,11 +268,14 @@ def _row_value(
     prefix = next((item for item in labels if item.startswith(text)), None)
     if prefix is None:
         return None  # 「应收账款周转率 3.2」这类衍生指标
-    numbers = _NOTE_REF.sub("", next_line.strip(), count=1).lstrip()
-    if _NUMBER.match(numbers) is None:
+    numbers = _strip_note(next_line.strip())
+    matched = _NUMBER.match(numbers)
+    if matched is None:
         return None
     value = _parse_number(numbers)
     if value is None:
+        return None
+    if _is_heading_row(numbers, matched, value):
         return None
     return prefix, value, f"{text} {numbers[:60]}"
 

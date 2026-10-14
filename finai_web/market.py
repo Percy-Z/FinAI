@@ -28,7 +28,7 @@ import csv
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from .config import PATHS
 from .targets import Target
@@ -164,6 +164,42 @@ def write_template(
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text("".join(lines), encoding="utf-8")
     return target_path
+
+
+def write_snapshot(
+    path: str | Path,
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    as_of: str,
+    sources: Sequence[str] = (),
+) -> Path:
+    """写一份**自动生成**的行情表（工作台取数用）。
+
+    与 `write_template` 的区别：模板是给人填的空表（价格留空），这份是把已知的数
+    全部填好 —— 价格来自 `quotes.latest_close` 的双源交叉核对，报表侧字段来自
+    年报抽取结果。表头把每一项的来源写清楚，因为报告的对外数字要答得出出处
+    （手填那份 `data/real-000661/market.csv` 就是这么做注释的，这里照同一套写法）。
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# FinAI 市场快照（**由工作台自动生成，不要手改** —— 重跑取数会覆盖它）\n",
+        "#\n",
+        "# 各字段来源：\n",
+    ]
+    for line in sources:
+        lines.append(f"#   {line}\n")
+    lines.append("#\n")
+    lines.append(
+        "# 单位约定：金额元，股数股，比率小数。所有行的 as_of 必须是同一天。\n"
+    )
+    lines.append(",".join(MARKET_COLUMNS) + "\n")
+    for row in rows:
+        lines.append(
+            ",".join(str(row.get(column, "")) for column in MARKET_COLUMNS) + "\n"
+        )
+    target.write_text("".join(lines), encoding="utf-8")
+    return target
 
 
 def validate(

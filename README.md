@@ -248,3 +248,36 @@ pyinstaller --name finai --onefile --add-data "data:data" pipeline/cli.py
 只能走 reportlab 路线。好处是评委不用配环境。
 
 **建议**：提交与演示都用第一种。单文件版是加分项，不是必需品。
+### 输入公司名，自动取数并估值
+
+工作台的**取数页**现在能自己跑完整条链路：输入公司名 → 检索候选 → 选可比公司 →
+下载年报 → 抽取科目 → 取股价 → 生成假设草稿 → 你复核确认 → 出报告。
+
+```text
+① 要估哪家公司   输入「长春高新」或六位代码，支持模糊（输入「长春」会列出几家让你挑）
+② 可比公司       同一个搜索框，勾 2–4 家
+③ 取数并生成假设  六步：解析 → 下载 → 抽取 → 汇总 → 取价 → 假设草稿
+④ 复核假设       每个值都带状态：自动推导 / 规则默认 / 沿用上一版 / 需人工填
+⑤ 确认并估值     写 assumptions.toml（覆盖前自动备份）→ 跑流水线 → 报告
+```
+
+每一家公司一个目录（`data/companies/<代码>/`），互不覆盖。已经取过数的公司，
+断网也能复跑到报告（命中本地年报与抽取记录就不联网）。
+
+命令行等价做法（工作台起的就是这两条命令）：
+
+```bash
+python3 -m pipeline.job plan --company-dir data/companies/600519 --target-code 600519 \
+        --target 贵州茅台 --peer 000858 --peer 000568
+# 复核 data/companies/600519/assumptions.draft.json，填上标「需人工填」的字段
+python3 -m pipeline.job run  --company-dir data/companies/600519
+```
+
+老数据集（例如原先放在 `data/real-000661/` 的那套）用迁移命令收进公司目录：
+
+```bash
+python3 -m finai_web company --migrate 000661     # 先打印将要移动的清单
+python3 -m finai_web company --migrate 000661 --yes
+```
+
+### 让大模型写报告正文（可选）

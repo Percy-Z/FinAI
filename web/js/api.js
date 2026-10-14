@@ -125,6 +125,40 @@
       .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); });
   }
 
+  /* 取数向导用的几个接口。
+     为什么统一返回 {ok, status, body} 而不是抛异常：界面要按错误内容给出
+     「下一步怎么做」（比如「这家没上市，用它的上市母公司」），抛异常会把
+     那句话淹在一句 HTTP 500 里。 */
+  function request(method, url, body) {
+    var opts = { method: method, cache: 'no-store' };
+    if (body !== undefined) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(url, opts).then(function (r) {
+      return r.json()
+        .catch(function () { return {}; })
+        .then(function (b) { return { ok: r.ok && b.ok !== false, status: r.status, body: b }; });
+    }).catch(function (err) {
+      return { ok: false, status: 0, body: { error: String((err && err.message) || err) } };
+    });
+  }
+
+  function companies() { return request('GET', '/api/companies'); }
+  function ingest(company) {
+    var url = '/api/ingest' + (company ? '?company=' + encodeURIComponent(company) : '');
+    return request('GET', url);
+  }
+  function resolveName(keyword) { return request('POST', '/api/resolve', { keyword: keyword }); }
+  function planDraft(company) {
+    return request('GET', '/api/plan/draft?company=' + encodeURIComponent(company));
+  }
+  function saveDraft(company, fields) {
+    return request('POST', '/api/plan/draft', { company: company, fields: fields });
+  }
+  function startPlan(spec) { return request('POST', '/api/plan', spec); }
+  function startIngestRun(company) { return request('POST', '/api/ingest/run', { company: company }); }
+
   /* ── 归一化：把产物文件拼成页面需要的一份数据 ─────────────────────── */
   function normalizeComps(compsRows, impliedRows) {
     if (!compsRows || compsRows.length < 2) return null;
@@ -348,6 +382,14 @@
     FILES: FILES,
     status: status,
     trigger: trigger,
+    request: request,
+    companies: companies,
+    ingest: ingest,
+    resolveName: resolveName,
+    planDraft: planDraft,
+    saveDraft: saveDraft,
+    startPlan: startPlan,
+    startIngestRun: startIngestRun,
     get: get,
     load: load,
     loadRun: loadRun,

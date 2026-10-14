@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -340,6 +341,149 @@ def cmd_market(args: argparse.Namespace) -> int:
     return 1
 
 
+def _sync_targets(directory: Path) -> int:
+    """按公司目录里的 company.json 重新生成 targets.csv。"""
+    from . import company as company_mod
+
+    profile = company_mod.CompanyProfile.load(directory / company_mod.FILENAME)
+    path = profile.write_targets_csv(directory / company_mod.TARGETS_NAME)
+    print(f"已写出：{path}（{len(profile.all_refs)} 家公司）")
+    return 0
+
+
+def cmd_company(args: argparse.Namespace) -> int:
+    """公司目录：迁移老数据集，或把 company.json 同步成 targets.csv。
+
+    为什么需要迁移这一步：真实数据集原先散在两处 —— `data/real-000661/` 放三个输入
+    文件，平铺的 `data/raw_pdf`、`data/extracted` 放取数产物。工作台改成按公司目录
+    读之后，要把它们收拢到 `data/companies/000661/` 下。
+
+    这是**移动文件**，所以先把清单打印出来，要 `--yes` 才真动手 —— 搬数据的命令
+    不该有「敲了就执行」的默认值。
+    """
+    if args.sync:
+        return _sync_targets(Path(args.sync))
+    if not args.migrate:
+        print("要么给 --migrate <代码>，要么给 --sync <公司目录>")
+        return 1
+
+    code = str(args.migrate).strip()
+    destination = Path(args.into) if args.into else PATHS.root / "data" / "companies" / code
+
+    # 这套数据集包含哪些公司：定标清单的第一行是目标公司，后面几行是可比公司。
+    # 清单不在或第一行不是它，就只迁这一家。
+    try:
+        items = targets_mod.read_targets(PATHS.targets_csv, required=False)
+    except Exception as err:  # noqa: BLE001 - 清单有问题不该挡住迁移本身
+        print(f"（读定标清单失败，只迁 {code} 一家：{err}）")
+        items = []
+    codes = [item.ticker for item in items] if items and items[0].ticker == code else [code]
+
+    moves: list[tuple[Path, Path]] = []
+    legacy = PATHS.root / "data" / f"real-{code}"
+    for name in ("assumptions.toml", "market.csv", "peers.csv"):
+        # 只认 data/real-<代码>/ 这一处。**刻意不看** data/ 下那份同名的文件：
+        # 那三个是单元测试的夹具（示例公司），搬走会让测试整片失败，
+        # 而且失败原因是「夹具不见了」，最难查。
+        candidate = legacy / name
+        if candidate.is_file():
+            moves.append((candidate, destination / name))
+        else:
+            print(f"  （没有 {candidate.relative_to(PATHS.root)}，跳过）")
+    for item_code in codes:
+        for path in sorted(PATHS.raw_pdf.glob(f"{item_code}_*.pdf")):
+            moves.append((path, destination / "raw_pdf" / path.name))
+        for path in sorted(PATHS.extracted.glob(f"{item_code}_*.json")):
+            moves.append((path, destination / "extracted" / path.name))
+    for extra in (PATHS.pipeline_input, PATHS.peers_extracted):
+        if extra.is_file():
+            moves.append((extra, destination / "extracted" / extra.name))
+
+    print(f"把 {code} 这套数据集迁进：{destination}")
+    print(f"  包含 {len(codes)} 家公司：{'、'.join(codes)}")
+    for source, target in moves:
+        print(f"  {source.relative_to(PATHS.root)}  →  {target.relative_to(PATHS.root)}")
+    if not moves:
+        print("没有找到可迁的文件。")
+        return 1
+    if not args.yes:
+        print("\n加 --yes 才会真的移动（现在什么都没做）。")
+        return 1
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for source, target in moves:
+        if target.exists() and not args.force:
+            print(f"  跳过（目标已存在）：{target.relative_to(PATHS.root)}")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+
+    # 定标清单里的每家公司信息 → company.json（它是「这套数据集是谁」的唯一出处）
+    if items:
+        from . import company as company_mod
+
+        target_ref = company_mod.CompanyRef(
+            code=items[0].ticker,
+            name=items[0].name,
+            org_id=items[0].org_id,
+            market=items[0].market,
+            column=items[0].column,
+            years=items[0].years,
+            annual_report_url=items[0].annual_report_url,
+        )
+        peers = [
+            company_mod.CompanyRef(
+                code=item.ticker,
+                name=item.name,
+                org_id=item.org_id,
+                market=item.market,
+                column=item.column,
+                years=item.years,
+                annual_report_url=item.annual_report_url,
+            )
+            for item in items[1:]
+        ]
+        profile = company_mod.CompanyProfile(
+            target=target_ref,
+            peers=peers,
+            resolved_from=items[0].name,
+            resolved_at=company_mod.now_iso(),
+            notes=["由 finai_web company --migrate 从平铺数据集迁移而来"],
+        )
+        profile.save(destination / company_mod.FILENAME)
+        profile.write_targets_csv(destination / company_mod.TARGETS_NAME)
+        print(f"\n已写出：{(destination / company_mod.FILENAME).relative_to(PATHS.root)}")
+
+    manifest = Path(args.manifest) if args.manifest else PATHS.manifest_json
+    if manifest.is_file():
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            entries = raw.get("entries") or {}
+            if isinstance(entries, dict):
+                kept = {
+                    key: value
+                    for key, value in entries.items()
+                    if str((value or {}).get("code") or "") in codes
+                }
+                if kept:
+                    destination.joinpath("manifest.json").write_text(
+                        json.dumps(
+                            {**raw, "entries": kept}, ensure_ascii=False, indent=2
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    print(f"下载清单也复制了一份（{len(kept)} 条）到公司目录。")
+        except (OSError, json.JSONDecodeError) as err:
+            print(f"（下载清单没复制成：{err}）")
+
+    print("\n迁移完成。之后这样跑：")
+    print(f"  $env:FINAI_COMPANY_DIR = \"{destination.relative_to(PATHS.root)}\"")
+    print('  $env:FINAI_DATA_SOURCE = "extracted"')
+    print("  python -m pipeline.run")
+    return 0
+
+
 def cmd_placeholders(args: argparse.Namespace) -> int:
     payload: dict = {}
     if PATHS.pipeline_input.is_file():
@@ -430,6 +574,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_market.set_defaults(func=cmd_market)
 
     sub.add_parser("placeholders", help="列出可用占位符").set_defaults(func=cmd_placeholders)
+
+    p_company = sub.add_parser("company", help="公司目录：迁移老数据集 / 同步定标清单")
+    p_company.add_argument("--migrate", default="", help="把这个代码的数据集迁进公司目录")
+    p_company.add_argument("--sync", default="", help="按公司目录里的 company.json 重生成 targets.csv")
+    p_company.add_argument("--into", default="", help="目标目录（默认 data/companies/<代码>）")
+    p_company.add_argument("--manifest", default="", help="下载清单的路径（默认 data/manifest.json）")
+    p_company.add_argument("--yes", action="store_true", help="确认执行移动（不加就只打印清单）")
+    p_company.add_argument("--force", action="store_true", help="目标已存在时覆盖")
+    p_company.set_defaults(func=cmd_company)
 
     p_run = sub.add_parser("run", help="fetch + extract + build")
     _add_fetch_args(p_run)

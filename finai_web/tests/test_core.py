@@ -536,6 +536,126 @@ class PathsOverrideTest(unittest.TestCase):
                 importlib.reload(cfg)  # 恢复，别影响后面的用例
 
 
+class CompanyDirTest(unittest.TestCase):
+    """FINAI_COMPANY_DIR：一套数据一个目录，换公司不再互相覆盖。
+
+    为什么值得单独一组测试：原来的产出平铺在 data/raw_pdf 与 data/extracted，
+    2026-10-12 被演示数据覆盖过一次真实公司的流水线输入。这个开关是那件事的修法，
+    所以「设了它到底挪走哪些文件」必须钉死 —— 漏掉 manifest 或 peers_extracted
+    这类派生字段，症状是「看着没事，跑起来读到上一家公司的数」。
+    """
+
+    def test_设了公司目录产出全部落进该目录(self) -> None:
+        from finai_web import config as cfg
+
+        with mock.patch.dict(os.environ, {"FINAI_COMPANY_DIR": "data/companies/000661"}):
+            reloaded = importlib.reload(cfg)
+            try:
+                base = Path("data/companies/000661")
+                self.assertEqual(reloaded.PATHS.data, base)
+                self.assertEqual(reloaded.PATHS.raw_pdf, base / "raw_pdf")
+                self.assertEqual(reloaded.PATHS.extracted, base / "extracted")
+                self.assertEqual(reloaded.PATHS.cache, base / "cache")
+                self.assertEqual(reloaded.PATHS.market_csv, base / "market.csv")
+                self.assertEqual(reloaded.PATHS.manifest_json, base / "manifest.json")
+                self.assertEqual(
+                    reloaded.PATHS.targets_csv, base / "targets.csv"
+                )
+                # 派生字段：这两条最容易漏，漏了不报错，只是默默读错目录
+                self.assertEqual(
+                    reloaded.PATHS.pipeline_input,
+                    base / "extracted" / "pipeline_input.json",
+                )
+                self.assertEqual(
+                    reloaded.PATHS.peers_extracted, base / "extracted" / "peers.csv"
+                )
+            finally:
+                importlib.reload(cfg)
+
+    def test_不设公司目录时与过去逐字一致(self) -> None:
+        """向后兼容的硬约束：没设开关就必须还是 data/ 那套平铺布局。
+
+        563 个已有测试断言的是这套路径，任何一处变了都会整片失败。
+        """
+        from finai_web import config as cfg
+
+        self.assertIsNone(cfg.company_dir_env())
+        self.assertEqual(cfg.PATHS.data, REPO_ROOT / "data")
+        self.assertEqual(cfg.PATHS.raw_pdf, REPO_ROOT / "data" / "raw_pdf")
+        self.assertEqual(cfg.PATHS.manifest_json, REPO_ROOT / "data" / "manifest.json")
+        self.assertEqual(cfg.PATHS.targets_csv, REPO_ROOT / "config" / "targets.csv")
+
+    def test_for_company_构造自洽的路径表(self) -> None:
+        """工作台进程要按「当前选中的那家公司」读文件，靠的就是这个方法。
+
+        它必须自己把每个派生字段写全 —— dataclass 里的 pipeline_input 之类是
+        **定义时**算好的，只覆盖 data 一个字段不会跟着变。
+        """
+        from finai_web.config import PATHS, Paths
+
+        alt = Paths.for_company("data/companies/300357")
+        self.assertNotEqual(alt.pipeline_input, PATHS.pipeline_input)
+        self.assertEqual(
+            alt.pipeline_input, Path("data/companies/300357/extracted/pipeline_input.json")
+        )
+        self.assertEqual(alt.peers_extracted, alt.extracted / "peers.csv")
+        self.assertEqual(alt.manifest_json, alt.data / "manifest.json")
+        self.assertEqual(alt.targets_csv, alt.data / "targets.csv")
+
+
+class NoteColumnTest(unittest.TestCase):
+    """附注列不能被当成金额 —— 这是 2026-10-15 在贵州茅台上抓到的真 bug。
+
+    茅台（600519）的报表把附注号单独排一列，且**不带章节号**：
+        「利息支出  45  175,775,959.12  105,127,802.03」
+    原先只剥「七、45」这种带章节号的写法，于是 45 被当成利息支出 ——
+    11 个科目里 8 个抽到的是附注序号（货币资金抽成 1、固定资产抽成 19）。
+    更坏的是配平检查会把差额吸收进「其他非流动资产」，界面上看不出异常。
+    """
+
+    def test_裸数字的附注序号要剥掉(self) -> None:
+        hit = extract._row_value("利息支出  45  175,775,959.12  105,127,802.03", ("利息支出",))
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertAlmostEqual(hit[1], 175_775_959.12)
+
+    def test_附注目录行不能当金额(self) -> None:
+        """「所得税费用(1).所得税费用表」是附注目录里的一行 —— 括号会被当成负号，
+        抽出来是 −1。这种行必须整条拒掉。"""
+        self.assertIsNone(
+            extract._row_value("所得税费用(1).所得税费用表", ("所得税费用",))
+        )
+        self.assertIsNone(
+            extract._row_value("固定资产折旧(1).固定资产折旧表", ("固定资产折旧",))
+        )
+        # 点号后面带空格的写法同样要拦住（茅台的 2025 年报就是这么排的）
+        self.assertIsNone(
+            extract._row_value("所得税费用(1). 所得税费用表", ("所得税费用",))
+        )
+
+    def test_金额后面跟单位不要拒掉(self) -> None:
+        """「58,334,693.18 元」这种行里数后面也有中文，不能当成标题行 ——
+        判据是「数很小（像附注序号）且后面跟中文」，单位行里那个数是大数。"""
+        hit = extract._row_value("存货 58,334,693.18 元", ("存货",))
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertAlmostEqual(hit[1], 58_334_693.18)
+
+    def test_带章节号的附注列照旧剥掉(self) -> None:
+        hit = extract._row_value("存货 七、38 58,334,693.18 40,000,000.00", ("存货",))
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertAlmostEqual(hit[1], 58_334_693.18)
+
+    def test_小整数是真金额时不要剥(self) -> None:
+        """「股本 1000 1200」里 1000 是真金额：后面那个数不够像金额，就不该剥。
+        剥错的后果更隐蔽 —— 会静默取到上一年度的数。"""
+        hit = extract._row_value("股本 1000 1200", ("股本",))
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertAlmostEqual(hit[1], 1000.0)
+
+
 class RowMatchingTest(unittest.TestCase):
     """真实年报的陷阱：科目名不能用子串匹配。
 

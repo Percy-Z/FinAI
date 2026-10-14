@@ -76,14 +76,33 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(raw).expanduser() if raw else default
 
 
-DEFAULT_CONFIG_PATH = _env_path("FINAI_ASSUMPTIONS", DATA_DIR / "assumptions.toml")
-DEFAULT_MARKET_PATH = _env_path("FINAI_MARKET_CSV", DATA_DIR / "market.csv")
-DEFAULT_PEER_PATH = _env_path("FINAI_PEERS_CSV", DATA_DIR / "peers.csv")
+# 公司目录：一套数据一个目录，换公司不再互相覆盖（见 finai_web/config.py 同一开关）。
+# 设了它，下面四个默认路径全部改用该目录；不设则与过去逐字一致（还是 data/）。
+#
+# 为什么这个开关放在这一层而不是让调用方传路径：这些默认值在**导入时**就求值了
+# （`load_market_snapshot(path=DEFAULT_MARKET_PATH)` 这类默认参数），所以每次运行
+# 必须是一个独立进程 —— 工作台就是靠子进程带环境变量来做到这一点的。
+COMPANY_DIR_ENV = "FINAI_COMPANY_DIR"
+
+
+def company_dir() -> Path | None:
+    """环境变量指定的公司目录；没设返回 None（= 沿用 data/ 那套平铺布局）。"""
+    raw = os.environ.get(COMPANY_DIR_ENV, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+INPUT_DIR = company_dir() or DATA_DIR
+
+DEFAULT_CONFIG_PATH = _env_path("FINAI_ASSUMPTIONS", INPUT_DIR / "assumptions.toml")
+DEFAULT_MARKET_PATH = _env_path("FINAI_MARKET_CSV", INPUT_DIR / "market.csv")
+DEFAULT_PEER_PATH = _env_path("FINAI_PEERS_CSV", INPUT_DIR / "peers.csv")
 
 # 抽取层（finai_web）产出的流水线输入。形状是：
 #     {"opening_balance": {11 个科目}, "peers": {代码: {5 个指标}}, "provenance": {...}}
 # 由 `python -m finai_web build` 生成，全部落在 data/ 下（不进 git）。
-DEFAULT_EXTRACTED_PAYLOAD = DATA_DIR / "extracted" / "pipeline_input.json"
+DEFAULT_EXTRACTED_PAYLOAD = _env_path(
+    "FINAI_PIPELINE_INPUT", INPUT_DIR / "extracted" / "pipeline_input.json"
+)
 
 # 数据源开关。默认 config，即行为与本文件注释里写的完全一致；
 # 设为 extracted 时，[opening_balance] 与 peers 改读抽取结果。

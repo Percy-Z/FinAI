@@ -1183,10 +1183,345 @@
     return out.join('');
   }
 
+  /* ══════════════════════════════════════════════════════════════════
+     取数向导：输入公司名 → 自动取数 → 复核假设 → 估值
+
+     为什么要把「复核假设」卡在中间：资本开支口径这类判断会让结论从 +76 元
+     翻到 −10 元（长春高新实测），不能由程序替人做。取数算出来的每个值都带
+     状态标签，人就着标签复核一遍再往下走。
+     ══════════════════════════════════════════════════════════════════ */
+  var WIZ = {
+    target: null, peers: [], candidates: [], peerCandidates: [],
+    company: '', draft: null, asOf: '', busy: '', error: '', note: '', companies: []
+  };
+
+  var FIELD_STATUS = {
+    derived: ['自动推导', 'pass'],
+    default: ['规则默认', 'infer'],
+    kept: ['沿用上一版', 'neutral'],
+    missing: ['需人工填', 'warn'],
+    human: ['人工确认', 'pass']
+  };
+
+  function statusChip(status) {
+    var item = FIELD_STATUS[status] || [String(status), 'neutral'];
+    return '<span class="badge ' + item[1] + '">' + esc(item[0]) + '</span>';
+  }
+
+  function nameOf(item) {
+    return esc(item.name || item.code) + ' <span class="mono small dim">' + esc(item.code) + '</span>';
+  }
+
+  function candidateChips(items, action, label) {
+    if (!items.length) return '<span class="muted small">没有候选</span>';
+    return items.map(function (item) {
+      return '<button class="badge code" type="button" data-wiz="' + action + '" data-code="' + esc(item.code) +
+        '" data-name="' + esc(item.name || '') + '">' + Icons.svg('plus') + nameOf(item) +
+        (label ? ' <span class="dim">' + esc(label) + '</span>' : '') + '</button>';
+    }).join(' ');
+  }
+
+  function wizardTargetBlock() {
+    if (WIZ.target) {
+      return '<div class="row wrap" style="gap:10px;align-items:center">' +
+        '<span class="badge pass">' + nameOf(WIZ.target) + '</span>' +
+        '<span class="muted small">' + esc((WIZ.target.years || []).join('、') || '年份待定') +
+        ' 年披露的年报</span>' +
+        '<button class="ghost" type="button" data-wiz="clear-target">换一家</button></div>';
+    }
+    return '<div class="row wrap" style="gap:8px;align-items:center">' +
+      '<input class="input mono" style="min-width:220px" data-wiz-input="target" placeholder="公司名或六位代码，例如 长春高新 / 600519">' +
+      '<button class="primary" type="button" data-wiz="search-target">' + Icons.svg('search') + '检索</button>' +
+      '<span class="muted small">支持模糊：只输入「长春」会列出相关的多家公司让你选</span></div>' +
+      (WIZ.candidates.length
+        ? '<div class="mt10">' + candidateChips(WIZ.candidates, 'pick-target') + '</div>'
+        : '');
+  }
+
+  function wizardPeerBlock() {
+    var chosen = WIZ.peers.length
+      ? WIZ.peers.map(function (peer) {
+        return '<span class="badge neutral">' + nameOf(peer) +
+          ' <button class="badge code" type="button" data-wiz="remove-peer" data-code="' + esc(peer.code) + '">×</button></span>';
+      }).join(' ')
+      : '<span class="badge warn">还没有可比公司</span>';
+    return '<div class="row wrap" style="gap:10px;align-items:center">' + chosen + '</div>' +
+      '<div class="row wrap mt10" style="gap:8px;align-items:center">' +
+      '<input class="input mono" style="min-width:220px" data-wiz-input="peer" placeholder="可比公司：名称或代码">' +
+      '<button class="ghost" type="button" data-wiz="add-peer">' + Icons.svg('plus') + '添加可比公司</button>' +
+      '<span class="muted small">2–4 家为宜（太少没有可比性，太多口径难对齐）</span></div>' +
+      (WIZ.peerCandidates.length
+        ? '<div class="mt10">' + candidateChips(WIZ.peerCandidates, 'pick-peer') + '</div>'
+        : '');
+  }
+
+  function draftFieldRow(key, item) {
+    var value = item.value;
+    var control;
+    if (typeof value === 'boolean') {
+      control = '<select class="input" data-draft="' + esc(key) + '" data-type="bool">' +
+        '<option value="true"' + (value ? ' selected' : '') + '>true</option>' +
+        '<option value="false"' + (value ? '' : ' selected') + '>false</option></select>';
+    } else if (Array.isArray(value)) {
+      control = '<input class="input mono" data-draft="' + esc(key) + '" data-type="list" value="' +
+        esc(value.join(', ')) + '">';
+    } else if (value == null) {
+      control = '<input class="input mono" data-draft="' + esc(key) + '" data-type="num" value="" placeholder="待填">';
+    } else if (typeof value === 'number') {
+      control = '<input class="input mono" data-draft="' + esc(key) + '" data-type="num" value="' + value + '">';
+    } else {
+      control = '<input class="input mono" data-draft="' + esc(key) + '" data-type="text" value="' + esc(value) + '">';
+    }
+    var short = key.indexOf('.') > 0 ? key.split('.')[1] : key;
+    return '<tr>' +
+      '<td class="mono small" data-label="字段">' + esc(short) + '<div class="small dim">' + esc(key) + '</div></td>' +
+      '<td data-label="取值">' + control + '</td>' +
+      '<td data-label="状态">' + statusChip(item.status) + '</td>' +
+      '<td class="small dim" data-label="出处">' + esc(item.source || '') + '</td>' +
+      '</tr>';
+  }
+
+  function wizardDraftBlock() {
+    if (!WIZ.draft) return '';
+    var groups = WIZ.draft.groups || {};
+    var order = ['derived', 'default', 'kept', 'missing', 'human'];
+    var titles = {
+      derived: '自动推导（从年报或行情算出来的，附出处）',
+      default: '规则默认（保守规则给的，请复核 —— 资本开支口径尤其要看）',
+      kept: '沿用上一版（这次算不出来）',
+      missing: '需人工填（年报里没有这个数，程序不猜）',
+      human: '人工确认（改过的值）'
+    };
+    var out = [];
+    if (WIZ.draft.normalized && WIZ.draft.normalized.applied) {
+      out.push('<div class="alert warn">归一建议：' + esc(WIZ.draft.normalized.reason) + '</div>');
+    }
+    (WIZ.draft.notes || []).forEach(function (note) {
+      out.push('<div class="tbl-note">' + esc(note) + '</div>');
+    });
+    order.forEach(function (status) {
+      var items = groups[status] || [];
+      if (!items.length) return;
+      out.push('<div class="tbl-note mt14">' + esc(titles[status] || status) + ' · ' + items.length + ' 项</div>');
+      out.push('<div class="tbl-wrap"><table class="tbl responsive"><thead><tr>' +
+        '<th>字段</th><th>取值</th><th>状态</th><th>出处</th></tr></thead><tbody>' +
+        items.map(function (item) { return draftFieldRow(item.key, item); }).join('') +
+        '</tbody></table></div>');
+    });
+    var missing = (WIZ.draft.missing || []);
+    out.push('<div class="row wrap mt14" style="gap:10px;align-items:center">' +
+      '<button class="primary" type="button" data-wiz="run-valuation"' + (missing.length ? ' disabled' : '') + '>' +
+      Icons.svg('play') + '确认并估值</button>' +
+      '<button class="ghost" type="button" data-wiz="save-draft">' + Icons.svg('save') + '只保存</button>' +
+      (missing.length
+        ? '<span class="badge warn">还有 ' + missing.length + ' 项待填：' + esc(missing.join('、')) + '</span>'
+        : '<span class="muted small">确认无误后点「确认并估值」</span>') +
+      '</div>');
+    out.push('<div class="tbl-note">落盘位置：' + esc(WIZ.draft.assumptions_path || '') +
+      '（覆盖前会自动备份成 assumptions.&lt;时间戳&gt;.bak，人写的依据条目原样保留）</div>');
+    return out.join('');
+  }
+
+  function wizardHtml(c) {
+    var st = (c && c.status) || {};
+    var running = !!st.running;
+    var phase = st.phase || '';
+    var steps = (st.steps || []).length;
+    var out = [];
+    out.push('<div class="grid g-4">' +
+      kpi('目标公司', WIZ.target ? esc(WIZ.target.name || WIZ.target.code) : '—', '',
+        WIZ.target ? '<span class="muted">' + esc(WIZ.target.code) + '</span>'
+          : '<span class="badge warn">先输入公司名</span>', { icon: 'target' }) +
+      kpi('可比公司', String(WIZ.peers.length), '家',
+        WIZ.peers.length
+          ? '<span class="muted">' + esc(WIZ.peers.map(function (p) { return p.name || p.code; }).join('、')) + '</span>'
+          : '<span class="badge warn">至少选一家</span>', { icon: 'layers' }) +
+      kpi('假设草稿', WIZ.draft ? '已生成' : '—', '',
+        WIZ.draft
+          ? '<span class="muted">' + String((WIZ.draft.missing || []).length) + ' 项待填</span>'
+          : '<span class="muted">取数后生成</span>', { icon: 'listChecks' }) +
+      kpi('当前阶段', running ? (phase === 'plan' ? '取数中' : '估值中') : '就绪', '',
+        '<span class="muted">' + (running ? '已执行 ' + steps + ' 步' : '等待操作') + '</span>',
+        { hero: true, icon: 'activity' }) +
+      '</div>');
+
+    if (WIZ.companies.length) {
+      out.push('<div class="mt14"><div class="tbl-note">已经取过数的公司（点一下载入它的假设草稿，直接跑估值）：</div>' +
+        '<div class="row wrap mt10" style="gap:8px">' +
+        WIZ.companies.map(function (item) {
+          return '<button class="badge ' + (item.has_draft ? 'code' : 'neutral') + '" type="button" data-wiz="load-company" data-code="' +
+            esc(item.code) + '">' + esc(item.name || item.code) + ' <span class="mono small dim">' + esc(item.code) +
+            '</span>' + (item.has_draft ? '' : ' <span class="dim">（还没取数）</span>') + '</button>';
+        }).join('') + '</div></div>');
+    }
+
+    out.push('<div class="mt14">' + card('① 要估哪家公司', 'target',
+      wizardTargetBlock() +
+      '<div class="tbl-note mt10">输入名称后程序去巨潮资讯网检索：代码、交易所板块、机构号都会自动填好，' +
+      '再据此下载最近两份年报（当年那份给基期资产负债表，上一份给利润表 —— 归一盈利要用）。</div>', {}) + '</div>');
+
+    out.push(card('② 可比公司', 'layers', wizardPeerBlock() +
+      '<div class="tbl-note mt10">相对估值要用它们的市值与倍数的，所以要跟目标公司是同一门生意、同一套口径。</div>', {}));
+
+    var missingPeer = !WIZ.peers.length;
+    out.push(card('③ 取数并生成假设', 'database',
+      '<div class="row wrap" style="gap:10px;align-items:center">' +
+      '<button class="primary" type="button" data-wiz="start-plan"' +
+      (!WIZ.target || running ? ' disabled' : '') + '>' + Icons.svg('download') + '开始取数</button>' +
+      '<span class="muted small">' +
+      '会依次做六件事：解析公司 → 下载年报 → 抽取科目 → 汇总 → 取股价 → 生成假设草稿' +
+      '（首次约两分钟，要联网；已经下过的年报不会重复下）</span></div>' +
+      (WIZ.error ? '<div class="alert mt10">' + esc(WIZ.error) + '</div>' : '') +
+      (WIZ.note ? '<div class="tbl-note mt10">' + esc(WIZ.note) + '</div>' : '') +
+      (running
+        ? '<div class="mt14 tbl-note">正在跑：' + esc(phase === 'plan' ? '取数' : '估值') +
+        '（任务号 ' + esc(st.job_id || st.run_id || '') + '）。页面会自动刷新。</div>'
+        : '') +
+      (missingPeer ? '<div class="tbl-note mt10">提示：没有可比公司相对估值做不了，取数会在汇总那一步停下。</div>' : ''),
+      {}));
+
+    if (WIZ.draft) {
+      out.push(card('④ 复核假设（这一步是给人看的）', 'listChecks', wizardDraftBlock(), {}));
+    }
+    return out.join('');
+  }
+
+  function draftFieldsFromDom(root) {
+    var fields = {};
+    Array.prototype.forEach.call(root.querySelectorAll('[data-draft]'), function (el) {
+      var key = el.getAttribute('data-draft');
+      var type = el.getAttribute('data-type');
+      var raw = el.value;
+      if (type === 'bool') { fields[key] = raw === 'true'; return; }
+      if (type === 'list') {
+        fields[key] = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
+            return;
+          }
+      fields[key] = raw;
+    });
+    return fields;
+  }
+
+  /* 只重画向导那块，不惊动整页 —— 整页重绘归 app.js 的 paint 管，
+     这里改了 WIZ 的状态就重画自己，输入框之外的东西都不动。 */
+  function repaintWizard(root, c) {
+    var box = root.querySelector('#ingestWizard');
+    if (box) box.innerHTML = wizardHtml(c);
+  }
+
+  function loadDraft(code) {
+    WIZ.company = code;
+    return API.planDraft(code).then(function (r) {
+      if (!r.ok) { WIZ.draft = null; WIZ.error = (r.body && r.body.error) || '读不到假设草稿'; return; }
+      WIZ.draft = r.body;
+      if (r.body.company_info) WIZ.target = { code: r.body.company_info.code, name: r.body.company_info.name };
+      if (r.body.company && r.body.company.peers) {
+        WIZ.peers = r.body.company.peers.map(function (item) { return { code: item, name: '' }; });
+      }
+      WIZ.error = '';
+    });
+  }
+
+  function mountWizard(root, c) {
+    if (!root) return;
+    if (!WIZ.companies.length) {
+      API.companies().then(function (r) {
+        if (r.ok && r.body.companies) {
+          WIZ.companies = r.body.companies.filter(function (item) { return item.has_profile; });
+          if (WIZ.companies.length) repaintWizard(root, c);
+        }
+      });
+    }
+    root.addEventListener('click', function (event) {
+      var el = event.target.closest('[data-wiz]');
+      if (!el) return;
+      var action = el.getAttribute('data-wiz');
+      var code = el.getAttribute('data-code') || '';
+      var name = el.getAttribute('data-name') || '';
+      var input;
+      if (action === 'search-target') {
+        input = root.querySelector('[data-wiz-input="target"]');
+        WIZ.busy = 'search'; WIZ.error = '';
+        API.resolveName(input.value).then(function (r) {
+          WIZ.busy = '';
+          if (!r.ok) { WIZ.error = (r.body && (r.body.error || r.body.hint)) || '检索失败'; repaintWizard(root, c); return; }
+          WIZ.candidates = (r.body.candidates || []);
+          if (!WIZ.candidates.length) WIZ.error = r.body.hint || '没有查到这家公司';
+          repaintWizard(root, c);
+        });
+      } else if (action === 'pick-target') {
+        WIZ.target = { code: code, name: name };
+        WIZ.candidates = [];
+        WIZ.error = '';
+        repaintWizard(root, c);
+      } else if (action === 'clear-target') {
+        WIZ.target = null; repaintWizard(root, c);
+      } else if (action === 'add-peer') {
+        input = root.querySelector('[data-wiz-input="peer"]');
+        WIZ.busy = 'peer'; WIZ.error = '';
+        API.resolveName(input.value).then(function (r) {
+          WIZ.busy = '';
+          var items = (r.body && r.body.candidates) || [];
+          if (!r.ok || !items.length) { WIZ.error = (r.body && (r.body.error || r.body.hint)) || '没查到这家公司'; repaintWizard(root, c); return; }
+          if (items.length === 1) { WIZ.peers.push({ code: items[0].code, name: items[0].name }); WIZ.peerCandidates = []; }
+          else WIZ.peerCandidates = items;
+          repaintWizard(root, c);
+        });
+      } else if (action === 'pick-peer') {
+        WIZ.peers.push({ code: code, name: name });
+        WIZ.peerCandidates = [];
+        repaintWizard(root, c);
+      } else if (action === 'remove-peer') {
+        WIZ.peers = WIZ.peers.filter(function (peer) { return peer.code !== code; });
+        repaintWizard(root, c);
+      } else if (action === 'load-company') {
+        loadDraft(code).then(function () { repaintWizard(root, c); });
+      } else if (action === 'start-plan') {
+        WIZ.error = ''; WIZ.note = '';
+        API.startPlan({
+          target_code: WIZ.target.code, keyword: WIZ.target.name || WIZ.target.code,
+          peers: WIZ.peers.map(function (peer) { return peer.code; })
+        }).then(function (r) {
+          if (!r.ok) { WIZ.error = (r.body && r.body.error) || '起取数任务失败'; repaintWizard(root, c); return; }
+          WIZ.company = WIZ.target.code;
+          WIZ.note = '取数任务已开始（' + r.body.job_id + '）。跑完会自动载入假设草稿。';
+          repaintWizard(root, c);
+        });
+      } else if (action === 'save-draft') {
+        API.saveDraft(WIZ.company, draftFieldsFromDom(root)).then(function (r) {
+          if (!r.ok) { WIZ.error = (r.body && r.body.error) || '保存失败'; repaintWizard(root, c); return; }
+          WIZ.note = '已保存到假设草稿。';
+          loadDraft(WIZ.company).then(function () { repaintWizard(root, c); });
+        });
+      } else if (action === 'run-valuation') {
+        API.saveDraft(WIZ.company, draftFieldsFromDom(root)).then(function (saved) {
+          if (!saved.ok) { WIZ.error = (saved.body && saved.body.error) || '保存失败'; repaintWizard(root, c); return; }
+          API.startIngestRun(WIZ.company).then(function (r) {
+            if (!r.ok) { WIZ.error = (r.body && r.body.error) || '起估值任务失败'; repaintWizard(root, c); return; }
+            WIZ.note = '估值已开始（运行编号 ' + r.body.run_id + '）。';
+            repaintWizard(root, c);
+          });
+        });
+      }
+    });
+
+    /* 取数跑完自动载入草稿：状态从「运行中」变成「结束」时载一次 */
+    var status = (c && c.status) || {};
+    var stopped = WIZ.wasRunning && !status.running;
+    WIZ.wasRunning = !!status.running;
+    if (stopped && status.phase === 'plan') {
+      if (status.job_returncode === 0 && WIZ.target) {
+        loadDraft(WIZ.target.code).then(function () { repaintWizard(root, c); });
+      } else if (status.error) {
+        WIZ.error = status.error;
+        repaintWizard(root, c);
+      }
+    }
+  }
   var ingest = {
     id: 'ingest', nav: '取数', icon: 'database', group: '数据准备',
     title: '取数（定标公司 → 年报）',
-    sub: function () { return '定标公司 → 年报 PDF → 结构化科目 → 流水线输入'; },
+    sub: function () { return '输入公司名 → 年报 → 结构化科目 → 假设草稿 → 估值'; },
     render: function (c) {
       var src = (c.status && c.status.data_source) || {};
       var sourceValue = src.switch === 'extracted'
@@ -1207,13 +1542,15 @@
         '<span class="hash" data-copy="FINAI_DATA_SOURCE=extracted" title="点击复制">' +
         'FINAI_DATA_SOURCE=extracted</span>，再跑 <span class="mono">python -m pipeline.run</span>。' +
         '不设置时读 <span class="mono">data/assumptions.toml</span> 与 ' +
-        '<span class="mono">data/peers.csv</span>。这一页只看现状：' +
-        '下载与抽取在命令行里跑，界面不触发任何网络请求。</div></div>', {}));
+        '<span class="mono">data/peers.csv</span>。下面的向导会替你跑完整条链路：' +
+        '按名称检索公司 → 下载年报 → 抽取 → 生成假设草稿 → 等你确认 → 估值。</div></div>', {}));
+      out.push('<div id="ingestWizard" class="mt14">' + wizardHtml(c) + '</div>');
       out.push('<div id="ingestDetail" class="mt14">' +
         '<div class="skel skel-card" style="height:160px"></div></div>');
       return out.join('');
     },
-    mount: function (root) {
+    mount: function (root, c) {
+      mountWizard(root, c);
       var box = root.querySelector('#ingestDetail');
       if (!box) return;
       API.get('/api/ingest').then(function (d) {

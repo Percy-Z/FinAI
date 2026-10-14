@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from pipeline import assumptions_gen as gen  # noqa: E402
 from pipeline import web  # noqa: E402
 from pipeline import config  # noqa: E402
 
@@ -121,6 +122,191 @@ class TestInputsFollowDataset(WebTestBase):
             self.assertEqual(code, 200)
             # 比内容而不是比换行：Windows 上写文件会把 \n 转成 \r\n
             self.assertIn("code,name,role", body.decode("utf-8"))
+
+
+class TestCompanyWorkbench(WebTestBase):
+    """工作台的「输入公司名 → 自动取数」这条路上，界面依赖的几个接口。
+
+    这些用例**不碰**仓库里的 data/companies/：把 web.COMPANIES_ROOT 指到临时目录，
+    在假公司目录上验读与写。真跑取数要联网、要几分钟，那是 pipeline/tests/test_job.py
+    的事（那里用假行情 + 预置产物）。
+    """
+
+    def _fixture(self, tmp: str) -> Path:
+        base = Path(tmp) / "companies" / "000661"
+        (base / "raw_pdf").mkdir(parents=True)
+        (base / "extracted").mkdir()
+        (base / "raw_pdf" / "000661_2026.pdf").write_bytes(b"%PDF-1.4" + b"0" * 2048)
+        (base / "extracted" / "000661_2026.json").write_text(
+            json.dumps(
+                {
+                    "code": "000661",
+                    "name": "长春高新",
+                    "year": 2026,
+                    "period": "2026A",
+                    "accounts": {"cash": {"value_yuan": 1.0, "page": 81, "raw_text": "货币资金 1"}},
+                    "missing_accounts": [],
+                    "notes": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (base / "company.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "target": {"code": "000661", "name": "长春高新", "years": [2026, 2025]},
+                    "peers": [{"code": "300009", "name": "安科生物", "years": [2026]}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return base
+
+    def test_列出公司目录(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(tmp)
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                code, _, raw = self.get("/api/companies")
+            payload = json.loads(raw)
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+        item = payload["companies"][0]
+        self.assertEqual(item["code"], "000661")
+        self.assertEqual(item["name"], "长春高新")
+        self.assertEqual(item["peers"], ["300009"])
+        self.assertEqual(item["pdfs"], 1)
+        self.assertEqual(item["records"], 1)
+        self.assertFalse(item["has_draft"])
+
+    def test_取数页读的是选中那家公司(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(tmp)
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                code, _, raw = self.get("/api/ingest?company=000661")
+            payload = json.loads(raw)
+        self.assertEqual(code, 200)
+        # 这才是「取数层不可用」那类问题的反面：页面读的是当前公司目录，不是仓库里那套
+        self.assertEqual(payload["company"]["code"], "000661")
+        self.assertEqual(payload["pdfs"]["count"], 1)
+        # 临时目录在仓库外，_rel 会给出绝对路径 —— 比后缀就够了
+        self.assertTrue(payload["records"]["dir"].replace("\\", "/").endswith("000661/extracted"))
+
+    def test_没有草稿时确认屏说清下一步(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(tmp)
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                _, _, raw = self.get("/api/plan/draft?company=000661")
+            payload = json.loads(raw)
+        self.assertFalse(payload["ok"])
+        self.assertIn("先跑一次取数", payload["error"])
+
+    def test_草稿按状态分组给出(self) -> None:
+        draft = gen.Draft(
+            company={"name": "长春高新", "code": "000661", "source": "cninfo"},
+            fields={
+                "drivers.revenue_base": gen.Field(
+                    "drivers.revenue_base", 1000.0, gen.DERIVED, "年报抽取"
+                ),
+                "drivers.tax_rate": gen.Field(
+                    "drivers.tax_rate", 0.25, gen.DEFAULT, "法定税率"
+                ),
+                "drivers.dividend_payout_ratio": gen.Field(
+                    "drivers.dividend_payout_ratio", None, gen.MISSING, "年报里没有"
+                ),
+            },
+            notes=["报表年度 2025 年"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture(tmp)
+            draft.save(base / gen.DRAFT_NAME)
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                _, _, raw = self.get("/api/plan/draft?company=000661")
+            payload = json.loads(raw)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["groups"][gen.DERIVED]), 1)
+        self.assertEqual(len(payload["groups"][gen.DEFAULT]), 1)
+        self.assertEqual(payload["missing"], ["drivers.dividend_payout_ratio"])
+        self.assertEqual(payload["notes"], ["报表年度 2025 年"])
+
+    def test_改过的值落进草稿(self) -> None:
+        draft = gen.Draft(
+            company={"name": "长春高新", "code": "000661"},
+            fields={
+                "drivers.dividend_payout_ratio": gen.Field(
+                    "drivers.dividend_payout_ratio", None, gen.MISSING, "年报里没有"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture(tmp)
+            draft.save(base / gen.DRAFT_NAME)
+            body = json.dumps(
+                {"company": "000661", "fields": {"drivers.dividend_payout_ratio": "0.415"}}
+            ).encode()
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                _, _, raw = self.post("/api/plan/draft", body)
+            payload = json.loads(raw)
+            saved = json.loads((base / gen.DRAFT_NAME).read_text(encoding="utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["missing"], [])
+        # 字符串 "0.415" 要变成数字 —— 否则配置层读出来是字符串，一路错到估值
+        self.assertEqual(saved["fields"]["drivers.dividend_payout_ratio"]["value"], 0.415)
+        self.assertEqual(saved["fields"]["drivers.dividend_payout_ratio"]["status"], "human")
+
+    def test_清空一个字段会被标成没填(self) -> None:
+        draft = gen.Draft(
+            company={"name": "长春高新", "code": "000661"},
+            fields={"drivers.tax_rate": gen.Field("drivers.tax_rate", 0.25, gen.DEFAULT, "法定税率")},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture(tmp)
+            draft.save(base / gen.DRAFT_NAME)
+            body = json.dumps({"company": "000661", "fields": {"drivers.tax_rate": ""}}).encode()
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                _, _, raw = self.post("/api/plan/draft", body)
+            payload = json.loads(raw)
+        self.assertEqual(payload["missing"], ["drivers.tax_rate"])
+
+    def test_公司代码不能越界(self) -> None:
+        """目录名就是代码，必须挡住 ../ 这类输入 —— 这是能写文件的接口。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                body = json.dumps({"target_code": "../evil"}).encode()
+                code, _, raw = self.post("/api/plan", body)
+            payload = json.loads(raw)
+        self.assertEqual(code, 409)
+        self.assertFalse(payload["ok"])
+        self.assertFalse((Path(tmp) / "evil").exists())
+
+    def test_没有草稿时不许起估值子进程(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(tmp)
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                code, _, raw = self.post(
+                    "/api/ingest/run", json.dumps({"company": "000661"}).encode()
+                )
+            payload = json.loads(raw)
+        self.assertEqual(code, 409)
+        self.assertIn("假设草稿", payload["error"])
+
+    def test_名称检索失败也告诉人原因(self) -> None:
+        """检索要联网。断网时不能让界面卡住或报一个看不懂的错。"""
+        # 要 patch **resolve 模块里那个名字**：它在导入时就把 post_form 绑进了自己的
+        # 命名空间，改 http.post_form 影响不到它（有网的环境下这条会假通过）。
+        from finai_web import http as web_http
+        from finai_web import resolve as resolve_mod
+
+        with mock.patch.object(
+            resolve_mod, "post_form", side_effect=web_http.HttpError("连接超时")
+        ):
+            code, _, raw = self.post("/api/resolve", json.dumps({"keyword": "长春高新"}).encode())
+        payload = json.loads(raw)
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertIn("长春高新", payload["error"])
 
 
 class TestIngest(WebTestBase):

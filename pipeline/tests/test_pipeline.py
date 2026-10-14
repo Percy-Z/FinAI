@@ -230,6 +230,35 @@ class TestPathOverrides(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FINAI_TARGET_ACTUALS": "actual"}):
             self.assertTrue(config.use_target_actuals())
 
+    def test_公司目录开关把四个输入全挪进该目录(self) -> None:
+        """FINAI_COMPANY_DIR：每家公司一套输入，换公司不再互相覆盖。
+
+        这四个默认值都是**导入时**求值的（它们是函数默认参数），所以每次运行
+        必须是一个独立进程 —— 工作台靠带环境变量的子进程做到这一点。
+        漏掉任何一个，症状都是「看着跑通了，其实读的是上一家公司的数」。
+        """
+        try:
+            with mock.patch.dict(os.environ, {"FINAI_COMPANY_DIR": "data/companies/000661"}):
+                reloaded = importlib.reload(config)
+                base = Path("data/companies/000661")
+                self.assertEqual(reloaded.DEFAULT_CONFIG_PATH, base / "assumptions.toml")
+                self.assertEqual(reloaded.DEFAULT_MARKET_PATH, base / "market.csv")
+                self.assertEqual(reloaded.DEFAULT_PEER_PATH, base / "peers.csv")
+                self.assertEqual(
+                    reloaded.DEFAULT_EXTRACTED_PAYLOAD,
+                    base / "extracted" / "pipeline_input.json",
+                )
+        finally:
+            importlib.reload(config)
+
+    def test_不设公司目录时还是仓库里的演示数据(self) -> None:
+        """向后兼容：没设开关就必须与过去一致，否则已有测试会整片失败。"""
+        self.assertIsNone(config.company_dir())
+        self.assertEqual(
+            config.DEFAULT_EXTRACTED_PAYLOAD,
+            config.DATA_DIR / "extracted" / "pipeline_input.json",
+        )
+
 
 class TestConfigLoads(unittest.TestCase):
     """下面这一组断言的是仓库里的演示夹具 —— 换真实数据请用环境变量指过去。"""

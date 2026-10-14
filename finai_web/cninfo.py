@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -105,12 +107,18 @@ def query(
     *,
     code: str,
     column: str,
-    year: int,
+    year: int | None = None,
     org_id: str = "",
     page_size: int = 30,
     transport: Transport | None = None,
 ) -> list[Announcement]:
-    """查一家公司某一年的全部「年度报告」类公告（含摘要、更正等）。"""
+    """查一家公司的「年度报告」类公告（含摘要、更正等）。
+
+    `year` 是**披露年份**（2025 年年报在 2026 年披露，就传 2026），传了就给
+    seDate 加上这一年的区间。传 None 表示不限年份 —— 此时接口按披露时间倒序
+    返回，最新一份年报就在最前面，用来回答「这家最近一年出了哪份年报」
+    （2026-10-14 实测：长春高新 total=55，第一条就是 2025 年年度报告）。
+    """
     sender = transport or post_form
     stock = f"{code},{org_id}" if org_id else code
     form: dict[str, Any] = {
@@ -124,7 +132,7 @@ def query(
         "secid": "",
         "category": CATEGORY_ANNUAL_REPORT,
         "trade": "",
-        "seDate": f"{year}-01-01~{year}-12-31",
+        "seDate": f"{year}-01-01~{year}-12-31" if year else "",
         "sortName": "",
         "sortType": "",
         "isHLtitle": "true",
@@ -139,7 +147,7 @@ def query(
         payload = sender(QUERY_URL, form, headers=headers, expected=(200,))
     except HttpError as err:
         raise CninfoError(
-            f"巨潮检索失败（{code} {year}）：{err}\n"
+            f"巨潮检索失败（{code} {year or '全部年份'}）：{err}\n"
             "    常见原因：网络不可达 / 被限流。稍后重试，或改用 --url 直接给 PDF 直链。"
         ) from err
 
@@ -179,9 +187,7 @@ def pick_annual_report(
         title = item.title
         if not item.adjunct:
             continue
-        if any(word in title for word in EXCLUDE_TITLE_WORDS):
-            continue
-        if "年度报告" not in title and "年报" not in title:
+        if not looks_like_annual_report(item):
             continue
         score = 0
         if f"{year}" in title:
@@ -206,11 +212,102 @@ def candidates(announcements: Sequence[Announcement], year: int) -> list[Announc
     """按「像正文的程度」排序的全部候选，供日志与人工核对。"""
     scored: list[tuple[int, Announcement]] = []
     for item in announcements:
-        if any(word in item.title for word in EXCLUDE_TITLE_WORDS):
-            continue
-        if "年度报告" not in item.title and "年报" not in item.title:
+        if not looks_like_annual_report(item):
             continue
         score = (4 if str(year) in item.title else 0) + (3 if "年度报告" in item.title else 0)
         scored.append((score, item))
     scored.sort(key=lambda pair: -pair[0])
     return [item for _, item in scored]
+
+
+def looks_like_annual_report(item: Announcement) -> bool:
+    """标题像不像「年报正文」。
+
+    抽成一个函数是因为它有**两个**调用方：按年份打分挑（`pick_annual_report`）
+    与按披露时间取最新（`pick_latest`）。两处各写一遍过滤条件，迟早会有一处
+    忘了排掉「摘要」—— 摘要里没有完整三表，抽出来是半份数据。
+    """
+    title = item.title
+    if any(word in title for word in EXCLUDE_TITLE_WORDS):
+        return False
+    return "年度报告" in title or "年报" in title
+
+
+# 巨潮的附件路径带披露日期：finalpage/2026-04-22/1225135424.PDF
+_DATE_IN_PATH = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def disclosure_year(item: Announcement) -> int | None:
+    """这份公告的**披露年份**（不是报表所属年度）。
+
+    为什么必须是披露年份：定标清单里的 `years` 一直就是披露年份的口径
+    （2025 年年报在 2026 年披露，写 2026），检索接口的 seDate 也按披露日期过滤。
+    两种格式都认：附件路径里的日期优先，退到 announcementTime（毫秒时间戳）。
+    两个都认不出来时返回 None —— 宁可不填，也不猜一个年份出来。
+    """
+    match = _DATE_IN_PATH.search(str(item.adjunct or ""))
+    if match:
+        return int(match.group(1))
+    raw = str(item.date or "").strip()
+    if raw.isdigit() and len(raw) >= 10:
+        try:
+            return datetime.fromtimestamp(int(raw[:13]) / 1000).year
+        except (OverflowError, OSError, ValueError):
+            return None
+    match = re.search(r"(19|20)\d{2}", raw)
+    return int(match.group(0)) if match else None
+
+
+def _date_key(item: Announcement) -> tuple[int, int]:
+    """排序用的披露时间。时间戳拿不到就退回附件路径里的日期。"""
+    raw = str(item.date or "").strip()
+    if raw.isdigit() and len(raw) >= 10:
+        return int(raw[:13]), 0
+    match = _DATE_IN_PATH.search(str(item.adjunct or ""))
+    if match:
+        try:
+            return int(datetime.strptime(match.group(0), "%Y-%m-%d").timestamp() * 1000), 0
+        except ValueError:
+            return 0, 0
+    return 0, 0
+
+
+def pick_latest(announcements: Sequence[Announcement]) -> Announcement | None:
+    """不限年份检索时，挑出最近披露的那份年报正文。
+
+    与 `pick_annual_report` 的分工：那个是「给定年份，挑最像这一年的正文」，
+    靠标题打分；这个是「不知道年份，先问接口有哪些，再按披露时间取最新」。
+    有了它，定标清单里的 `years` 就不用人工填了。
+    """
+    items = [
+        item for item in announcements if item.adjunct and looks_like_annual_report(item)
+    ]
+    if not items:
+        return None
+    items.sort(
+        key=lambda item: (_date_key(item), item.adjunct.upper().endswith(".PDF")),
+        reverse=True,
+    )
+    return items[0]
+
+
+def latest_annual_reports(
+    *,
+    code: str,
+    column: str,
+    org_id: str = "",
+    page_size: int = 10,
+    transport: Transport | None = None,
+) -> list[Announcement]:
+    """不限年份检索，按披露时间倒序返回年报类公告（最新的在最前）。"""
+    found = query(
+        code=code,
+        column=column,
+        year=None,
+        org_id=org_id,
+        page_size=page_size,
+        transport=transport,
+    )
+    items = [item for item in found if looks_like_annual_report(item)]
+    items.sort(key=lambda item: _date_key(item), reverse=True)
+    return items

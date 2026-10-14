@@ -28,7 +28,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -36,7 +38,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .console import safe_console
 
@@ -47,6 +49,9 @@ LOGS_ROOT = REPO_ROOT / "logs"
 # 不存在时仍然回落到下面那份内置的 _PAGE，保证旧路径随时可用。
 WEB_ROOT = REPO_ROOT / "web"
 DEFAULT_PORT = 8770
+# 每家公司一个目录（见 finai_web/config.py 的 FINAI_COMPANY_DIR）：
+# 工作台里选中的「当前公司」就是这里的一个子目录。
+COMPANIES_ROOT = REPO_ROOT / "data" / "companies"
 
 
 class RunState:
@@ -60,6 +65,12 @@ class RunState:
         self.lock = threading.Lock()
         self.running = False
         self.run_id: str | None = None
+        # 当前跑的是「取数」还是「估值」：两者的进度都来自 trace.jsonl，
+        # 但取数写在 logs/<任务号>/ 下、估值写在 logs/<运行编号>/ 下。
+        self.phase = ""
+        self.job_id: str | None = None
+        self.job_returncode: int | None = None
+        self.job_log = ""
         self.started_at: float = 0.0
         self.finished_at: float = 0.0
         self.error: str = ""
@@ -67,7 +78,9 @@ class RunState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            steps = _read_trace(self.run_id) if self.run_id else []
+            # 取数阶段看任务号，估值阶段看运行编号 —— 界面不必关心这个区别
+            active = self.job_id if self.phase == "plan" else self.run_id
+            steps = _read_trace(active) if active else []
             elapsed = (
                 (self.finished_at or time.time()) - self.started_at
                 if self.started_at
@@ -76,6 +89,10 @@ class RunState:
             return {
                 "running": self.running,
                 "run_id": self.run_id,
+                "phase": self.phase,
+                "job_id": self.job_id,
+                "job_returncode": self.job_returncode,
+                "job_log": self.job_log,
                 "elapsed_s": round(elapsed, 1),
                 "error": self.error,
                 "last_run": self.last_run,
@@ -426,7 +443,7 @@ def _peer_values(peers: Any, code: str) -> dict[str, float]:
     }
 
 
-def _ingest_payload() -> dict[str, Any]:
+def _ingest_payload(paths: Any = None) -> dict[str, Any]:
     """取数层现状：定标清单、年报 PDF、抽取记录、数值出处、行情表校验。
 
     这一页是**只读**的：它把现状摊开，并说清下一步该敲哪条命令。下载与抽取要联网、
@@ -434,6 +451,10 @@ def _ingest_payload() -> dict[str, Any]:
 
     读的全是本地文件（都在 data/、config/ 下），不发任何网络请求。
     取数层用延迟导入：pipeline 不该在导入期依赖 finai_web，缺了也得能打开界面。
+
+    `paths` 指定读哪一套文件（`finai_web.config.Paths`）。工作台可以按「当前选中的
+    公司」传 `Paths.for_company(...)` 进来 —— 模块级的 `PATHS` 是进程启动那一刻定死的，
+    它不会跟着界面上的选择变。不传就沿用模块级 `PATHS`（= 老行为）。
     """
     payload: dict[str, Any] = {
         "available": False,
@@ -475,17 +496,18 @@ def _ingest_payload() -> dict[str, Any]:
     payload["available"] = True
     payload["source"]["env_var"] = DATA_SOURCE_ENV
     payload["source"]["active"] = data_source()
+    paths = paths or PATHS
 
     # ── 定标公司清单 ────────────────────────────────────────────────
     targets: list[Any] = []
     target_error = ""
     try:
-        targets = targets_mod.read_targets(required=False)
+        targets = targets_mod.read_targets(paths.targets_csv, required=False)
     except Exception as err:  # noqa: BLE001 - 清单写错了也要能把界面打开
         target_error = str(err)
     payload["targets"] = {
-        "path": _rel(PATHS.targets_csv),
-        "exists": PATHS.targets_csv.is_file(),
+        "path": _rel(paths.targets_csv),
+        "exists": paths.targets_csv.is_file(),
         "template": _rel(PATHS.targets_example),
         "template_exists": PATHS.targets_example.is_file(),
         "count": len(targets),
@@ -504,14 +526,14 @@ def _ingest_payload() -> dict[str, Any]:
 
     # ── 下好的年报 PDF ──────────────────────────────────────────────
     pdf_items: list[dict[str, Any]] = []
-    if PATHS.raw_pdf.is_dir():
-        for path in sorted(PATHS.raw_pdf.glob("*.pdf")):
+    if paths.raw_pdf.is_dir():
+        for path in sorted(paths.raw_pdf.glob("*.pdf")):
             code, year = _split_pdf_name(path.stem)
             pdf_items.append(
                 {"file": path.name, "code": code, "year": year, "bytes": path.stat().st_size}
             )
     payload["pdfs"] = {
-        "dir": _rel(PATHS.raw_pdf),
+        "dir": _rel(paths.raw_pdf),
         "count": len(pdf_items),
         "items": pdf_items,
     }
@@ -519,7 +541,7 @@ def _ingest_payload() -> dict[str, Any]:
     # ── 下载清单：每份 PDF 的来源 URL 与 sha256 ─────────────────────
     manifest: dict[str, Any] = {}
     try:
-        manifest = load_manifest()
+        manifest = load_manifest(paths.manifest_json)
     except Exception:  # noqa: BLE001 - 清单损坏不该让整页打不开
         manifest = {}
     raw_entries = manifest.get("entries") if isinstance(manifest, dict) else None
@@ -542,7 +564,7 @@ def _ingest_payload() -> dict[str, Any]:
             }
         )
     payload["downloads"] = {
-        "path": _rel(PATHS.manifest_json),
+        "path": _rel(paths.manifest_json),
         "count": len(downloads),
         "updated_at": str(manifest.get("updated_at") or "") if isinstance(manifest, dict) else "",
         "items": downloads,
@@ -550,8 +572,8 @@ def _ingest_payload() -> dict[str, Any]:
 
     # ── 抽取记录：每个科目的值、页码与原文 ──────────────────────────
     records: list[dict[str, Any]] = []
-    if PATHS.extracted.is_dir():
-        for path in sorted(PATHS.extracted.glob("*.json")):
+    if paths.extracted.is_dir():
+        for path in sorted(paths.extracted.glob("*.json")):
             # 汇总文件由下一段单独读，避免同一份数据出现两次、说法还可能不一致
             if path.name == "pipeline_input.json":
                 continue
@@ -600,13 +622,13 @@ def _ingest_payload() -> dict[str, Any]:
                 }
             )
     payload["records"] = {
-        "dir": _rel(PATHS.extracted),
+        "dir": _rel(paths.extracted),
         "count": len(records),
         "items": records,
     }
 
     # ── 流水线输入：每个科目是「读到的」还是「倒挤的」 ──────────────
-    input_path = PATHS.pipeline_input
+    input_path = paths.pipeline_input
     info: dict[str, Any] = {
         "path": _rel(input_path),
         "exists": input_path.is_file(),
@@ -658,7 +680,7 @@ def _ingest_payload() -> dict[str, Any]:
     payload["pipeline_input"] = info
 
     # ── 行情表：股价与股本要人工从 Wind / Choice 导出，这里只报校验结论 ──
-    market_path = PATHS.market_csv
+    market_path = paths.market_csv
     market_info: dict[str, Any] = {
         "path": _rel(market_path),
         "exists": market_path.is_file(),
@@ -694,6 +716,178 @@ def _ingest_payload() -> dict[str, Any]:
     return payload
 
 
+# ── 每家公司一个目录：界面上的「当前公司」 ───────────────────────────
+
+
+def _paths_for(directory: Path) -> Any:
+    """按某家公司目录构造一套路径（取数层是兄弟包，延迟导入）。
+
+    不能直接用模块级 `PATHS`：它是工作台进程启动那一刻定死的，不会跟着界面上的选择变。
+    """
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from finai_web.config import Paths
+
+    return Paths.for_company(directory)
+
+
+def _company_target(code: str) -> Path:
+    """公司目录路径（可能还不存在 —— 取数时才创建）。目录名就是代码，必须防越界。"""
+    text = str(code or "").strip()
+    if not text or text in {".", ".."} or "/" in text or "\\" in text or ":" in text:
+        raise ValueError(f"不合法的公司代码：{code!r}")
+    return COMPANIES_ROOT / text
+
+
+def _company_dir(code: str) -> Path | None:
+    """已存在的公司目录；没有返回 None。"""
+    try:
+        candidate = _company_target(code)
+    except ValueError:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _company_info(directory: Path) -> dict[str, Any]:
+    """一家公司在界面上要显示的现状。"""
+    code = directory.name
+    name = ""
+    peers: list[str] = []
+    years: list[int] = []
+    raw = _read_json_file(directory / "company.json")
+    if isinstance(raw, dict):
+        target = raw.get("target")
+        if isinstance(target, dict):
+            code = str(target.get("code") or code)
+            name = str(target.get("name") or "")
+            years = [int(year) for year in (target.get("years") or []) if str(year).isdigit()]
+        peers = [
+            str(item.get("code"))
+            for item in (raw.get("peers") or [])
+            if isinstance(item, dict) and item.get("code")
+        ]
+    missing: list[str] = []
+    draft = _read_json_file(directory / "assumptions.draft.json")
+    if isinstance(draft, dict):
+        fields = draft.get("fields")
+        if isinstance(fields, dict):
+            missing = [
+                str(key)
+                for key, item in fields.items()
+                if isinstance(item, dict) and item.get("value") is None
+            ]
+    extracted = directory / "extracted"
+    return {
+        "code": code,
+        "name": name,
+        "dir": _rel(directory),
+        "peers": peers,
+        "years": years,
+        "has_profile": (directory / "company.json").is_file(),
+        "has_draft": (directory / "assumptions.draft.json").is_file(),
+        "has_assumptions": (directory / "assumptions.toml").is_file(),
+        "has_market": (directory / "market.csv").is_file(),
+        "pdfs": len(list((directory / "raw_pdf").glob("*.pdf")))
+        if (directory / "raw_pdf").is_dir()
+        else 0,
+        "records": len(
+            [
+                item
+                for item in extracted.glob("*.json")
+                if item.name not in {"pipeline_input.json", "peers.csv"}
+            ]
+        )
+        if extracted.is_dir()
+        else 0,
+        "missing": missing,
+    }
+
+
+def _list_companies() -> list[dict[str, Any]]:
+    if not COMPANIES_ROOT.is_dir():
+        return []
+    return [
+        _company_info(path)
+        for path in sorted(COMPANIES_ROOT.iterdir())
+        if path.is_dir() and not path.name.startswith(".")
+    ]
+
+
+def _coerce(value: Any) -> Any:
+    """确认屏传回来的值：空串就是「没填」，数字串变数字，其余原样。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, list):
+        return [_coerce(item) for item in value]
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _draft_payload(code: str) -> dict[str, Any]:
+    """假设草稿 → 确认屏要的形状：按状态分组，每组里带出处。"""
+    directory = _company_dir(code)
+    if directory is None:
+        return {
+            "ok": False,
+            "error": f"没有这家公司：{code}（data/companies/ 下没有这个目录）",
+        }
+    from . import assumptions_gen as gen
+
+    draft_path, assumptions = gen.default_paths(directory)
+    if not draft_path.is_file():
+        return {
+            "ok": False,
+            "company": _company_info(directory),
+            "error": f"还没有假设草稿（{_rel(draft_path)}）—— 先跑一次取数",
+        }
+    draft = gen.Draft.load(draft_path)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for status in (gen.DERIVED, gen.DEFAULT, gen.KEPT, gen.MISSING, "human"):
+        groups[status] = [
+            {"key": key, "value": item.value, "source": item.source}
+            for key, item in draft.fields.items()
+            if item.status == status
+        ]
+    return {
+        "ok": True,
+        "company": _company_info(directory),
+        "company_info": draft.company,
+        "normalized": draft.normalized,
+        "notes": draft.notes,
+        "generated_at": draft.generated_at,
+        "missing": gen.missing_fields(draft),
+        "groups": groups,
+        "draft_path": _rel(draft_path),
+        "assumptions_path": _rel(assumptions),
+    }
+
+
+def _tail(path: Path, lines: int = 25) -> str:
+    """子进程日志的末尾几行。失败时界面要能说清原因，而不是只报一个退出码。"""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    rows = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(rows[-lines:])
+
+
 def _initial_state() -> RunState:
     """初始状态指向最近一次运行 —— 打开界面就该看到上一次的结果，
     而不是一片空白等着人点按钮。第一次使用时没有历史运行，保持空。
@@ -721,6 +915,7 @@ def _start_run() -> str:
         if STATE.running:
             raise RuntimeError("已经有一次运行在进行中")
         STATE.running = True
+        STATE.phase = "run"
         STATE.run_id = run_id
         STATE.started_at = time.time()
         STATE.finished_at = 0.0
@@ -740,6 +935,77 @@ def _start_run() -> str:
 
     threading.Thread(target=worker, daemon=True).start()
     return run_id
+
+
+def _start_company_job(phase: str, code: str, extra: list[str] | None = None) -> str:
+    """起一个带公司目录环境变量的子进程：取数（plan）或估值（run）。
+
+    为什么必须是子进程：两个 config.py 的路径都是**导入时**读环境变量的，
+    而工作台是长期运行的进程 —— 在同一进程里换公司就得改那批模块级默认值。
+    子进程还有一个好处：进度机制一行都不用改，它照旧写 logs/<编号>/trace.jsonl。
+    """
+    from . import job as job_mod
+
+    directory = _company_target(code)
+    job_id = job_mod.new_job_id()
+    with STATE.lock:
+        if STATE.running:
+            raise RuntimeError("已经有一次任务在进行中，等它跑完再点")
+        STATE.running = True
+        STATE.phase = phase
+        STATE.job_id = job_id
+        STATE.started_at = time.time()
+        STATE.finished_at = 0.0
+        STATE.error = ""
+        STATE.job_returncode = None
+        if phase == "run":
+            # 估值的轨迹写在运行编号下，界面照旧按 runs/<编号>/ 找产物
+            STATE.run_id = job_id
+
+    env = dict(os.environ)
+    env.update(job_mod.company_env(directory))
+    log_dir = LOGS_ROOT / job_id
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "job.log"
+    argv = [sys.executable, "-m", "pipeline.job", phase, "--company-dir", str(directory)]
+    if phase == "plan":
+        argv += ["--job-id", job_id, *(extra or [])]
+    else:
+        argv += ["--run-id", job_id]
+
+    handle = log_path.open("wb")
+    try:
+        process = subprocess.Popen(  # noqa: S603 - 命令是代码拼的固定参数，不经 shell
+            argv,
+            cwd=str(REPO_ROOT),
+            env=env,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as err:
+        handle.close()
+        with STATE.lock:
+            STATE.running = False
+            STATE.error = f"起子进程失败：{err}"
+        raise RuntimeError(f"起子进程失败：{err}") from err
+
+    def watch() -> None:
+        returncode = process.wait()
+        handle.close()
+        with STATE.lock:
+            STATE.running = False
+            STATE.finished_at = time.time()
+            STATE.job_returncode = returncode
+            STATE.job_log = _rel(log_path)
+            if returncode == 0:
+                if phase == "run":
+                    STATE.last_run = job_id
+            else:
+                STATE.error = _tail(log_path) or f"子进程退出码 {returncode}"
+
+    threading.Thread(target=watch, daemon=True).start()
+    return job_id
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -766,6 +1032,26 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, payload: Any, code: int = 200) -> None:
         self._send(code, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
+    def _read_json(self) -> dict[str, Any]:
+        """读 POST 的 JSON 体。读不出来就当成空字典 —— 参数缺失由各端点自己说清。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _query(self) -> dict[str, str]:
+        """查询串 → 单值字典（只取第一个值）。"""
+        parsed = parse_qs(urlparse(self.path).query)
+        return {key: values[0] for key, values in parsed.items() if values}
+
     def _html(self, text: str, code: int = 200) -> None:
         self._send(code, text.encode("utf-8"), "text/html; charset=utf-8")
 
@@ -789,8 +1075,31 @@ class Handler(BaseHTTPRequestHandler):
             self._json(payload)
             return
         if path == "/api/ingest":
-            # 只读：取数页只看现状，下载与抽取留在命令行（见 _ingest_payload）
-            self._json(_ingest_payload())
+            # 只读：取数页摊开现状；下载与抽取要人点确认后才起子进程（见 /api/plan）
+            #
+            # ?company=<代码> 决定看哪家公司 —— 传了就读那家公司目录里的文件，
+            # 不传还是老行为（仓库 data/ 下那套平铺的演示数据）。
+            code = self._query().get("company", "")
+            directory = _company_dir(code) if code else None
+            if directory is not None:
+                payload = _ingest_payload(_paths_for(directory))
+                payload["company"] = _company_info(directory)
+                self._json(payload)
+            else:
+                self._json(_ingest_payload())
+            return
+        if path == "/api/companies":
+            self._json(
+                {
+                    "ok": True,
+                    "dir": _rel(COMPANIES_ROOT),
+                    "exists": COMPANIES_ROOT.is_dir(),
+                    "companies": _list_companies(),
+                }
+            )
+            return
+        if path == "/api/plan/draft":
+            self._json(_draft_payload(self._query().get("company", "")))
             return
         if path.startswith("/web/"):
             self._serve_under(WEB_ROOT, path, "/web/")
@@ -827,6 +1136,89 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": str(err)}, 409)
                 return
             self._json({"ok": True, "run_id": run_id})
+            return
+        if path == "/api/resolve":
+            # 按名称检索公司（联网，只读）。返回全部候选交给界面点选 ——
+            # 「长春」会匹配到三家，替用户挑就是替用户做决定。
+            body = self._read_json()
+            keyword = str(body.get("keyword") or "")
+            try:
+                from . import job as job_mod
+
+                resolve = job_mod._ingest()["resolve"]
+                self._json({"ok": True, **resolve.resolve(keyword).to_dict()})
+            except Exception as err:  # noqa: BLE001 - 检索失败要原样告诉人
+                self._json({"ok": False, "keyword": keyword, "error": str(err)}, 200)
+            return
+        if path == "/api/plan":
+            body = self._read_json()
+            code = str(body.get("target_code") or body.get("company") or "")
+            extra: list[str] = []
+            if body.get("keyword"):
+                extra += ["--target", str(body["keyword"])]
+            if body.get("target_code"):
+                extra += ["--target-code", str(body["target_code"])]
+            for peer in body.get("peers") or []:
+                if str(peer).strip():
+                    extra += ["--peer", str(peer).strip()]
+            if body.get("as_of"):
+                extra += ["--as-of", str(body["as_of"])]
+            if body.get("force"):
+                extra += ["--force"]
+            try:
+                job_id = _start_company_job("plan", code, extra)
+            except (ValueError, RuntimeError) as err:
+                self._json({"ok": False, "error": str(err)}, 409)
+                return
+            self._json({"ok": True, "job_id": job_id, "phase": "plan"})
+            return
+        if path == "/api/plan/draft":
+            # 确认屏上改的值直接落到草稿里 —— 草稿是「人确认过的假设」的唯一出处，
+            # 估值那一步只读它。
+            from . import assumptions_gen as gen
+
+            body = self._read_json()
+            directory = _company_dir(str(body.get("company") or ""))
+            if directory is None:
+                self._json({"ok": False, "error": "没有这家公司"}, 404)
+                return
+            draft_path, _ = gen.default_paths(directory)
+            if not draft_path.is_file():
+                self._json({"ok": False, "error": "还没有假设草稿，先跑一次取数"}, 404)
+                return
+            draft = gen.Draft.load(draft_path)
+            changed: list[str] = []
+            for key, raw_value in (body.get("fields") or {}).items():
+                if key not in draft.fields:
+                    continue
+                value = _coerce(raw_value)
+                if value is None:
+                    draft.fields[key] = gen.Field(key, None, gen.MISSING, "清空了，需要填")
+                else:
+                    draft.set_value(key, value, source="在确认屏上改的")
+                changed.append(str(key))
+            draft.save(draft_path)
+            self._json(
+                {"ok": True, "changed": changed, "missing": gen.missing_fields(draft)}
+            )
+            return
+        if path == "/api/ingest/run":
+            body = self._read_json()
+            code = str(body.get("company") or body.get("target_code") or "")
+            directory = _company_dir(code)
+            if directory is None or not (directory / "assumptions.draft.json").is_file():
+                # 没有草稿就直接拦下：起一个注定失败的子进程只会让人等一分钟再看到错误
+                self._json(
+                    {"ok": False, "error": "这家公司还没有假设草稿 —— 先在界面上跑一次取数"},
+                    409,
+                )
+                return
+            try:
+                job_id = _start_company_job("run", code)
+            except (ValueError, RuntimeError) as err:
+                self._json({"ok": False, "error": str(err)}, 409)
+                return
+            self._json({"ok": True, "run_id": job_id, "phase": "run"})
             return
         self._json({"ok": False, "error": "未知接口"}, 404)
 
