@@ -23,7 +23,7 @@ import argparse
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from . import adapter, cninfo, extract, market, schema
 from . import targets as targets_mod
@@ -219,9 +219,11 @@ def cmd_extract(args: argparse.Namespace) -> int:
         if record.get("peer") is None:
             flags.append("可比指标拼不出")
         tail = "  ⚠️ " + "、".join(flags) if flags else ""
+        years = record.get("years") or []
+        year_note = f"  多年列示 {'/'.join(str(y) for y in years)}" if years else "  未取到多年列示"
         print(
             f"  ✓ {code} {year}  {len(record.get('accounts', {}))} 个科目  "
-            f"缺 {len(record.get('missing_accounts', []))} 个{tail}"
+            f"缺 {len(record.get('missing_accounts', []))} 个{year_note}{tail}"
         )
         for note in (record.get("notes") or [])[:2]:
             print(f"      {note}")
@@ -379,6 +381,153 @@ def cmd_placeholders(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_series(args: argparse.Namespace) -> int:
+    """打印多年列示：报表有几年就列几年，供核对与填 drivers 用。"""
+    records = extract.load_records()
+    if not records:
+        print(f"{PATHS.extracted} 下没有抽取记录。先跑 `python -m finai_web extract`。")
+        return 1
+    wanted = args.code.split(",") if args.code else None
+    shown = 0
+    for record in sorted(records, key=lambda item: str(item.get("code"))):
+        code = str(record.get("code") or "")
+        if wanted and code not in wanted:
+            continue
+        series = record.get("series") or {}
+        years = record.get("years") or []
+        if not years or not series:
+            print(f"{code} {record.get('year')}：这份记录没有多年列示"
+                  "（可能是扫描件，或 PDF 解析后端不给词坐标）")
+            continue
+        shown += 1
+        history = adapter.history_from(record)
+        growth = history["revenue_growth"]
+        print(f"\n{code}  货币={record.get('currency') or '未知'}  "
+              f"期末={record.get('period_end') or '未知'}  年份={', '.join(str(y) for y in years)}")
+        header = f"{'科目':<30}" + "".join(f"{str(year):>16}" for year in years)
+        print(header)
+        print("-" * len(header))
+        names = sorted(series) if args.all else [name for name in ("revenue", "net_profit_attributable",
+                                                                   "total_assets", "total_liabilities",
+                                                                   "equity_attributable", "cash") if name in series]
+        for name in names:
+            row = series[name]
+            cells = "".join(
+                f"{(row[str(year)]['value_yuan'] / 1e6):>16,.0f}" if str(year) in row else f"{'—':>16}"
+                for year in years
+            )
+            print(f"{name:<30}{cells}")
+        print("（金额单位为百万，与年报一致；加 --all 看全部科目）")
+        if growth:
+            pretty = "、".join(f"{year} 年 {value:+.2%}" for year, value in sorted(growth.items()))
+            print(f"历史收入增速：{pretty}   ← 可直接参考填 [drivers].revenue_growth")
+    if not shown:
+        print("没有可显示的多年列示记录")
+        return 1
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """体检抽取结果：单列 vs 多年 vs 出处页码，找自相矛盾的地方。
+
+    换一份新年报时先跑这个 —— 抽取「跑通了」不等于「数对」，
+    这里查的正是那种「跑通但数错」的情况。
+    """
+    records = extract.load_records()
+    if not records:
+        print(f"{PATHS.extracted} 下没有抽取记录。先跑 `python -m finai_web extract`。")
+        return 1
+    wanted = args.code.split(",") if args.code else None
+    total_problems = 0
+    for record in sorted(records, key=lambda item: str(item.get("code"))):
+        code = str(record.get("code") or "")
+        if wanted and code not in wanted:
+            continue
+        accounts = record.get("accounts") or {}
+        series = record.get("series") or {}
+        years = record.get("years") or []
+        problems: list[str] = []
+
+        # 1) 单列结果与多年最新一年必须一致（两条路径对不上 = 有一处在乱取）
+        for name, item in accounts.items():
+            if years and str(years[0]) in (series.get(name) or {}):
+                latest = series[name][str(years[0])]["value_yuan"]
+                if abs(latest - float(item.get("value_yuan", 0.0))) > 1.0:
+                    problems.append(
+                        f"{name}：单列 {item.get('value_yuan'):,.0f}（第 {item.get('page')} 页）"
+                        f" ≠ 多年最新一年 {latest:,.0f}"
+                    )
+
+        # 2) 科目出处必须是「它所属的那种报表页」
+        for name, item in accounts.items():
+            page = int(item.get("page") or 0)
+            section = schema.ACCOUNT_BY_NAME[name].section if name in schema.ACCOUNT_BY_NAME else ""
+            kinds = _page_kinds_of(record, page)
+            if section and kinds and section not in kinds:
+                problems.append(
+                    f"{name}：取自第 {page} 页（{sorted(kinds)} 页），但科目属于 {section}"
+                )
+
+        # 3) 基期资产负债表必须配平
+        opening = record.get("opening_balance")
+        gap = None
+        if isinstance(opening, Mapping):
+            values = opening.get("values") or {}
+            assets = sum(values.get(key, 0.0) for key in schema.OPENING_FIELDS[:5])
+            liabilities = (
+                values.get("accounts_payable", 0.0)
+                + values.get("interest_bearing_debt", 0.0)
+                + values.get("other_non_current_liabilities", 0.0)
+            )
+            equity = (
+                values.get("share_capital", 0.0)
+                + values.get("retained_earnings", 0.0)
+                + values.get("minority_equity", 0.0)
+            )
+            gap = assets - liabilities - equity
+            if abs(gap) > 1.0:
+                problems.append(f"基期资产负债表不平衡，差额 {gap:,.2f}")
+
+        head = (
+            f"{code} {record.get('year')}  货币={record.get('currency') or '未知'}  "
+            f"期末={record.get('period_end') or '未知'}  多年={years or '无'}  "
+            f"科目={len(accounts)}"
+            + (f"  配平差额={gap:,.0f}" if gap is not None else "")
+        )
+        print(f"\n{head}")
+        if problems:
+            total_problems += len(problems)
+            for line in problems:
+                print(f"  ✗ {line}")
+        else:
+            print("  ✓ 单列/多年/出处互相一致，基期配平")
+        for note in record.get("notes") or []:
+            print(f"  ! {note[:120]}")
+    print(f"\n结论：{total_problems} 个需要核对的问题")
+    return 1 if total_problems else 0
+
+
+def _page_kinds_of(record: Mapping[str, Any], page: int) -> set[str]:
+    """回读该记录对应的 PDF，取第 page 页的报表类型（读不到就返回空集）。"""
+    if not page:
+        return set()
+    path = Path(str(record.get("pdf") or ""))
+    if not path.is_file():
+        return set()
+    cached = _KINDS_CACHE.get(str(path))
+    if cached is None:
+        try:
+            pages = extract.read_pdf(path).pages
+        except Exception:  # noqa: BLE001 - 体检不该因为读不到 PDF 就中断
+            return set()
+        cached = [extract._page_kinds(extract.normalize_text(text)) for text in pages]
+        _KINDS_CACHE[str(path)] = cached
+    return cached[page - 1] if 1 <= page <= len(cached) else set()
+
+
+_KINDS_CACHE: dict[str, list[set[str]]] = {}
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """fetch + extract + build。等价于依次跑三条命令，少敲两次。"""
     failed: list[str] = []
@@ -461,6 +610,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_market.set_defaults(func=cmd_market)
 
     sub.add_parser("placeholders", help="列出可用占位符").set_defaults(func=cmd_placeholders)
+
+    p_series = sub.add_parser("series", help="查看多年列示（报表有几年列几年）")
+    p_series.add_argument("--code", default=None, help="只看这些代码，逗号分隔")
+    p_series.add_argument("--all", action="store_true", help="列出全部科目（默认只看 6 个关键项）")
+    p_series.set_defaults(func=cmd_series)
+
+    p_audit = sub.add_parser("audit", help="体检抽取结果：找自相矛盾的地方")
+    p_audit.add_argument("--code", default=None, help="只看这些代码，逗号分隔")
+    p_audit.set_defaults(func=cmd_audit)
 
     p_run = sub.add_parser("run", help="fetch + extract + build")
     _add_fetch_args(p_run)

@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -80,6 +80,21 @@ def detect_currency(pages: Sequence[str]) -> str:
     return ""
 
 
+# CID 码：PDF 字体缺少 ToUnicode 映射时，抽取器只能给出字符编号，
+# 形如 (cid:14062)。这不是「文字层缺失」，而是「文字层不可用」——
+# 本地解析再怎么换库也救不回来，只能 OCR 或走云端解析（Firecrawl）。
+_CID_TOKEN = re.compile(r"\(cid:\d+\)")
+
+
+def cid_ratio(pages: Sequence[str]) -> float:
+    """CID 码字符占总字符的比例。0 表示正常，接近 1 表示文字层不可用。"""
+    total = sum(len(page) for page in pages)
+    if not total:
+        return 0.0
+    cid_chars = sum(len(match.group(0)) for page in pages for match in _CID_TOKEN.finditer(page))
+    return cid_chars / total
+
+
 # 报表期末（会计期间截止日）。为什么需要它：
 #   美国公司的财年不是自然年（Apple FY2025 止于 2025-09-27），
 #   只写「2025A」会让人以为口径是 2025-12-31，和从 Wind/Choice 导出的
@@ -93,6 +108,10 @@ _PERIOD_END_EN = re.compile(
     re.IGNORECASE,
 )
 _PERIOD_END_CN = re.compile(r"(\d{4})\s*年\s*12\s*月\s*31\s*日")
+# 中文数字日期：二零二五年十二月三十一日（港交所/台湾年报写法）
+_PERIOD_END_CJK = re.compile(
+    r"([〇零一二三四五六七八九]{4})年([一二三四五六七八九十]{1,3})月([一二三四五六七八九十]{1,3})日"
+)
 _MONTH_NUMBERS = {
     "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
     "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
@@ -110,6 +129,32 @@ def detect_period_end(pages: Sequence[str]) -> str:
     match = _PERIOD_END_CN.search(joined)
     if match:
         return f"{int(match.group(1)):04d}-12-31"
+    match = _PERIOD_END_CJK.search(joined)
+    if match:
+        # 中文日期在一份年报里会出现很多次（股东会日期、报告日期…），
+        # 第一个不一定是期末。按上下文选：前面有「於/截至」、后面跟「止年度」的，
+        # 以及 12 月 31 日的，优先。
+        best: tuple[int, str] | None = None
+        for candidate in _PERIOD_END_CJK.finditer(joined):
+            year = cjk_digits_to_year(candidate.group(1))
+            month = cjk_number(candidate.group(2))
+            day = cjk_number(candidate.group(3))
+            if not (year and month and day):
+                continue
+            prefix = joined[max(0, candidate.start() - 6) : candidate.start()]
+            suffix = joined[candidate.end() : candidate.end() + 4]
+            score = 0
+            if any(word in prefix for word in ("於", "于", "截至")):
+                score += 2
+            if any(word in suffix for word in ("止年度", "止期间", "结算", "結算")):
+                score += 2
+            if month == 12 and day == 31:
+                score += 1
+            value = f"{year:04d}-{month:02d}-{day:02d}"
+            if best is None or score > best[0]:
+                best = (score, value)
+        if best is not None:
+            return best[1]
     return ""
 
 # 一行里的数字：千分位、小数、括号负数（财报惯例）
@@ -117,6 +162,70 @@ _NUMBER = re.compile(r"\(?-?\d[\d,]*\.?\d*\)?")
 
 # 这些词跟在科目名后面时说明这行是衍生指标（「应收账款周转率」），不是报表科目
 _DERIVED_TAIL = ("率", "周转", "账龄", "占比", "比重")
+
+# 中日韩汉字范围：用来判断「标签前面是不是还有字」。
+# 例：「长短期借款」里含「短期借款」、「总股本」里含「股本」、「借款利息费用」里含「利息费用」——
+# 这些都不是那可个科目，但朴素子串匹配会把它们当成科目，且**静默给出错数**。
+_CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+
+
+def _is_word_char(char: str) -> bool:
+    """这个字符是否会让标签往左延伸成一个不同的词。"""
+    if not char:
+        return False
+    return bool(char.isalnum()) or bool(_CJK.match(char))
+
+
+def label_position(text: str, label: str) -> int:
+    """找标签在行里的位置；前面还连着汉字/字母/数字的匹配一律不算。
+
+    为什么不只看「行首」：报表里科目常常带序号或前缀（「一、营业总收入」），
+    要求行首会漏。这里只挡「左边还有字」的情况 —— 那才是另一个科目：
+
+        长短期借款 239,284      ← 不是「短期借款」，是借款总额
+        总出资相当于总股本…      ← 不是「股本」
+        借款利息费用 (6,972)     ← 不是利润表的「利息费用」
+
+    标签右边接着字是允许的，而且是我们想要的（「应收账款及应收票据」要能命中「应收账款」）。
+    """
+    start = text.find(label)
+    while start >= 0:
+        head_ok = start == 0 or not _is_word_char(text[start - 1])
+        tail_ok = True
+        if label in schema.EXACT_LABELS:
+            after = text[start + len(label) : start + len(label) + 1]
+            tail_ok = not _is_word_char(after)
+        if head_ok and tail_ok:
+            return start
+        start = text.find(label, start + 1)
+    return -1
+
+
+def match_label(text: str, label: str) -> int:
+    """统一的标签匹配入口：行首锚定 + 完整标题 + 前面不接字，三条规则一起用。
+
+    单独一个函数是为了让「单列扫描」和「按列取数」走同一套判断 ——
+    之前两处各写一遍，结果按列取数那条路漏掉了「完整标题」这条规则，
+    于是腾讯的「股本溢价」被当成「股本」。
+    """
+    if label in schema.ANCHORED_LABELS:
+        if not text.startswith(label):
+            return -1
+        if label in schema.EXACT_LABELS:
+            after = text[len(label) : len(label) + 1]
+            if _is_word_char(after):
+                return -1
+        return 0
+    return label_position(text, label)
+
+
+# 报表用破折号表示「未列示」：股本 33 – –
+_DASH = re.compile(r"(?<!\d)[-–—](?!\d)")
+
+
+def is_dash_row(text: str) -> bool:
+    """这一行的金额是不是用破折号占位（未列示）。"""
+    return bool(_DASH.search(text))
 
 # 排印字符归一化。英文年报几乎一定用弯引号与不换行空格：
 #   Apple 的合并资产负债表写的是 "Total shareholders’ equity"（U+2019），
@@ -131,13 +240,89 @@ _TYPO_FIXES: tuple[tuple[str, str], ...] = (
     ("\u2212", "-"),   # 减号 −
 )
 
+# 繁体 → 简体。港交所（腾讯这类）与台湾的年报是繁体，而科目表维护的是简体写法；
+# 不转换的话，`資產總額` 永远匹配不上 `资产总额`，而且是**静默**匹配不上。
+# 只放财务与年报常见字，且只做 1:1 转换；没覆盖到的字保持原样（会表现为「没抽到」，不会给错数）。
+_TRADITIONAL_TO_SIMPLIFIED: dict[str, str] = {
+    "資": "资", "產": "产", "負": "负", "債": "债", "權": "权", "損": "损", "現": "现",
+    "淨": "净", "潤": "润", "應": "应", "賬": "账", "帳": "账", "貨": "货", "業": "业",
+    "廠": "厂", "設": "设", "備": "备", "貸": "贷", "賃": "赁", "稅": "税", "費": "费",
+    "總": "总", "額": "额", "積": "积", "攤": "摊", "銷": "销", "舊": "旧", "營": "营",
+    "運": "运", "開": "开", "職": "职", "員": "员", "長": "长", "銀": "银", "據": "据",
+    "無": "无", "譽": "誉", "東": "东", "間": "间", "報": "报", "導": "导", "體": "体",
+    "計": "计", "狀": "状", "況": "况", "綜": "综", "務": "务", "術": "术", "場": "场",
+    "廣": "广", "虧": "亏", "聯": "联", "佔": "占", "億": "亿", "萬": "万", "圓": "圆",
+    "幣": "币", "櫃": "柜", "訊": "讯", "騰": "腾", "賣": "卖", "買": "买", "價": "价",
+    "匯": "汇", "兌": "兑", "單": "单", "雙": "双", "週": "周", "餘": "余", "節": "节",
+    "給": "给", "結": "结", "續": "续", "經": "经", "處": "处", "視": "视", "轉": "转",
+    "變": "变", "動": "动", "對": "对", "衝": "冲", "儲": "储", "換": "换", "隨": "随",
+    "屬": "属", "遞": "递", "險": "险", "際": "际", "歸": "归", "壞": "坏", "審": "审",
+    "議": "议", "訟": "讼", "減": "减", "規": "规", "標": "标", "準": "准", "確": "确",
+    "認": "认", "測": "测", "試": "试", "驗": "验", "證": "证", "穩": "稳", "極": "极",
+    "興": "兴", "諮": "咨", "詢": "询", "庫": "库", "倉": "仓", "鑽": "钻", "們": "们",
+    "個": "个", "從": "从", "來": "来", "為": "为", "說": "说", "這": "这", "麼": "么",
+    "與": "与", "並": "并", "內": "内", "發": "发", "覺": "觉", "學": "学", "習": "习",
+    "點": "点", "數": "数", "類": "类", "別": "别", "統": "统", "維": "维", "護": "护",
+    "責": "责", "頭": "头", "項": "项", "條": "条", "則": "则", "預": "预", "範": "范",
+    "圍": "围", "籤": "签", "網": "网", "絡": "络", "線": "线", "樂": "乐", "聽": "听",
+    "頻": "频", "載": "载", "歲": "岁", "賺": "赚", "蝕": "蚀", "僱": "雇", "傭": "佣",
+    "償": "偿", "撥": "拨", "抵": "抵", "質": "质", "贊": "赞", "贈": "赠", "免": "免",
+    "退": "退", "罰": "罚", "補": "补", "貼": "贴", "津": "津", "薪": "薪", "酬": "酬",
+    "獎": "奖", "醫": "医", "療": "疗", "保": "保", "養": "养", "齡": "龄", "潛": "潜",
+    # 第二批：从腾讯年报的报表页里逐字比对出来的（先用脚本列出未覆盖的字，再补）
+    "併": "并", "劃": "划", "勵": "励", "將": "将", "後": "后", "會": "会", "沖": "冲",
+    "滙": "汇", "獲": "获", "簽": "签", "紹": "绍", "組": "组", "繳": "缴", "於": "于",
+    "楊": "杨", "註": "注", "讓": "让", "財": "财", "購": "购", "進": "进", "過": "过",
+    "還": "还", "關": "关", "馬": "马", "擔": "担", "頁": "页", "題": "题", "樣": "样",
+    "觀": "观", "圖": "图", "書": "书", "畫": "画", "邊": "边", "遊": "游", "戲": "戏",
+    "獨": "独", "錢": "钱", "幹": "干", "幾": "几", "態": "态", "慣": "惯", "燈": "灯",
+    "滅": "灭", "絕": "绝", "製": "制", "產": "产", "電": "电", "腦": "脑", "雙": "双",
+}
+
 
 def normalize_text(text: str) -> str:
-    """把排印字符换成 ASCII 写法，让科目表只维护一套写法。"""
+    """把排印字符换成 ASCII、把繁体换成简体，让科目表只维护一套写法。"""
     for fancy, plain in _TYPO_FIXES:
         if fancy in text:
             text = text.replace(fancy, plain)
+    if any(character in _TRADITIONAL_TO_SIMPLIFIED for character in text):
+        text = "".join(_TRADITIONAL_TO_SIMPLIFIED.get(character, character) for character in text)
     return text
+
+
+# 中文数字：港交所年报的年份与日期写作「二零二五年十二月三十一日」。
+_CJK_DIGITS = {
+    "〇": "0", "零": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+    "五": "5", "六": "6", "七": "7", "八": "8", "九": "9",
+}
+
+
+def cjk_digits_to_year(text: str) -> int | None:
+    """把「二零二五」这样的四位中文数字年份读成 2025。不是年份就返回 None。"""
+    digits = "".join(_CJK_DIGITS.get(character, "") for character in text)
+    if len(digits) == 4 and digits.isdigit():
+        year = int(digits)
+        if 1900 <= year <= 2100:
+            return year
+    return None
+
+
+def cjk_number(text: str) -> int | None:
+    """读中文数字（一~九十九），用来解析「十二月三十一日」这种日期。"""
+    if not text:
+        return None
+    if text in _CJK_DIGITS:
+        return int(_CJK_DIGITS[text])
+    if "十" in text:
+        left, _, right = text.partition("十")
+        if left and left not in _CJK_DIGITS:
+            return None
+        if right and right not in _CJK_DIGITS:
+            return None
+        tens = int(_CJK_DIGITS[left]) if left else 1
+        ones = int(_CJK_DIGITS[right]) if right else 0
+        return tens * 10 + ones
+    return None
 
 # 报表正文页的特征词。用来区分「正文」与「五年摘要 / 管理层讨论 / 附注」——
 # 同一个科目名在这三类页上都会出现，而数值口径不同：
@@ -150,13 +335,40 @@ STATEMENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _page_kinds(page_text: str) -> set[str]:
-    """判断这一页属于哪张报表（可同时命中多张：有的年报把三表排在同一页）。"""
+def _page_kinds(page_text: str, *, title_lines: int = 6) -> set[str]:
+    """判断这一页属于哪张报表，**只看页面顶部的标题区**。
+
+    为什么只看标题区：正文里到处都会提到「综合收益表」「财务状况表」（附注的引用、
+    五年摘要的小标题），按全文匹配会让「五年財務摘要」页被当成利润表 ——
+    腾讯的摘要页就有「收入 560,118 554,552 609,015 660,257 751,766」这一行，
+    一旦它被当成利润表，就会抢走真正的本期收入。
+
+    报表页的标题总在开头几行，所以只扫前 title_lines 行。
+    """
+    head = "\n".join(
+        [line for line in page_text.splitlines() if line.strip()][:title_lines]
+    )
     return {
         kind
         for kind, markers in STATEMENT_MARKERS
-        if any(marker in page_text for marker in markers)
+        if any(marker in head for marker in markers)
     }
+
+
+# 摘要页的标题特征。这些页的科目名与报表页一样，但**口径不同**：
+# 腾讯第 4 页「財務概要 / 簡明綜合全面收益表」列了 2021–2025 五年、数字取整，
+# 把它当利润表会抢走真正的本期收入（560,118 vs 751,766）。
+_SUMMARY_MARKERS = (
+    "財務概要", "财务概要", "財務摘要", "财务摘要", "摘要", "簡明", "简明", "選定的財務資料",
+)
+
+
+def is_summary_page(page_text: str, *, title_lines: int = 6) -> bool:
+    """这一页是不是「财务概要/摘要」页（只看标题区）。"""
+    head = "\n".join(
+        [line for line in page_text.splitlines() if line.strip()][:title_lines]
+    )
+    return any(marker in head for marker in _SUMMARY_MARKERS)
 
 
 class ExtractError(RuntimeError):
@@ -203,10 +415,23 @@ def pdf_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def read_pages(pdf_path: str | Path) -> tuple[list[str], str]:
-    """把 PDF 逐页读成文本，返回 (页文本列表, 用的后端名)。
+@dataclass
+class PdfContent:
+    """一次读进来的 PDF 内容：页文本 + （可选的）词坐标。
 
-    三个后端按顺序试：pdfplumber（表格最准）→ pypdf（最轻）→ PyMuPDF（最快）。
+    词坐标是「多年列示」按列取数的前提（见 columns.py）。只有 pdfplumber 给得到；
+    其它后端拿不到坐标，就只给文本 —— 那时按列取数会自动跳过，回落到单列扫描。
+    """
+
+    pages: list[str]
+    words: list[list[dict[str, Any]]] | None
+    backend: str
+
+
+def read_pdf(pdf_path: str | Path) -> PdfContent:
+    """把 PDF 逐页读成文本（并用 pdfplumber 时附带词坐标）。
+
+    三个后端按顺序试：pdfplumber（表格最准，且给词坐标）→ pypdf → PyMuPDF。
     一个都没有时抛 ExtractError 并告诉使用者装哪个 —— 不返回空列表假装成功。
     """
     path = Path(pdf_path)
@@ -217,7 +442,22 @@ def read_pages(pdf_path: str | Path) -> tuple[list[str], str]:
         import pdfplumber  # type: ignore[import-not-found]
 
         with pdfplumber.open(path) as pdf:
-            return [page.extract_text() or "" for page in pdf.pages], "pdfplumber"
+            pages: list[str] = []
+            words: list[list[dict[str, Any]]] = []
+            for page in pdf.pages:
+                pages.append(page.extract_text() or "")
+                words.append(
+                    [
+                        {
+                            "text": str(word.get("text", "")),
+                            "x0": float(word.get("x0", 0.0)),
+                            "x1": float(word.get("x1", 0.0)),
+                            "top": float(word.get("top", 0.0)),
+                        }
+                        for word in page.extract_words()
+                    ]
+                )
+            return PdfContent(pages=pages, words=words, backend="pdfplumber")
     except ImportError:
         pass
 
@@ -225,7 +465,11 @@ def read_pages(pdf_path: str | Path) -> tuple[list[str], str]:
         from pypdf import PdfReader  # type: ignore[import-not-found]
 
         reader = PdfReader(str(path))
-        return [(page.extract_text() or "") for page in reader.pages], "pypdf"
+        return PdfContent(
+            pages=[(page.extract_text() or "") for page in reader.pages],
+            words=None,
+            backend="pypdf",
+        )
     except ImportError:
         pass
 
@@ -233,7 +477,9 @@ def read_pages(pdf_path: str | Path) -> tuple[list[str], str]:
         import fitz  # type: ignore[import-not-found]  # PyMuPDF
 
         with fitz.open(path) as doc:
-            return [page.get_text() for page in doc], "pymupdf"
+            return PdfContent(
+                pages=[page.get_text() for page in doc], words=None, backend="pymupdf"
+            )
     except ImportError:
         pass
 
@@ -244,6 +490,12 @@ def read_pages(pdf_path: str | Path) -> tuple[list[str], str]:
         "    python -m pip install PyMuPDF\n"
         "或者加 --firecrawl 走 Firecrawl 的 PDF 解析（需要 FIRECRAWL_API_KEY）。"
     )
+
+
+def read_pages(pdf_path: str | Path) -> tuple[list[str], str]:
+    """把 PDF 逐页读成文本，返回 (页文本列表, 用的后端名)。"""
+    content = read_pdf(pdf_path)
+    return content.pages, content.backend
 
 
 def detect_scale(page_text: str) -> tuple[float, str]:
@@ -290,6 +542,15 @@ def _parse_amount(text: str) -> tuple[float | None, str]:
     tokens = [match.group(0) for match in _NUMBER.finditer(text)]
     if not tokens:
         return None, ""
+    # 整行的值是破折号（报表表示「未列示」）时，唯一的数字多半是附注编号。
+    # 腾讯的「股本 33 – –」就是这种：真正的股本只在附注里，正文用「–」占位。
+    # 不拦的话会把附注编号 33 当成股本（而且可能恰好对得上，属于「错得看不出来」）。
+    if (
+        len(tokens) == 1
+        and _NOTE_REF.fullmatch(tokens[0])
+        and is_dash_row(text)
+    ):
+        return None, "该行金额用破折号占位（未列示），不把附注编号当金额"
     skipped = ""
     index = 0
     if len(tokens) >= 2 and _NOTE_REF.fullmatch(tokens[0]):
@@ -312,6 +573,43 @@ def _iter_lines(page_text: str) -> Iterable[str]:
         line = raw.strip()
         if line:
             yield line
+
+
+# 整行只有数字/千分位/括号/百分号 —— 报表里的「合计行」长这样（科目名在上一行）。
+_AMOUNT_ONLY_LINE = re.compile(r"^[\d,().\-%\s]+$")
+
+
+def _totals_index_below(lines: Sequence[str], start: int, *, lookahead: int = 12) -> int | None:
+    """科目名单独一行、合计在下面若干行时，返回那行合计的**下标**。
+
+    腾讯的综合收益表就是这么排的：
+
+        收入
+        增值服務 369,281 319,168
+        …
+        其他 8,077 7,759
+        6 751,766 660,257      ← 这一行才是收入合计，而且没有科目名
+
+    只在「标签这一行没有金额」时才启用，且要求那一行**整行都是数字**，
+    所以不会误抓到普通明细行。
+
+    lookahead 取 12 是因为合计行可能隔得比较远：腾讯的「本公司權益持有人應佔權益」
+    下面还有股本、股本溢价、库存股、股份奖励计划所持股份、其他储备、保留盈利 6 行，
+    合计才出现在第 7 行（而且是**没有科目名的裸合计行**）。
+    """
+    for offset, line in enumerate(lines[start + 1 : start + 1 + lookahead], start=1):
+        stripped = line.strip()
+        if not stripped or not any(ch.isdigit() for ch in stripped):
+            continue
+        if _AMOUNT_ONLY_LINE.fullmatch(stripped):
+            return start + offset
+    return None
+
+
+def _totals_below(lines: Sequence[str], start: int, *, lookahead: int = 12) -> str:
+    """同上，但直接返回那一行的文本。"""
+    index = _totals_index_below(lines, start, lookahead=lookahead)
+    return lines[index] if index is not None else ""
 
 
 def scan_pages(
@@ -339,40 +637,91 @@ def scan_pages(
     }
     candidates: dict[str, list[Hit]] = {}
     page_kinds: dict[int, set[str]] = {}
+    page_consolidated: dict[int, bool] = {}
     page_density: dict[int, int] = {}
+
+    # 先看这份文档里出现过哪些报表页。若某种报表页存在，那么属于它的科目就**只**
+    # 从这种页取数 —— 管理层讨论与附注里也有类似的表，但口径不同：
+    # 华为第 65/66 页的「长短期借款」「其中：长期借款」是债务结构分析，
+    # 不是合并资产负债表上的科目；拿它当 short_term_debt 会给出误导性的数。
+    kinds_by_page: dict[int, set[str]] = {}
+    for index, page_text in enumerate(pages, start=1):
+        if page_text:
+            normalized = normalize_text(page_text)
+            # 摘要页不参与取数（口径不同：腾讯的五年摘要写着「簡明綜合全面收益表」）
+            if is_summary_page(normalized):
+                continue
+            kinds_by_page[index] = _page_kinds(normalized)
+    available_kinds = {kind for kinds in kinds_by_page.values() for kind in kinds}
 
     for page_number, page_text in enumerate(pages, start=1):
         if not page_text:
             continue
         page_text = normalize_text(page_text)
-        page_kinds[page_number] = _page_kinds(page_text)
+        if is_summary_page(page_text):
+            continue
+        page_kinds[page_number] = kinds_by_page.get(page_number, set())
         scale, unit_name = detect_scale(page_text)
         # 合并口径：中文报表写「合并」，英文 10-K 的报表页写 "CONSOLIDATED"。
         # 不做这个判断，英文报表的每一页都会被标成「可能是母公司报表」并降置信度。
-        is_consolidated = "合并" in page_text or "CONSOLIDATED" in page_text.upper()
+        is_consolidated = (
+            "合并" in page_text
+            or "综合" in page_text
+            or "CONSOLIDATED" in page_text.upper()
+        )
+        page_consolidated[page_number] = is_consolidated
         for name, account in wanted.items():
+            page_kind_set = page_kinds[page_number]
+            if (
+                page_kind_set
+                and account.section not in page_kind_set
+                and not account.allow_notes
+            ):
+                # 这一页明确是另一张报表（例如用利润表页去取资产总计）→ 不要。
+                # 但「可从附注取」的科目例外：折旧摊销、利息费用常常和利润表
+                # 排在同一页（现金流量表补充资料就经常紧跟在利润表后面）。
+                continue
+            if (
+                not page_kind_set
+                and not account.allow_notes
+                and account.section in available_kinds
+            ):
+                # 没有报表标题的页（附注、管理层讨论、摘要）：只有注明「可从附注取」
+                # 的科目（折旧摊销、利息费用）才允许，其它科目一律不要 ——
+                # 否则管理层讨论里的债务分析、五年摘要的数字会被当成报表科目。
+                continue
             page_hits: list[Hit] = []
-            for line in _iter_lines(page_text):
+            lines = list(_iter_lines(page_text))
+            for index, line in enumerate(lines):
                 label = next(
                     (
                         item
                         for item in account.labels
-                        if (
-                            line.startswith(item)
-                            if item in schema.ANCHORED_LABELS
-                            else item in line
-                        )
+                        if match_label(line, item) >= 0
                     ),
                     None,
                 )
                 if label is None:
                     continue
-                tail = line.split(label, 1)[1]
+                tail = line[match_label(line, label) + len(label) :]
                 if any(key in tail[:6] for key in _DERIVED_TAIL):
                     continue
                 value, note = _parse_amount(tail)
+                source_line = line
                 if value is None:
-                    continue
+                    if is_dash_row(tail):
+                        # 破折号占位（这一行本就没列示金额）：不要往下找合计，
+                        # 否则会把隔了几行的权益总额当成股本（腾讯的「股本 33 – –」）。
+                        continue
+                    # 科目名与合计分行：往下找整行都是数字的那一行
+                    totals = _totals_below(lines, index)
+                    if not totals:
+                        continue
+                    value, note = _parse_amount(totals)
+                    if value is None:
+                        continue
+                    note = (note + "；" if note else "") + "科目名与合计分行，取下方合计行"
+                    source_line = totals
                 confidence = 0.9 if is_consolidated else 0.6
                 if unit_name == "未标注":
                     confidence = min(confidence, 0.5)
@@ -386,7 +735,7 @@ def scan_pages(
                         account=name,
                         label=label,
                         value_yuan=value * scale,
-                        raw_text=line[:160],
+                        raw_text=source_line[:160],
                         page=page_number,
                         unit=unit_name,
                         scale=scale,
@@ -441,10 +790,37 @@ def scan_pages(
                 -hit.page,
             )
 
+        account = schema.ACCOUNT_BY_NAME[name]
         winner = max(hits, key=rank)
-        if len(hits) > 1:
-            others = "、".join(str(hit.page) for hit in hits if hit is not winner)
-            winner.note = (winner.note + "；" if winner.note else "") + f"另有 {len(hits) - 1} 处（第 {others} 页）"
+        # 拆成多段列示的科目可能落在**不同页**上：腾讯的「借款」非流动部分在
+        # 第 133 页、流动部分在 134 页，只取一页会漏掉另一段。所以对 aggregate
+        # 科目，把「同类报表页」上的命中加总。
+        if account.aggregate:
+            # 分组要同时看「哪张报表」和「合并还是母公司」：
+            # 母公司资产负债表也是资产负债表，把两者的应收相加就错了。
+            def statement_of(page: int) -> tuple:
+                return (
+                    tuple(sorted(page_kinds.get(page, set()))),
+                    page_consolidated.get(page, False),
+                )
+
+            same_kind = [
+                hit for hit in hits if statement_of(hit.page) == statement_of(winner.page)
+            ]
+            if len(same_kind) > 1:
+                parts = " + ".join(f"{hit.value_yuan:,.0f}" for hit in same_kind)
+                winner = replace(
+                    winner,
+                    value_yuan=sum(hit.value_yuan for hit in same_kind),
+                    raw_text=" + ".join(hit.raw_text for hit in same_kind)[:200],
+                    note=(winner.note + "；" if winner.note else "")
+                    + f"分 {len(same_kind)} 页列示，已相加（{parts}）",
+                )
+        others = [hit.page for hit in hits if hit.page != winner.page]
+        if others:
+            winner.note = (winner.note + "；" if winner.note else "") + (
+                f"另有 {len(others)} 处（第 " + "、".join(str(page) for page in others) + " 页）"
+            )
         best[name] = winner
     return best
 
@@ -452,7 +828,12 @@ def scan_pages(
 def _scan_context(pages: Sequence[str], rule: "schema.ContextRule") -> Hit | None:
     """按「触发词 → 后面几行里找取值标签」的规则取一个科目。"""
     for page_number, page_text in enumerate(pages, start=1):
-        if not page_text or rule.trigger not in page_text:
+        if not page_text:
+            continue
+        # 必须用归一化后的文本：繁体年报（腾讯）写「下列人士應佔」，
+        # 不做繁简转换就永远匹配不上规则里的「下列人士应占」，而且是静默失败。
+        page_text = normalize_text(page_text)
+        if rule.trigger not in page_text:
             continue
         lines = list(_iter_lines(page_text))
         scale, unit_name = detect_scale(page_text)
@@ -460,9 +841,10 @@ def _scan_context(pages: Sequence[str], rule: "schema.ContextRule") -> Hit | Non
             if rule.trigger not in line:
                 continue
             for follow in lines[index + 1 : index + 1 + rule.lookahead]:
-                if rule.value_label not in follow:
+                position = label_position(follow, rule.value_label)
+                if position < 0:
                     continue
-                tail = follow.split(rule.value_label, 1)[1]
+                tail = follow[position + len(rule.value_label) :]
                 value, note = _parse_amount(tail)
                 if value is None:
                     continue
@@ -538,13 +920,20 @@ def build_record(
     method: str = "local-pdf",
     cross_check: Mapping[str, Any] | None = None,
     occurred_at: str | None = None,
+    series: Mapping[str, Mapping[int, Hit]] | None = None,
 ) -> dict[str, Any]:
-    """页文本 → 一条完整的抽取记录（可落盘、可接流水线）。"""
+    """页文本 → 一条完整的抽取记录（可落盘、可接流水线）。
+
+    series 是「多年列示」的按列取数结果 {科目: {年份: Hit}}，来自 columns.py。
+    记录里会多出 `years` 与 `series` 两块；`accounts` 仍然是本期（最新一年）的值，
+    所以只用 `accounts` 的旧调用方不受影响。
+    """
     text_chars = sum(len(page) for page in pages)
     matches = scan_pages(pages)
     values = _values(matches)
     currency = detect_currency(pages)
     period_end = detect_period_end(pages)
+    soup = cid_ratio(pages)
     units = [hit.unit for hit in matches.values() if hit.unit and hit.unit != "未标注"]
     unit_hint = max(set(units), key=units.count) if units else ""
 
@@ -558,6 +947,7 @@ def build_record(
         "sha256": pdf_sha256(pdf_path) if pdf_path else "",
         "pages": len(pages),
         "has_text_layer": text_chars > 200,
+        "text_layer_usable": soup < 0.05,
         "backend": backend,
         "method": method,
         "currency": currency,
@@ -572,6 +962,14 @@ def build_record(
         record["notes"].append(
             f"整份 PDF 只抽到 {text_chars} 个字符，几乎没有文字层 —— 大概率是扫描件。"
             "扫描件要先 OCR；本模块不猜数字。"
+        )
+    elif not record["text_layer_usable"]:
+        record["notes"].append(
+            f"⚠️ 这份 PDF 的**文字层不可用**：约 {soup:.0%} 的字符是 (cid:xxxx) 形式的"
+            "字符编号 —— 说明字体里缺 ToUnicode 映射表，换任何本地解析库都读不出汉字"
+            "（小米 2025 年报就是这样）。两条出路：① 用 OCR（先把页面渲染成图片再识别）；"
+            "② 用 Firecrawl 之类的云端解析按本模块的 schema 输出（见 finai_web/firecrawl.py）。"
+            "本地抽取结果只有零星科目，不要直接拿去做估值。"
         )
 
     if currency and currency != "CNY":
@@ -601,14 +999,52 @@ def build_record(
     missing = [name for name in schema.ACCOUNT_NAMES if name not in matches]
     record["missing_accounts"] = missing
     if missing and record["has_text_layer"]:
-        record["notes"].append(
-            "这些科目没抽到：" + "、".join(missing) + "。"
-            "可能是年报里写法不同或落在无法解析的表格里 —— 缺的科目会让对应字段变成默认值或倒挤，"
-            "报告里会写明，请核对原文。"
+        # 分开说：必需科目缺了会影响结果，可选科目缺了通常只是「这份报表没有这一行」
+        # （美国报表没有「短期借款」，A 股报表没有「Term debt」），混在一起报
+        # 会让人以为整份抽取都不靠谱。
+        required = set(schema.REQUIRED_FOR_OPENING) | set(schema.REQUIRED_FOR_PEER)
+        # 推导补上的科目不算「没抽到」（例如美国报表没有「归母净利润」这一行，
+        # 但可以用净利润算出来）。
+        resolved = set((record.get("peer") or {}).get("resolved") or []) | set(
+            (record.get("opening_balance") or {}).get("resolved") or []
         )
+        missing_required = [
+            name for name in missing if name in required and name not in resolved
+        ]
+        missing_optional = [name for name in missing if name not in required]
+        if missing_required:
+            record["notes"].append(
+                "⚠️ 这些**必需**科目没抽到：" + "、".join(missing_required) + "。"
+                "它们会让对应字段缺失或退化成默认值，请核对原文（可能是写法不同，"
+                "或落在无法解析的表格里）。"
+            )
+        if missing_optional:
+            record["notes"].append(
+                "这些可选科目在本报表里没有出现（多数是口径差异，例如美国报表没有"
+                "「短期借款」、A 股报表没有「Term debt」；也可能是没抽到）："
+                + "、".join(missing_optional)
+                + "。可用 `python -m finai_web series --all` 看实际抽到了哪些科目。"
+            )
 
     if cross_check is not None:
         record["cross_check"] = dict(cross_check)
+
+    # 多年列示：每年各自的取值 + 出处。没抽到列结构时是空列表，不影响其它字段。
+    if series:
+        record["years"] = sorted(
+            {year_value for by_year in series.values() for year_value in by_year},
+            reverse=True,
+        )
+        record["series"] = {
+            name_key: {
+                str(year_value): hit.to_dict()
+                for year_value, hit in sorted(by_year.items(), reverse=True)
+            }
+            for name_key, by_year in sorted(series.items())
+        }
+    else:
+        record["years"] = []
+        record["series"] = {}
     return record
 
 
@@ -621,11 +1057,15 @@ def extract_pdf(
     source_url: str = "",
     with_cross_check: bool = True,
 ) -> dict[str, Any]:
-    """本地抽一份年报 PDF。"""
+    """本地抽一份年报 PDF（含多年列示：报表有几年就取几年）。"""
+    from . import columns  # 延迟导入：columns 依赖本模块，模块级导入会成环
+
     path = Path(pdf_path)
-    pages, backend = read_pages(path)
+    content = read_pdf(path)
+    pages, backend = content.pages, content.backend
     matches = scan_pages(pages)
     cross = _cross_check_with_algorithm(path, matches) if with_cross_check else None
+    series = columns.extract_by_year(pages, content.words) if content.words else {}
     return build_record(
         code=code,
         name=name,
@@ -636,6 +1076,7 @@ def extract_pdf(
         source_url=source_url,
         method=f"local-pdf/{backend}",
         cross_check=cross,
+        series=series,
     )
 
 

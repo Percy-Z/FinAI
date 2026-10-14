@@ -53,6 +53,10 @@ class Account:
     section: str  # balance / income / cashflow
     note: str = ""
     aggregate: bool = False
+    # True 表示这个科目允许从「没有报表标题的页」取数（附注、管理层讨论）。
+    # 折旧摊销与利息费用通常只在附注里分项列示，现金流量表正文反而没有；
+    # 而收入、资产总计这类科目必须来自报表正文，否则会串到摘要页或母公司报表。
+    allow_notes: bool = False
 
 
 # 这些标签必须出现在行首才算命中。
@@ -73,6 +77,12 @@ class Account:
 ANCHORED_LABELS: frozenset[str] = frozenset(
     {"收入", "负债合计", "所得税", "股本", "Net income", "Total assets", "Total liabilities"}
 )
+
+# 这些标签必须是**完整科目名**（后面不能再接汉字）。
+# 与 ANCHORED_LABELS 的区别：锚定只管行首，这里还管结尾。
+#   「应收账款及应收票据」要能被「应收账款」命中（延续是合理的，它是应收账款的细分），
+#   但「股本溢价」不能被「股本」命中 —— 那是完全不同的科目（腾讯就这么写）。
+EXACT_LABELS: frozenset[str] = frozenset({"股本", "实收资本"})
 
 
 # ---------------------------------------------------------------------------
@@ -106,11 +116,20 @@ ACCOUNTS: tuple[Account, ...] = (
     ),
     Account(
         "fixed_assets",
-        ("固定资产", "物业、厂房及设备", "Property, plant and equipment"),
+        (
+            "固定资产",
+            "物业、厂房及设备",
+            "物业、设备及器材",          # 港交所口径（腾讯）
+            "Property, plant and equipment",
+        ),
         "balance",
         "IFRS 口径叫「物业、厂房及设备」",
     ),
-    Account("total_assets", ("资产总计", "总资产", "Total assets"), "balance"),
+    Account(
+        "total_assets",
+        ("资产总计", "总资产", "资产总额", "Total assets"),  # 港交所写「资产总额」
+        "balance",
+    ),
     # ── 资产负债表：负债侧 ────────────────────────────────────────────
     Account("accounts_payable", ("应付账款", "Accounts payable"), "balance"),
     Account("short_term_debt", ("短期借款",), "balance"),
@@ -150,7 +169,11 @@ ACCOUNTS: tuple[Account, ...] = (
         "美国 10-K 口径：Term debt 会分流动与非流动两段列示，须相加",
         aggregate=True,
     ),
-    Account("total_liabilities", ("负债合计", "Total liabilities"), "balance"),
+    Account(
+        "total_liabilities",
+        ("负债合计", "负债总额", "Total liabilities"),
+        "balance",
+    ),
     # ── 资产负债表：权益侧 ────────────────────────────────────────────
     Account(
         "equity_attributable",
@@ -160,6 +183,8 @@ ACCOUNTS: tuple[Account, ...] = (
             "归属于母公司所有者权益（或股东权益）合计",
             "归属于上市公司股东的所有者权益",
             "本公司所有者应占权益",
+            "本公司权益持有人应占权益",      # 港交所口径（腾讯）
+            "本公司权益持有人应占权益总额",
             "Total shareholders' equity",
             "Total stockholders' equity",
         ),
@@ -178,6 +203,7 @@ ACCOUNTS: tuple[Account, ...] = (
             "股东权益合计",
             "所有者权益（或股东权益）合计",
             "权益合计",
+            "权益总额",
             "Total equity",
         ),
         "balance",
@@ -207,7 +233,11 @@ ACCOUNTS: tuple[Account, ...] = (
         "income",
         "美国公司多数没有少数股东权益，归母净利润就是 Net income（由 CONTEXT_RULES 兜底）",
     ),
-    Account("net_profit", ("净利润", "Net income", "Net earnings"), "income"),
+    Account(
+        "net_profit",
+        ("净利润", "年度盈利", "年度溢利", "Net income", "Net earnings"),
+        "income",
+    ),
     # 利润总额：A 股写「利润总额」，IFRS 式报表写「税前利润」
     Account(
         "total_profit",
@@ -217,6 +247,8 @@ ACCOUNTS: tuple[Account, ...] = (
             "Income before provision for income taxes",
             "Income before income taxes",
             "Pretax income",
+            "除税前盈利",                     # 港交所口径（腾讯）
+            "税前盈利",
         ),
         "income",
     ),
@@ -226,17 +258,40 @@ ACCOUNTS: tuple[Account, ...] = (
         ("所得税费用", "所得税", "Provision for income taxes", "Income tax expense"),
         "income",
     ),
-    Account("interest_expense", ("利息费用", "利息支出"), "income", "EBIT 的加回项"),
-    Account("finance_expense", ("财务费用",), "income", "没有单独披露利息费用时的替代品"),
+    Account(
+        "interest_expense",
+        ("利息费用", "利息支出"),
+        "income",
+        "EBIT 的加回项（通常只在附注里分项披露）",
+        allow_notes=True,
+    ),
+    Account(
+        "finance_expense",
+        (
+            "财务费用",
+            # IFRS 式利润表常把这一行写成「财务收入及财务费用」（净额）。
+            # 注意标签匹配规则会拒绝「前面还连着汉字」的匹配（那是另一个科目），
+            # 所以这种完整标题必须显式列出来，否则会被当成「不是财务费用」。
+            "财务收入及财务费用",
+            "财务收入及财务费用净额",
+            "财务成本",                       # 港交所口径（腾讯）
+        ),
+        "income",
+        "没有单独披露利息费用时的替代品",
+    ),
     Account(
         "operating_income",
-        ("营业利润", "Operating income"),
+        ("营业利润", "经营盈利", "Operating income"),
         "income",
         "利息费用无法单独取到时，用营业利润近似 EBIT（美国 10-K 常见：利息混在 Other income 里）",
     ),
     Account(
         "minority_profit",
-        ("少数股东损益", "Net income attributable to noncontrolling interests"),
+        (
+            "少数股东损益",
+            "非控制性权益",                   # 港交所口径（腾讯）
+            "Net income attributable to noncontrolling interests",
+        ),
         "income",
         "少数股东损益；用来从合并净利润倒算归母净利润",
     ),
@@ -246,17 +301,35 @@ ACCOUNTS: tuple[Account, ...] = (
         (
             "固定资产折旧、油气资产折耗、生产性生物资产折旧",
             "固定资产折旧",
+            "折旧及摊销",                    # 港交所口径
+            # 港交所口径按「性质」列示的附注（腾讯附注：按性质划分的开支）
+            "物业、设备及器材、投资物业以及使用权资产折旧",
+            "物业、厂房及设备折旧",
+            "使用权资产折旧",
             "Depreciation and amortization",
             "Depreciation",
         ),
         "cashflow",
+        allow_notes=True,
     ),
-    Account("amortization_intangible", ("无形资产摊销", "Amortization"), "cashflow"),
-    Account("amortization_lt_prepaid", ("长期待摊费用摊销",), "cashflow"),
+    Account(
+        "amortization_intangible",
+        ("无形资产摊销", "Amortization"),
+        "cashflow",
+        allow_notes=True,
+    ),
+    Account(
+        "amortization_lt_prepaid",
+        ("长期待摊费用摊销",),
+        "cashflow",
+        allow_notes=True,
+    ),
     Account(
         "operating_cash_flow",
         (
             "经营活动产生的现金流量净额",
+            "经营活动所得现金流量净额",        # 港交所口径（腾讯）
+            "经营活动所得现金净额",
             "Cash generated by operating activities",
             "Net cash provided by operating activities",
         ),
@@ -386,12 +459,17 @@ class Built:
     values: dict[str, float] = field(default_factory=dict)
     provenance: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # 虽然没直接抽到、但已经通过推导补上的科目。
+    # 用途：抽取记录里报「缺哪些科目」时要排除它们 —— 否则会出现
+    # 「⚠️ 必需科目 net_profit_attributable 没抽到」这种误报（其实已经从净利润算出来了）。
+    resolved: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "values": self.values,
             "provenance": self.provenance,
             "notes": self.notes,
+            "resolved": sorted(self.resolved),
         }
 
 
@@ -425,6 +503,12 @@ CONTEXT_RULES: tuple[ContextRule, ...] = (
         trigger="净利润归属于",
         account="net_profit_attributable",
         value_label="本公司所有者",
+    ),
+    # 港交所口径（腾讯）：年度盈利 / 下列人士应占：/ 本公司权益持有人 …
+    ContextRule(
+        trigger="下列人士应占",
+        account="net_profit_attributable",
+        value_label="本公司权益持有人",
     ),
 )
 
@@ -487,7 +571,9 @@ def build_opening_balance(values: Mapping[str, float]) -> Built:
     v["minority_equity"] = 0.0 if minority is None else minority
     p["minority_equity"] = "read" if minority is not None else "default(0)"
     if minority is None:
-        built.notes.append("年报里没有「少数股东权益」这一行，按 0 处理（多数 A 股公司确实为 0）")
+        built.notes.append(
+            "年报里没有「少数股东权益」这一行，按 0 处理（没有少数股东的公司本来就没有这一行）"
+        )
 
     total_assets = float(values["total_assets"])
     total_liabilities = float(values["total_liabilities"])
@@ -596,11 +682,13 @@ def build_peer_metrics(values: Mapping[str, float]) -> Built:
         if net_profit_value is not None:
             if minority_profit is not None:
                 resolved["net_profit_attributable"] = net_profit_value - abs(minority_profit)
+                built.resolved.add("net_profit_attributable")
                 built.notes.append(
                     "归母净利润 = 净利润 − 少数股东损益（年报没有单独写归母净利润这一行）"
                 )
             else:
                 resolved["net_profit_attributable"] = net_profit_value
+                built.resolved.add("net_profit_attributable")
                 built.notes.append(
                     "年报没有披露少数股东损益，归母净利润按合并净利润处理 —— "
                     "若公司确有少数股东，这里会高估归母净利润"

@@ -70,17 +70,11 @@ def _resolve_fx(
         - 报表币种 != 目标币种 → 必须显式给 fx_rate，否则报错（不猜汇率）
         - 同一批记录币种不一致 → 报错（一半美元一半人民币，换出来的表没法用）
     """
-    currencies = {
-        str(record.get("currency") or "").upper()
-        for record in records.values()
-        if record.get("currency")
-    }
-    if len(currencies) > 1:
-        raise AdapterError(
-            "抽取记录里出现了多种币种：" + "、".join(sorted(currencies))
-            + "。请把同一批公司放在同一种币种下，或分别建两份输入。"
-        )
-    currency = currencies.pop() if currencies else base_currency
+    # 以**目标公司**的币种为准。别的币种的记录不当竞争对手（会被跳过并写明原因），
+    # 因为把它们换算到一起需要各自的汇率，而汇率只能由使用者提供。
+    currency = str(
+        (records.get(target_code) or {}).get("currency") or ""
+    ).upper() or base_currency
     if not currency:
         currency = base_currency
     if currency == base_currency:
@@ -180,6 +174,7 @@ def build_pipeline_input(
         target_code = str(next(iter(newest)))
 
     target_record = newest[target_code]
+    _require_usable(target_record, role="目标公司")
     fx = _resolve_fx(newest, target_code, fx_rate=fx_rate, base_currency=base_currency)
     payload: dict[str, Any] = {
         "version": 1,
@@ -188,6 +183,7 @@ def build_pipeline_input(
         "fx": fx,
         "opening_balance": _scale(opening_balance_from(target_record), fx["rate"]),
         "target_actuals": _scale(peer_from(target_record), fx["rate"]),
+        "history": history_from(target_record),
         "peers": {},
         "provenance": {},
     }
@@ -207,6 +203,13 @@ def build_pipeline_input(
         }
         if str(code) == target_code:
             continue
+        peer_currency = str(record.get("currency") or "").upper()
+        if peer_currency and peer_currency != str(fx["from"]):
+            payload["provenance"][str(code)]["skipped"] = (
+                f"币种不同（{peer_currency} vs 目标公司的 {fx['from']}）——"
+                "换算需要各自的汇率，本模块不猜；请分别建两份输入或先手工换算"
+            )
+            continue
         try:
             payload["peers"][str(code)] = _scale(peer_from(record), fx["rate"])
         except AdapterError as err:
@@ -214,7 +217,27 @@ def build_pipeline_input(
             # 但必须写进 provenance，报告里要说得出「为什么这家没进表」。
             payload["provenance"][code]["skipped"] = str(err)
 
+    # 可比公司里若有「文字层不可用」的记录，跳过它并写清原因（它本来也抽不出指标）
+    for code, record in newest.items():
+        if str(code) == target_code or record.get("text_layer_usable") is not False:
+            continue
+        payload["provenance"][str(code)]["skipped"] = _unusable_reason(record)
+
     return payload
+
+
+def _unusable_reason(record: Mapping[str, Any]) -> str:
+    return (
+        f"{record.get('code')} 的 PDF 文字层不可用（字体缺 ToUnicode 映射，抽出来是 cid 码）——"
+        "本地解析救不回来。三条出路：① 换一份带文字层的 PDF（例如英文版，或用阅读器"
+        "「打印成 PDF」重新导出）；② 先 OCR 再抽；③ 用 Firecrawl 之类的云端解析。"
+    )
+
+
+def _require_usable(record: Mapping[str, Any], *, role: str) -> None:
+    """目标公司的记录如果文字层不可用，直接停下 —— 不让下游拿到残缺的基期数据。"""
+    if record.get("text_layer_usable") is False:
+        raise AdapterError(_unusable_reason(record).replace("的 PDF", f"（{role}）的 PDF", 1))
 
 
 def write_pipeline_input(payload: Mapping[str, Any], path: Path | None = None) -> Path:
@@ -289,6 +312,39 @@ def placeholders_from(payload: Mapping[str, Any]) -> dict[str, float]:
         mapping[str(name)] = float(value)
     mapping["book_equity_attributable"] = float(target.get("book_equity_attributable", 0.0) or 0.0)
     return mapping
+
+
+def history_from(record: Mapping[str, Any]) -> dict[str, Any]:
+    """把多年序列整理成「历史增速」——流水线里 drivers.revenue_growth 的现成来源。
+
+    流水线原先要求手填逐年收入增速。有了多年列示，这件事可以直接从年报算出来：
+
+        {"years": [2023, 2024, 2025],
+         "revenue": {"2023": ..., "2024": ..., "2025": ...},
+         "revenue_growth": {"2024": 0.0202, "2025": 0.0643}}
+
+    这里只做**算术**，不做判断：历史增速能不能直接当预测增速用，是另一回事
+    （要结合行业、管理层指引），报告里要说明。缺失年份不猜、不插值。
+    """
+    series = record.get("series") or {}
+    revenue = {
+        int(year): float(item["value_yuan"])
+        for year, item in (series.get("revenue") or {}).items()
+    }
+    growth: dict[int, float] = {}
+    years = sorted(revenue)
+    for previous, current in zip(years, years[1:]):
+        base = revenue[previous]
+        if base:
+            growth[current] = revenue[current] / base - 1.0
+    return {
+        "years": years,
+        "revenue": {str(year): revenue[year] for year in years},
+        "revenue_growth": {str(year): round(value, 6) for year, value in growth.items()},
+        "unit": "金额单位与年报一致（见记录里的 currency）；增速是小数",
+        "note": "历史增速由年报多年列示算出，供 [drivers].revenue_growth 参考；"
+        "是否直接用作预测增速需要另行判断",
+    }
 
 
 def render_placeholders(

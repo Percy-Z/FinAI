@@ -1,12 +1,13 @@
 """取数层核心测试：清单、检索解析、扫描、拼装、接流水线、行情表校验。"""
 from __future__ import annotations
 
+import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from finai_web import adapter, cninfo, extract, market, schema
+from finai_web import adapter, cninfo, columns, extract, market, schema
 from finai_web import targets as targets_mod
 from finai_web.downloader import FetchOutcome, fetch_one, import_local, save_manifest
 from finai_web.firecrawl import Firecrawl, FirecrawlError, FirecrawlUnavailable
@@ -322,6 +323,41 @@ HUAWEI_VALUES = {
 
 class RealReportLayoutTest(unittest.TestCase):
     """这些都是从真实年报里踩出来的规则，改抽取逻辑时要靠它们兜住。"""
+
+    def test_标签前面连着汉字就不算命中(self) -> None:
+        """「长短期借款」不是「短期借款」，「总股本」不是「股本」。"""
+        self.assertEqual(extract.label_position("长短期借款 239,284 264,871", "短期借款"), -1)
+        self.assertEqual(extract.label_position("总出资相当于公司总股本的比例约0.59%", "股本"), -1)
+        self.assertEqual(extract.label_position("借款利息费用 (6,972) (10,487)", "利息费用"), -1)
+        # 标签右边接着字是允许的：报表常用「应收账款及应收票据」这种合并标题
+        self.assertGreaterEqual(extract.label_position("应收账款及应收票据 3,959", "应收账款"), 0)
+        # 完整的 IFRS 标题要能命中（它必须被显式写进科目表）
+        self.assertGreaterEqual(
+            extract.label_position("财务收入及财务费用 11 (15,821)", "财务收入及财务费用"), 0
+        )
+        # 「非流动负债合计」里虽然含「负债合计」，但前面连着汉字 → 不算命中
+        self.assertEqual(extract.label_position("非流动负债合计 232,203", "负债合计"), -1)
+        self.assertEqual(extract.label_position("负债合计 734,810", "负债合计"), 0)
+
+    def test_管理层讨论页不能顶替报表科目(self) -> None:
+        """华为第 65/66 页的债务分析里写着「短期借款 239,284」——那是借款总额。"""
+        discussion = (
+            "管理层讨论与分析\n"
+            "短期借款 239,284 264,871\n"
+            "其中：长期借款 219,861 237,508\n"
+        )
+        balance = (
+            "概要合并财务状况表\n"
+            "（人民币百万元） 附注 2025年 2024年\n"
+            "借款 24 219,861 237,508\n"
+            "借款 24 19,423 27,363\n"
+            "负债合计 734,810 745,530\n"
+        )
+        hits = extract.scan_pages([discussion, balance])
+        # 文档里有「资产负债表」页，那么资产负债表科目就只能从那一页取
+        self.assertNotIn("short_term_debt", hits)
+        self.assertNotIn("long_term_debt", hits)
+        self.assertEqual(hits["borrowings"].value_yuan, (219_861 + 19_423) * 1_000_000)
 
     def test_跳过附注编号取金额(self) -> None:
         """「物业、厂房及设备 14 189,578」里 14 是附注号，不是金额。"""
@@ -827,6 +863,302 @@ class MarketTest(unittest.TestCase):
             )
         self.assertTrue(report.ok)
         self.assertTrue(any("不在行情表里" in warning for warning in report.warnings))
+
+
+# ---------------------------------------------------------------------------
+# 多年列示：报表有几年就取几年（2025-10-14 加）
+# ---------------------------------------------------------------------------
+
+# 合成一份「带词坐标的报表页」：金额词右对齐到列锚点（2025 列 444、2024 列 529），
+# 与真实年报的版式一致。
+ANCHOR_2025, ANCHOR_2024 = 444.0, 529.0
+
+
+def _word(text: str, x0: float, top: float, *, width: float | None = None) -> dict:
+    return {"text": text, "x0": x0, "x1": x0 + (width or len(text) * 7), "top": top}
+
+
+def _amount(text: str, anchor: float, top: float) -> dict:
+    return {"text": text, "x0": anchor - len(text) * 7, "x1": anchor, "top": top}
+
+
+def _page(title: str, rows: list[tuple[str, str | None, str, str]]) -> tuple[str, list[dict]]:
+    """造一页两列表：标题 + 两个年份列。rows 是 (科目, 附注号, 本期, 上期)。"""
+    words = [_word(title, 71, 20.0), _word("In millions", 71, 30.0)]
+    words += [
+        _word("2025年", ANCHOR_2025 - 20, 40.0),
+        _word("2024年", ANCHOR_2024 - 20, 40.0),
+    ]
+    top = 60.0
+    for label, note, current, previous in rows:
+        words.append(_word(label, 71, top))
+        if note:
+            words.append(_word(note, 342, top))
+        words.append(_amount(current, ANCHOR_2025, top))
+        words.append(_amount(previous, ANCHOR_2024, top))
+        top += 14.0
+    text = "\n".join(row.text for row in columns.rows_from_words(words))
+    return text, words
+
+
+class MultiYearTest(unittest.TestCase):
+    def test_金额词识别(self) -> None:
+        self.assertTrue(columns.looks_like_amount("189,578"))
+        self.assertTrue(columns.looks_like_amount("(14,264)"))
+        self.assertFalse(columns.looks_like_amount("14"))      # 附注编号
+        self.assertFalse(columns.looks_like_amount("2025年"))
+        self.assertEqual(columns.word_amount("(14,264)"), -14_264.0)
+        self.assertEqual(columns.word_amount("5,718"), 5_718.0)
+
+    def test_列锚点与年份配对(self) -> None:
+        words = [
+            _amount("1,234", ANCHOR_2025, 60.0),
+            _amount("2,345", ANCHOR_2024, 60.0),
+            _amount("3,456", ANCHOR_2025, 74.0),
+            _amount("4,567", ANCHOR_2024, 74.0),
+            _word("2025年", ANCHOR_2025 - 20, 40.0),
+            _word("2024年", ANCHOR_2024 - 20, 40.0),
+        ]
+        anchors = columns.detect_anchors(words)
+        self.assertEqual(len(anchors), 2)
+        paired = columns.pair_years(columns.detect_years(words), anchors)
+        self.assertAlmostEqual(paired[2025], ANCHOR_2025, places=2)
+        self.assertAlmostEqual(paired[2024], ANCHOR_2024, places=2)
+
+    def test_按列取到两个年份(self) -> None:
+        text, words = _page(
+            "概要合并财务状况表",
+            [
+                ("物业、厂房及设备", "14", "189,578", "176,565"),
+                ("资产总计", None, "1,334,930", "1,290,149"),
+            ],
+        )
+        series = columns.extract_by_year([text], [words])
+        self.assertEqual(sorted(series["total_assets"]), [2024, 2025])
+        self.assertEqual(series["total_assets"][2025].value_yuan, 1_334_930 * 1_000_000)
+        self.assertEqual(series["total_assets"][2024].value_yuan, 1_290_149 * 1_000_000)
+        self.assertEqual(series["fixed_assets"][2025].value_yuan, 189_578 * 1_000_000)
+
+    def test_现金流量表不能喂资产负债表科目(self) -> None:
+        """苹果现金流量表里「Accounts payable (1,889)」是变动额，不是余额。"""
+        balance_text, balance_words = _page(
+            "CONSOLIDATED BALANCE SHEETS",
+            [("Accounts payable", "$", "69,860", "68,960")],
+        )
+        cashflow_text, cashflow_words = _page(
+            "CONSOLIDATED STATEMENTS OF CASH FLOWS",
+            [("Accounts payable", None, "902", "6,020")],
+        )
+        series = columns.extract_by_year(
+            [balance_text, cashflow_text], [balance_words, cashflow_words]
+        )
+        self.assertEqual(series["accounts_payable"][2025].value_yuan, 69_860 * 1_000_000)
+        self.assertEqual(series["accounts_payable"][2024].value_yuan, 68_960 * 1_000_000)
+
+    def test_非合计科目不会同页相加(self) -> None:
+        """同一个数在一页出现两次是重复写法，相加会翻倍。"""
+        text, words = _page(
+            "CONSOLIDATED BALANCE SHEETS",
+            [
+                ("Total liabilities", None, "285,508", "308,030"),
+                ("Total liabilities", None, "285,508", "308,030"),
+            ],
+        )
+        series = columns.extract_by_year([text], [words])
+        self.assertEqual(series["total_liabilities"][2025].value_yuan, 285_508 * 1_000_000)
+
+    def test_拆两段的科目才相加(self) -> None:
+        text, words = _page(
+            "CONSOLIDATED BALANCE SHEETS",
+            [
+                ("Term debt", None, "12,350", "10,912"),
+                ("Term debt", None, "78,328", "85,750"),
+            ],
+        )
+        series = columns.extract_by_year([text], [words])
+        self.assertEqual(series["term_debt"][2025].value_yuan, (12_350 + 78_328) * 1_000_000)
+        self.assertEqual(series["term_debt"][2024].value_yuan, (10_912 + 85_750) * 1_000_000)
+
+    def test_多年列示能算出历史增速(self) -> None:
+        record = {
+            "series": {
+                "revenue": {
+                    "2023": {"value_yuan": 383_285e6},
+                    "2024": {"value_yuan": 391_035e6},
+                    "2025": {"value_yuan": 416_161e6},
+                }
+            }
+        }
+        history = adapter.history_from(record)
+        self.assertEqual(history["years"], [2023, 2024, 2025])
+        self.assertAlmostEqual(
+            history["revenue_growth"]["2024"], 391_035 / 383_285 - 1, places=6
+        )
+        self.assertAlmostEqual(
+            history["revenue_growth"]["2025"], 416_161 / 391_035 - 1, places=6
+        )
+
+    def test_没有多年列示时给出空结果(self) -> None:
+        self.assertEqual(adapter.history_from({"series": {}})["years"], [])
+
+
+# 港交所口径（腾讯 2025 年报）：繁体 + 中文数字年份 + 「收入」单独一行 + 股本溢价。
+TENCENT_INCOME = """綜合收益表
+截至二零二五年十二月三十一日止年度
+截至十二月三十一日止年度
+二零二五年 二零二四年
+附註 人民幣百萬元 人民幣百萬元
+收入
+增值服務 369,281 319,168
+其他 8,077 7,759
+6 751,766 660,257
+收入成本 7 (329,173) (311,011)
+經營盈利 241,562 208,099
+除稅前盈利 277,249 241,485
+所得稅開支 12(a) (47,448) (45,018)
+年度盈利 229,801 196,467
+下列人士應佔：
+本公司權益持有人 224,842 194,073
+非控制性權益 4,959 2,394
+"""
+
+TENCENT_BALANCE_1 = """綜合財務狀況表
+於二零二五年十二月三十一日
+於十二月三十一日
+二零二五年 二零二四年
+附註 人民幣百萬元 人民幣百萬元
+權益
+本公司權益持有人應佔權益
+股本 33 – –
+股本溢價 33 63,796 43,079
+保留盈利 1,010,436 892,030
+1,154,152 973,548
+非控制性權益 86,913 80,348
+權益總額 1,241,065 1,053,896
+負債
+非流動負債
+借款 36 208,369 146,521
+租賃負債 13,280 13,897
+"""
+
+TENCENT_BALANCE_2 = """綜合財務狀況表
+於二零二五年十二月三十一日
+於十二月三十一日
+二零二五年 二零二四年
+附註 人民幣百萬元 人民幣百萬元
+流動負債
+借款 36 42,618 52,885
+租賃負債 5,386 5,600
+負債總額 797,921 727,099
+權益及負債總額 2,038,986 1,780,995
+資產總額 2,038,986 1,780,995
+"""
+
+TENCENT_SUMMARY = """財務概要
+簡明綜合全面收益表
+截至十二月三十一日止年度
+二零二一年 二零二二年 二零二三年 二零二四年 二零二五年
+收入 560,118 554,552 609,015 660,257 751,766
+"""
+
+
+class TraditionalChineseReportTest(unittest.TestCase):
+    """港交所口径：繁体、中文数字年份、科目名与合计分行、股本溢价。"""
+
+    def test_CID编码的PDF要明确报错(self) -> None:
+        """小米 2025 年报的字体缺 ToUnicode 映射，抽出来是 (cid:xxxx)，本地解析救不回来。"""
+        soup = "(cid:14062)(cid:11830)(cid:11880)(cid:10227)(cid:9228)(cid:28781)" * 40
+        self.assertGreater(extract.cid_ratio([soup]), 0.9)
+        record = extract.build_record(code="1810", name="小米集团", year=2025, pages=[soup])
+        self.assertFalse(record["text_layer_usable"])
+        self.assertTrue(any("文字层不可用" in note for note in record["notes"]))
+        # 下游必须拒绝，而不是拿零星几个科目去算估值
+        with self.assertRaises(adapter.AdapterError) as ctx:
+            adapter.build_pipeline_input([record], target_code="1810")
+        self.assertIn("文字层不可用", str(ctx.exception))
+
+    def test_繁体港交所版式(self) -> None:
+        """腾讯 2025 年报：繁体、中文数字年份、科目名与合计分行、股本溢价。"""
+        pages = [TENCENT_INCOME, TENCENT_BALANCE_1, TENCENT_BALANCE_2]
+        hits = extract.scan_pages(pages)
+
+        # 收入：科目名单独一行，合计在下面（「6 751,766 660,257」）
+        self.assertEqual(hits["revenue"].value_yuan, 751_766 * 1_000_000)
+        self.assertIn("合计", hits["revenue"].note)
+        # 繁体科目名 + 港交所叫法
+        self.assertEqual(hits["net_profit"].value_yuan, 229_801 * 1_000_000)      # 年度盈利
+        self.assertEqual(hits["total_profit"].value_yuan, 277_249 * 1_000_000)   # 除税前盈利
+        self.assertEqual(hits["operating_income"].value_yuan, 241_562 * 1_000_000)  # 经营盈利
+        self.assertEqual(hits["total_assets"].value_yuan, 2_038_986 * 1_000_000)  # 资产总额
+        self.assertEqual(hits["total_liabilities"].value_yuan, 797_921 * 1_000_000)
+        self.assertEqual(hits["equity_attributable"].value_yuan, 1_154_152 * 1_000_000)
+        self.assertEqual(hits["minority_equity"].value_yuan, 86_913 * 1_000_000)
+        # 跨行科目：下列人士應佔 → 本公司權益持有人
+        self.assertEqual(
+            hits["net_profit_attributable"].value_yuan, 224_842 * 1_000_000
+        )
+        # 分两页列示的有息负债要相加
+        self.assertEqual(hits["borrowings"].value_yuan, (208_369 + 42_618) * 1_000_000)
+        # 破折号行（股本 33 – –）不能把附注编号当股本，「股本溢价」也不是「股本」
+        self.assertNotIn("share_capital", hits)
+
+    def test_繁体转简体(self) -> None:
+        self.assertEqual(extract.normalize_text("權益總額"), "权益总额")
+        self.assertEqual(extract.normalize_text("應收賬款"), "应收账款")
+        self.assertEqual(extract.detect_period_end(["於二零二五年十二月三十一日"]), "2025-12-31")
+
+    def test_中期摘要页不参与取数(self) -> None:
+        """「簡明綜合全面收益表」是摘要页，不能抢走报表正文的收入。"""
+        hits = extract.scan_pages([TENCENT_SUMMARY, TENCENT_INCOME])
+        self.assertEqual(hits["revenue"].value_yuan, 751_766 * 1_000_000)
+        self.assertNotEqual(hits["revenue"].page, 1)
+
+
+class GeneratedPdfTest(unittest.TestCase):
+    """端到端：现场生成一份两列（两年）的 PDF，走完整抽取路径。"""
+
+    def setUp(self) -> None:
+        if importlib.util.find_spec("reportlab") is None:
+            self.skipTest("没有 reportlab，跳过（可选依赖）")
+
+    def test_生成的多年PDF能逐年取数(self) -> None:
+        from reportlab.pdfgen import canvas  # type: ignore[import-not-found]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "TEST_2025.pdf"
+            pdf = canvas.Canvas(str(pdf_path), pagesize=(612, 792))
+            pdf.setFont("Helvetica", 11)
+            pdf.drawString(50, 750, "CONSOLIDATED BALANCE SHEETS")
+            pdf.drawString(50, 735, "In millions")
+            pdf.drawString(430, 715, "2025")
+            pdf.drawString(515, 715, "2024")
+            rows = [
+                ("Cash and cash equivalents", "35,934", "29,943"),
+                ("Inventories", "5,718", "7,286"),
+                ("Total assets", "359,241", "364,980"),
+                ("Total liabilities", "285,508", "308,030"),
+                ("Total shareholders' equity", "73,733", "56,950"),
+            ]
+            top = 690
+            for label, current, previous in rows:
+                pdf.drawString(50, top, label)
+                pdf.drawRightString(485, top, current)
+                pdf.drawRightString(559, top, previous)
+                top -= 16
+            pdf.save()
+
+            record = extract.extract_pdf(
+                pdf_path, code="TEST", name="测试", year=2025, with_cross_check=False
+            )
+
+        series = record["series"]
+        self.assertEqual(record["years"], [2025, 2024])
+        self.assertEqual(series["total_assets"]["2025"]["value_yuan"], 359_241 * 1_000_000)
+        self.assertEqual(series["total_assets"]["2024"]["value_yuan"], 364_980 * 1_000_000)
+        self.assertEqual(series["cash"]["2024"]["value_yuan"], 29_943 * 1_000_000)
+        self.assertEqual(
+            series["equity_attributable"]["2025"]["value_yuan"], 73_733 * 1_000_000
+        )
 
 
 if __name__ == "__main__":
