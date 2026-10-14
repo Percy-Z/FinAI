@@ -255,7 +255,7 @@ def _evidence(run_id: str | None) -> list[dict[str, Any]]:
         return []
     run_dir = RUNS_ROOT / run_id
     log_dir = LOGS_ROOT / run_id
-    data_dir = REPO_ROOT / "data"
+    inputs = _input_paths()
 
     def item(label: str, hint: str, path: Path, url: str) -> dict[str, Any]:
         return {
@@ -277,12 +277,15 @@ def _evidence(run_id: str | None) -> list[dict[str, Any]]:
              log_dir / "trace.jsonl", f"/logs/{run_id}/trace.jsonl"),
         item("大模型原始问答", "提示词与响应的完整原文",
              log_dir / "narrative.json", f"/logs/{run_id}/narrative.json"),
-        item("输入 · 经营假设", "含假设依据台账，manifest 中有其 sha256",
-             data_dir / "assumptions.toml", "/data/assumptions.toml"),
-        item("输入 · 行情快照", "估值基准日的股价与负债表数据",
-             data_dir / "market.csv", "/data/market.csv"),
-        item("输入 · 可比公司", "可比公司最近一个完整年度的财务数据",
-             data_dir / "peers.csv", "/data/peers.csv"),
+        # 三个输入文件按「实际生效的路径」列，并在提示里写明它到底是哪一份 ——
+        # 数据集可以指到别的目录（例如 data/real-000661/），不写清楚会让人以为
+        # 看的是仓库里那份演示数据。
+        item("输入 · 经营假设", f"含假设依据台账（{_rel(inputs['assumptions.toml'])}）",
+             inputs["assumptions.toml"], "/data/assumptions.toml"),
+        item("输入 · 行情快照", f"估值基准日的股价与负债表数据（{_rel(inputs['market.csv'])}）",
+             inputs["market.csv"], "/data/market.csv"),
+        item("输入 · 可比公司", f"可比公司最近一个完整年度的财务数据（{_rel(inputs['peers.csv'])}）",
+             inputs["peers.csv"], "/data/peers.csv"),
     ]
 
 
@@ -343,6 +346,49 @@ def _rel(path: Path) -> str:
         return path.resolve().relative_to(REPO_ROOT).as_posix()
     except ValueError:
         return str(path)
+
+
+# 静态文件的 Content-Type。放在模块层，是为了让「按实际生效路径发输入文件」
+# 那条路（见 _input_paths / do_GET 的 /data/ 分支）用同一张表。
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".json": "application/json; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".woff2": "font/woff2",
+    ".jsonl": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
+    ".tex": "text/plain; charset=utf-8",
+    ".toml": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+# 界面上三个「输入文件」对外用固定名字（/data/<名字>），由服务器解析成**这次实际
+# 生效**的路径。取数层的路径开关（FINAI_ASSUMPTIONS / FINAI_MARKET_CSV /
+# FINAI_PEERS_CSV）能把输入指到别的数据集（例如 data/real-000661/），但界面原先
+# 写死读 data/ 下那三个演示文件 —— 于是「新建估值」和「复现凭证」看到的输入跟这次
+# 运行实际用的对不上（2026-10-14 用户指出：工作台里显示的还是示例公司）。
+INPUT_NAMES = ("assumptions.toml", "market.csv", "peers.csv")
+
+
+def _input_paths() -> dict[str, Path]:
+    """这次实际生效的三个输入文件的路径。
+
+    每次都现取（而不是在模块导入时固化）：测试要用 mock 换一套输入，真实使用里
+    这几个路径也来自环境变量。
+    """
+    from . import config
+
+    return {
+        "assumptions.toml": Path(config.DEFAULT_CONFIG_PATH),
+        "market.csv": Path(config.DEFAULT_MARKET_PATH),
+        "peers.csv": Path(config.DEFAULT_PEER_PATH),
+    }
 
 
 def _short(text: str, limit: int = 140) -> str:
@@ -756,6 +802,18 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_under(LOGS_ROOT, path, "/logs/")
             return
         if path.startswith("/data/"):
+            # 三个输入文件按「实际生效的路径」发：数据集可以由 FINAI_ASSUMPTIONS /
+            # FINAI_MARKET_CSV / FINAI_PEERS_CSV 指到别的目录，界面照旧用
+            # /data/assumptions.toml 这样的固定地址取，两边才对得上。
+            name = unquote(path[len("/data/") :])
+            mapped = _input_paths().get(name)
+            if mapped is not None and mapped.is_file():
+                self._send(
+                    200,
+                    mapped.read_bytes(),
+                    _CONTENT_TYPES.get(mapped.suffix.lower(), "text/plain; charset=utf-8"),
+                )
+                return
             self._serve_under(REPO_ROOT / "data", path, "/data/")
             return
         self._html("<h1>404</h1>", 404)
@@ -789,24 +847,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "文件不存在"}, 404)
             return
         suffix = candidate.suffix.lower()
-        types = {
-            ".html": "text/html; charset=utf-8",
-            ".css": "text/css; charset=utf-8",
-            ".js": "text/javascript; charset=utf-8",
-            ".svg": "image/svg+xml",
-            ".json": "application/json; charset=utf-8",
-            ".pdf": "application/pdf",
-            ".png": "image/png",
-            ".webp": "image/webp",
-            ".woff2": "font/woff2",
-            ".jsonl": "text/plain; charset=utf-8",
-            ".csv": "text/csv; charset=utf-8",
-            ".md": "text/plain; charset=utf-8",
-            ".tex": "text/plain; charset=utf-8",
-            ".toml": "text/plain; charset=utf-8",
-            ".txt": "text/plain; charset=utf-8",
-        }
-        self._send(200, candidate.read_bytes(), types.get(suffix, "application/octet-stream"))
+        self._send(
+            200,
+            candidate.read_bytes(),
+            _CONTENT_TYPES.get(suffix, "application/octet-stream"),
+        )
 
 
 _PAGE = r"""<!doctype html>

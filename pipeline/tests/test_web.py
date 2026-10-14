@@ -23,14 +23,17 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+import tempfile
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline import web  # noqa: E402
+from pipeline import config  # noqa: E402
 
 
 class WebTestBase(unittest.TestCase):
@@ -78,6 +81,46 @@ class WebTestBase(unittest.TestCase):
                 return err.code, err.headers.get("Content-Type", ""), err.read()
             finally:
                 err.close()
+
+
+class TestInputsFollowDataset(WebTestBase):
+    """界面上那三个「输入文件」要跟着**实际生效的输入路径**走。
+
+    取数层的路径开关能把输入指到别的数据集（例如 data/real-000661/），但界面原先
+    写死读 data/ 下那三个演示文件 —— 于是「新建估值」和「复现凭证」看到的输入跟这次
+    运行实际用的对不上（2026-10-14 用户指出：工作台里显示的还是示例公司）。
+    """
+
+    def test_输入文件按实际生效的路径发(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "assumptions.toml"
+            real.write_text('[company]\nname = "长春高新"\n', encoding="utf-8")
+            with mock.patch.object(config, "DEFAULT_CONFIG_PATH", real):
+                code, kind, body = self.get("/data/assumptions.toml")
+            self.assertEqual(code, 200)
+            self.assertIn("text/plain", kind)   # .toml 当文本发，浏览器能内嵌显示
+            self.assertIn("长春高新", body.decode("utf-8"))
+
+    def test_复现凭证里的输入指向同一份文件(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "market.csv"
+            real.write_text("code,name,role\n", encoding="utf-8")
+            with mock.patch.object(config, "DEFAULT_MARKET_PATH", real):
+                _, _, raw = self.get("/api/status")
+                item = next(
+                    entry
+                    for entry in json.loads(raw)["evidence"]
+                    if entry["label"] == "输入 · 行情快照"
+                )
+                code, _, body = self.get(item["url"])
+            # 地址保持稳定（复现凭证的按钮不能因为换了数据集就变），
+            # 但提示里要写明到底是哪一份文件
+            self.assertEqual(item["url"], "/data/market.csv")
+            self.assertIn(Path(tmp).name, item["hint"])
+            self.assertTrue(item["exists"])
+            self.assertEqual(code, 200)
+            # 比内容而不是比换行：Windows 上写文件会把 \n 转成 \r\n
+            self.assertIn("code,name,role", body.decode("utf-8"))
 
 
 class TestIngest(WebTestBase):

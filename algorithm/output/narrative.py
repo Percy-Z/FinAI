@@ -553,7 +553,10 @@ def parse_sections(content: str) -> tuple[dict[str, str], list[str]]:
     return sections, notes
 
 
-_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
+# 数字：**要认千分位**（14,698,269,693.83）。不认的话，一个亿级数字会被拆成
+# 14 / 698 / 269 / 693.83 四段，每一段都不在事实表里 —— 实测一份报告因此报出
+# 5 处「事实表之外的数字」，全是同一串数字的碎片（2026-10-14）。
+_NUMBER_PATTERN = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
 
 # 负号有三种写法：ASCII 的 `-`、全角减号 `－`（U+FF0D）、数学减号 `−`（U+2212）。
 # 年报与台账里常混用（例如「同比 −10.27%」），大模型多半输出 ASCII 的 `-`。
@@ -565,6 +568,14 @@ _MINUS_NORMALIZE = str.maketrans({"\u2212": "-", "\uff0d": "-"})
 def _numbers_in(text: str) -> list[str]:
     """抠出一段文字里的数字，先把几种负号统一成 ASCII 减号。"""
     return _NUMBER_PATTERN.findall(text.translate(_MINUS_NORMALIZE))
+
+
+def _number_value(token: str) -> float | None:
+    """数字串 → float：千分位先去掉，去掉之后不像数字就返回 None。"""
+    try:
+        return float(token.replace(",", ""))
+    except ValueError:
+        return None
 
 
 # 区间写法：7.32-12.87、9.58 - 9.77、2026—2030。
@@ -606,10 +617,9 @@ def verify_numbers(
             return
         if isinstance(value, str):
             for token in _numbers_in(value):
-                try:
-                    allowed.add(float(token))
-                except ValueError:
-                    continue
+                number = _number_value(token)
+                if number is not None:
+                    allowed.add(number)
 
     collect(facts)
 
@@ -635,9 +645,8 @@ def verify_numbers(
         # 先把区间连接符换成顿号，再扫数字 —— 顺序不能反
         cleaned = _RANGE_PATTERN.sub("至", text)
         for token in _numbers_in(cleaned):
-            try:
-                value = float(token)
-            except ValueError:
+            value = _number_value(token)
+            if value is None:
                 continue
             if not is_allowed(value):
                 warnings.append(f"{name} 里出现事实表之外的数字：{token}")

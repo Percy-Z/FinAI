@@ -295,6 +295,19 @@ class TestVerifyNumbers(unittest.TestCase):
         }
         self.assertEqual(verify_numbers(sections, facts), [])
 
+    def test_千分位的数字算一个数(self):
+        """14,698,269,693.83 是一个数，不能被拆成 14 / 698 / 269 / 693.83。
+
+        真实案例（2026-10-14）：报告的预测表里写着 14,698,269,693.83，数字校验
+        不认千分位，于是把碎片当成「事实表之外的数字」报了 5 处 —— 全是同一串
+        数字的碎片。
+        """
+        facts = {"projections": {"years": [{"revenue": 14698269693.83}]}}
+        sections = {
+            "company_overview": "到 2030 年，预测收入为 14,698,269,693.83 元。"
+        }
+        self.assertEqual(verify_numbers(sections, facts), [])
+
     def test_multiple_invented_numbers_are_all_reported(self):
         warnings = verify_numbers({"a": "分别约为 3.33 和 6.66。"}, self.facts)
         self.assertEqual(len(warnings), 2)
