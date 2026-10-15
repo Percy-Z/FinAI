@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import sys
@@ -82,6 +83,68 @@ class WebTestBase(unittest.TestCase):
                 return err.code, err.headers.get("Content-Type", ""), err.read()
             finally:
                 err.close()
+
+
+class TestReportImport(WebTestBase):
+    """工作台吃「本地年报 PDF」那条路：上传 → 入库 → 写出清单。
+
+    这一条把「年报从哪来」与「怎么读年报」分开：PDF 由使用者提供（可能来自队友、
+    交易所，或者现场发的样例），读取仍走取数层。入库之后 plan 照旧自己跑完成。
+    """
+
+    def _upload(self, tmp: str, reports: list[dict]) -> tuple[int, dict]:
+        body = json.dumps(
+            {"company": "600519", "reports": reports}, ensure_ascii=False
+        ).encode("utf-8")
+        with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+            code, _, raw = self.post("/api/reports", body)
+        return code, json.loads(raw.decode("utf-8"))
+
+    def test_上传的年报落进公司目录并写出清单(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blob = base64.b64encode(b"%PDF-1.4" + b"0" * 2048).decode()
+            code, payload = self._upload(
+                tmp,
+                [
+                    {
+                        "code": "600519",
+                        "year": 2026,
+                        "name": "贵州茅台",
+                        "role": "target",
+                        "title": "2025年年度报告",
+                        "data": blob,
+                    },
+                    {"code": "000858", "year": 2026, "name": "五粮液"},
+                ],
+            )
+            self.assertEqual(code, 200, payload)
+            self.assertTrue(payload["ok"], payload)
+            base = Path(tmp) / "companies" / "600519"
+            self.assertTrue((base / "raw_pdf" / "600519_2026.pdf").is_file())
+            self.assertTrue((base / "company.json").is_file())
+            self.assertEqual(payload["target"]["code"], "600519")
+            # 没有 PDF 的可比公司只提示，不拦 —— 它会在取数时联网下载
+            self.assertTrue(any("联网下载" in note for note in payload["warnings"]))
+
+    def test_不是PDF的上传被拦下(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blob = base64.b64encode(b"PK\x03\x04" + b"0" * 64).decode()
+            code, payload = self._upload(
+                tmp,
+                [{"code": "600519", "year": 2026, "role": "target", "data": blob}],
+            )
+            self.assertEqual(code, 409)
+            self.assertFalse(payload["ok"])
+            self.assertIn("PDF", payload["error"])
+
+    def test_缺年份的上传被拦下(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blob = base64.b64encode(b"%PDF-1.4" + b"0" * 64).decode()
+            code, payload = self._upload(
+                tmp, [{"code": "600519", "role": "target", "data": blob}]
+            )
+            self.assertEqual(code, 409)
+            self.assertIn("披露年份", payload["error"])
 
 
 class TestInputsFollowDataset(WebTestBase):

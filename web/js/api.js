@@ -158,6 +158,7 @@
   }
   function startPlan(spec) { return request('POST', '/api/plan', spec); }
   function startIngestRun(company) { return request('POST', '/api/ingest/run', { company: company }); }
+  function importReports(payload) { return request('POST', '/api/reports', payload); }
 
   /* ── 归一化：把产物文件拼成页面需要的一份数据 ─────────────────────── */
   function normalizeComps(compsRows, impliedRows) {
@@ -390,6 +391,7 @@
     saveDraft: saveDraft,
     startPlan: startPlan,
     startIngestRun: startIngestRun,
+    importReports: importReports,
     get: get,
     load: load,
     loadRun: loadRun,

@@ -27,17 +27,20 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .console import safe_console
@@ -820,6 +823,68 @@ def _list_companies() -> list[dict[str, Any]]:
     ]
 
 
+MAX_REPORT_BYTES = 200 * 1024 * 1024
+
+
+def _stage_reports(items: Sequence[Any], *, folder: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """把界面上的「年报入库」条目整理成 job.import_reports 要的形状。
+
+    一条可以是三种来源之一：
+        浏览器上传（data 是 base64）→ 落到临时目录，按 `<代码>_<年份>.pdf` 命名
+        机器上已有的路径（path）    → 直接用，入库时再复制
+        只给了代码与年份（都没给）  → 承认这一家没有 PDF，取数时联网下载
+
+    落盘时一定要用 `<代码>_<年份>.pdf` 这个命名：抽取那一步靠文件名认年份。
+    """
+    entries: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    total = 0
+    for index, raw in enumerate(items or ()):
+        if not isinstance(raw, Mapping):
+            warnings.append(f"第 {index + 1} 条年报不是对象，已跳过")
+            continue
+        code = str(raw.get("code") or "").strip()
+        if not code:
+            warnings.append(f"第 {index + 1} 条年报没写公司代码，已跳过")
+            continue
+        try:
+            year = int(raw.get("year") or 0)
+        except (TypeError, ValueError):
+            warnings.append(f"{code} 的披露年份不是数字，已跳过")
+            continue
+        entry: dict[str, Any] = {
+            "code": code,
+            "year": year,
+            "name": str(raw.get("name") or "").strip(),
+            "role": str(raw.get("role") or "").strip(),
+            "title": str(raw.get("title") or "").strip(),
+            "path": str(raw.get("path") or "").strip(),
+        }
+        blob = raw.get("data")
+        if isinstance(blob, str) and blob:
+            try:
+                payload = base64.b64decode(blob, validate=False)
+            except (binascii.Error, ValueError):
+                warnings.append(f"{code} 的上传内容不是合法的 base64，已跳过")
+                continue
+            total += len(payload)
+            if total > MAX_REPORT_BYTES:
+                raise ValueError("一次入库的 PDF 总量超过 200 MB —— 请分批入库")
+            if not payload[:8].startswith(b"%PDF"):
+                warnings.append(f"{code} 这一份不是 PDF（前几个字节不是 %PDF），已跳过")
+                continue
+            if year <= 0:
+                warnings.append(
+                    f"{code} 没写披露年份，已跳过 —— 文件名要落成 <代码>_<年份>.pdf"
+                )
+                continue
+            staged = folder / f"{code}_{year}.pdf"
+            staged.write_bytes(payload)
+            entry["path"] = str(staged)
+        entries.append(entry)
+    return entries, warnings
+
+
 def _coerce(value: Any) -> Any:
     """确认屏传回来的值：空串就是「没填」，数字串变数字，其余原样。"""
     if value is None:
@@ -1165,12 +1230,91 @@ class Handler(BaseHTTPRequestHandler):
                 extra += ["--as-of", str(body["as_of"])]
             if body.get("force"):
                 extra += ["--force"]
+            # 报表不是人民币计价时必须给汇率（不给会在汇总那一步停下并说清原因）
+            if body.get("fx") not in (None, ""):
+                try:
+                    fx = float(body["fx"])
+                except (TypeError, ValueError):
+                    self._json({"ok": False, "error": "汇率不是数字"}, 409)
+                    return
+                if fx <= 0:
+                    self._json({"ok": False, "error": "汇率必须大于 0"}, 409)
+                    return
+                extra += ["--fx", str(fx)]
+            # 手填行情：给了就不联网取价（断网/现场演示用）
+            prices = body.get("prices") or []
+            price_day = str(body.get("price_as_of") or "")
+            if prices:
+                if price_day:
+                    extra += ["--price-as-of", price_day]
+                for item in prices:
+                    raw_code = str((item or {}).get("code") or "").strip()
+                    raw_price = (item or {}).get("price")
+                    if not raw_code or raw_price in (None, ""):
+                        continue
+                    try:
+                        extra += ["--price", f"{raw_code}={float(raw_price)}"]
+                    except (TypeError, ValueError):
+                        self._json(
+                            {"ok": False, "error": f"{raw_code} 的价格不是数字"}, 409
+                        )
+                        return
             try:
                 job_id = _start_company_job("plan", code, extra)
             except (ValueError, RuntimeError) as err:
                 self._json({"ok": False, "error": str(err)}, 409)
                 return
             self._json({"ok": True, "job_id": job_id, "phase": "plan"})
+            return
+        if path == "/api/reports":
+            # 年报入库：把使用者手上的 PDF 收进公司目录，并按它们写出清单（不联网）。
+            # 入库之后走的还是同一条 plan —— 抽取、取价、假设草稿、估值一模一样。
+            body = self._read_json()
+            items = body.get("reports") or body.get("files") or []
+            code = str(
+                body.get("company") or body.get("target_code") or ""
+            ).strip()
+            staged = tempfile.mkdtemp(prefix="finai-reports-")
+            try:
+                entries, warnings = _stage_reports(items, folder=Path(staged))
+            except ValueError as err:
+                self._json({"ok": False, "error": str(err)}, 409)
+                return
+            if not code:
+                target = next(
+                    (item for item in entries if item.get("role") == "target"), None
+                )
+                code = str((target or (entries[0] if entries else {})).get("code") or "")
+            try:
+                directory = _company_target(code)
+            except ValueError as err:
+                self._json({"ok": False, "error": str(err)}, 409)
+                return
+            if not entries:
+                self._json(
+                    {
+                        "ok": False,
+                        "error": "没有可入库的年报 —— "
+                        + ("；".join(warnings) if warnings else "请选择 PDF 文件"),
+                    },
+                    409,
+                )
+                return
+            from . import job as job_mod
+
+            try:
+                summary = job_mod.import_reports(
+                    directory,
+                    entries,
+                    target_code=code,
+                    resolved_from=str(body.get("resolved_from") or "工作台年报入库（不联网检索）"),
+                )
+            except (job_mod.JobError, ValueError) as err:
+                self._json({"ok": False, "error": str(err)}, 409)
+                return
+            summary["ok"] = True
+            summary["warnings"] = warnings + list(summary.get("warnings") or [])
+            self._json(summary)
             return
         if path == "/api/plan/draft":
             # 确认屏上改的值直接落到草稿里 —— 草稿是「人确认过的假设」的唯一出处，

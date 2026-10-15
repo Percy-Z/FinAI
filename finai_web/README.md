@@ -240,6 +240,39 @@ python -m pipeline.job plan --company-dir data/companies/600519 --target-code 60
 python -m pipeline.job run --company-dir data/companies/600519
 ```
 
+## 从年报 PDF 开始（年报不一定要从网上下）
+
+```
+手上的 PDF → 入库（按 <代码>_<年份>.pdf 落盘 + 写清单）→ 抽取 → 汇总 → 取价 → 假设草稿 → 人复核 → 估值
+```
+
+`python -m pipeline.job import`（工作台取数页的「⓪ 有现成的年报 PDF 吗」调的就是它）
+把使用者手上的年报收进 `data/companies/<代码>/raw_pdf/`，并按它们写出 `company.json`
+与 `targets.csv` —— **不联网检索**。之后 `plan` 走的是同一条链路：命中的 PDF 直接
+跳过下载，抽取、汇总、取价、假设草稿一步不少。
+
+```powershell
+python -m pipeline.job import --company-dir data/companies/600519 `
+        --report 600519=2026=D:\年报\600519_2025.pdf `
+        --report 000858=2026=D:\年报\000858_2025.pdf `
+        --name 600519=贵州茅台 --target-code 600519
+```
+
+几条约定：
+
+- `--report 代码=披露年份=PDF路径`：2025 年年报在 2026 年披露就写 2026。
+  文件名会落成 `<代码>_<年份>.pdf` —— 抽取那一步靠文件名认年份。
+- 同一家公司可以给多年（再写一条 `--report 600519=2025=...`）：上一年的那份用来把
+  盈利归一到正常年份；`years` 进 company.json，`plan` 按它找 PDF。
+- 公告标题（web 界面上那一栏）会进 manifest，流水线靠它认**财报年度**；
+  没给就退回「披露年份 − 1」（A 股年报的常规节奏）。
+- 入库登记走 `downloader.import_local`：验 `%PDF` 魔数、算 sha256、写 manifest，
+  与联网下载共用一套。入库之后再跑 `plan` 时，那次「本地已有、跳过下载」不会把
+  「手工入库」这条出处覆盖掉 —— 否则报告里会把来路说成 cninfo。
+- 断网时用 `plan --price 代码=价格 --price-as-of 日期` 手填股价；market.csv 与报告
+  都会写明这一列是人工填写、没有交叉核对。beta 算不出来只会空着（草稿标「需人工填」），
+  不会让整条取数失败。
+
 新增的四个模块：
 
 | 模块 | 干什么 | 关键约定 |

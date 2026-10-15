@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from pipeline import assumptions_gen as gen  # noqa: E402
 from pipeline import job  # noqa: E402
+from finai_web import company as company_mod  # noqa: E402
 
 
 def account(value: float) -> dict:
@@ -286,6 +287,156 @@ class PlanTest(unittest.TestCase):
             "ingest_assumptions",
         ):
             self.assertIn(f'"{step}"', trace)
+
+
+class ImportReportsTest(unittest.TestCase):
+    """年报入库：使用者把年报 PDF 给工作台，程序负责读 —— 这条路不联网。
+
+    为什么值得单测：竞赛现场拿到的可能是**离线**的年报文件（队友给的、
+    交易所要验证码才给的、官方样例）。入库之后走的必须是同一条链路，
+    否则「本地年报」与「联网下载」会变成两套会各自漂移的代码。
+    """
+
+    def _pdf(self, folder: Path, name: str, filler: bytes = b"0") -> Path:
+        # 只要求前几个字节是 %PDF：入库这一步不解析内容，解析是抽取那一步的事
+        path = folder / name
+        path.write_bytes(b"%PDF-1.4" + filler * 2048)
+        return path
+
+    def test_入库按代码与年份落文件名并写出清单(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "companies" / "600519"
+            downloads = Path(tmp) / "downloads"
+            downloads.mkdir()
+            target = self._pdf(downloads, "贵州茅台2025年年度报告.pdf", b"A")
+            peer = self._pdf(downloads, "000858_2025.pdf", b"B")
+
+            summary = job.import_reports(
+                base,
+                [
+                    {
+                        "path": str(target),
+                        "code": "600519",
+                        "year": 2026,
+                        "name": "贵州茅台",
+                        "role": "target",
+                        "title": "2025年年度报告",
+                    },
+                    {"path": str(peer), "code": "000858", "year": 2026, "name": "五粮液"},
+                ],
+            )
+
+            # 文件名一定要落成 <代码>_<年份>.pdf —— 抽取那一步靠它认年份
+            self.assertTrue((base / "raw_pdf" / "600519_2026.pdf").is_file())
+            self.assertTrue((base / "raw_pdf" / "000858_2026.pdf").is_file())
+            self.assertEqual(summary["target"]["code"], "600519")
+            self.assertEqual([item["code"] for item in summary["peers"]], ["000858"])
+
+            # 清单是 plan 的唯一入口：它必须能被读回来
+            profile = company_mod.CompanyProfile.load(base / "company.json")
+            self.assertEqual(profile.target.code, "600519")
+            self.assertEqual(profile.target.years, (2026,))
+            self.assertEqual(profile.peer_codes, ["000858"])
+            self.assertTrue((base / "targets.csv").is_file())
+
+            # 出处：PDF 的 sha256 与公告标题都进下载清单（报告里要说得出哪来的）
+            manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
+            entry = manifest["entries"]["600519_2026"]
+            self.assertEqual(entry["method"], "imported")
+            self.assertEqual(entry["title"], "2025年年度报告")
+            self.assertEqual(len(entry["sha256"]), 64)
+
+    def test_没有给PDF的那家只提示联网下载(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "companies" / "600519"
+            downloads = Path(tmp) / "downloads"
+            downloads.mkdir()
+            target = self._pdf(downloads, "600519_2025.pdf")
+            summary = job.import_reports(
+                base,
+                [
+                    {"path": str(target), "code": "600519", "year": 2026, "role": "target"},
+                    {"code": "000858", "year": 2026, "name": "五粮液"},
+                ],
+            )
+            self.assertEqual([item["code"] for item in summary["peers"]], ["000858"])
+            self.assertTrue(any("联网下载" in note for note in summary["warnings"]))
+            self.assertFalse((base / "raw_pdf" / "000858_2026.pdf").exists())
+
+    def test_不是PDF就停下并说清(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "companies" / "600519"
+            fake = Path(tmp) / "年报.docx"
+            fake.write_bytes(b"PK\x03\x04" + b"0" * 2048)  # 看起来就是个 docx
+            with self.assertRaises(job.JobError) as caught:
+                job.import_reports(
+                    base,
+                    [{"path": str(fake), "code": "600519", "year": 2026, "role": "target"}],
+                )
+            self.assertIn("不是 PDF", str(caught.exception))
+
+    def test_缺年份与缺代码都要报错(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "companies" / "600519"
+            pdf = self._pdf(Path(tmp), "600519_2025.pdf")
+            with self.assertRaises(job.JobError) as caught:
+                job.import_reports(base, [{"path": str(pdf), "code": "600519"}])
+            self.assertIn("披露年份", str(caught.exception))
+            with self.assertRaises(job.JobError) as caught:
+                job.import_reports(base, [{"path": str(pdf), "code": ""}])
+            self.assertIn("公司代码", str(caught.exception))
+
+    def test_手填行情时不再联网取价(self) -> None:
+        """价格是唯一必须来自市场的数（股数、负债、现金都在年报里）。
+        断网时由人填，但 market.csv 里必须写明「人工填写、没有交叉核对」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp))
+            with mock.patch.dict(os.environ):
+                summary = job.plan(
+                    base,
+                    job_id="test-plan-manual-prices",
+                    transport=fake_transport,
+                    manual_prices={
+                        "000661": {"price": 71.83, "as_of": "2026-09-30"},
+                        "300009": {"price": 8.61, "as_of": "2026-09-30"},
+                    },
+                )
+            market = (base / "market.csv").read_text(encoding="utf-8")
+            self.assertIn("000661,长春高新,target,71.83", market)
+            self.assertIn("人工填写", market)
+            self.assertTrue(summary["prices_manual"])
+            self.assertEqual(summary["as_of"], "2026-09-30")
+
+    def test_手填行情缺一家就停下(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp))
+            with mock.patch.dict(os.environ):
+                with self.assertRaises(job.JobError) as caught:
+                    job.plan(
+                        base,
+                        job_id="test-plan-manual-missing",
+                        transport=fake_transport,
+                        manual_prices={
+                            "000661": {"price": 71.83, "as_of": "2026-09-30"}
+                        },
+                    )
+            self.assertIn("300009", str(caught.exception))
+
+    def test_手填行情的基准日必须一致(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp))
+            with mock.patch.dict(os.environ):
+                with self.assertRaises(job.JobError) as caught:
+                    job.plan(
+                        base,
+                        job_id="test-plan-manual-days",
+                        transport=fake_transport,
+                        manual_prices={
+                            "000661": {"price": 71.83, "as_of": "2026-09-30"},
+                            "300009": {"price": 8.61, "as_of": "2026-09-29"},
+                        },
+                    )
+            self.assertIn("不一致", str(caught.exception))
 
 
 class RunTest(unittest.TestCase):

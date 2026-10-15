@@ -260,6 +260,32 @@ def manifest_titles(company_dir: str | Path) -> dict[str, str]:
     return titles
 
 
+def manifest_entry(
+    company_dir: str | Path, code: str, year: int
+) -> dict[str, Any]:
+    """下载清单里「这家公司这一年」的那一条（没有就返回空字典）。
+
+    用途：报告里要写清数据来源 —— 从巨潮下的，和队友给的本地 PDF，
+    是两件不同的事，不能都写成 cninfo。
+    """
+    path = Path(company_dir) / "manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    entries = raw.get("entries") if isinstance(raw, Mapping) else None
+    if isinstance(entries, Mapping):
+        entries = list(entries.values())
+    for entry in entries or []:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("code") or "") == str(code) and str(entry.get("year") or "") == str(year):
+            return dict(entry)
+    return {}
+
+
 def _account(record: Mapping[str, Any], name: str) -> float | None:
     """取一个科目（元）。抽不到返回 None —— 不返回 0，那会被当成真值参与计算。"""
     accounts = record.get("accounts") or {}
@@ -468,6 +494,40 @@ def _ratio(numerator: Any, denominator: Any) -> float | None:
     return float(numerator) / float(denominator)
 
 
+def history_growth(payload: Mapping[str, Any]) -> tuple[float | None, str]:
+    """从年报的多年列示里算历史收入增速，返回 (采用值, 说明)。
+
+    原先只有「上一年的年报也下了」才有同比可算，否则只能说「只有一份年报」。
+    取数层的多年列示把这个限制去掉了：同一份年报里就带着连续几年的数
+    （`payload["history"]` 是 `adapter.history_from` 写进去的）。
+
+    只做算术，不做判断：历史增速能不能当预测增速用仍要人看（行业、管理层指引），
+    所以这里沿用与「两份年报」那条路径完全相同的保守规则（不超过 3%、不为负），
+    并在说明里把两个年度的原始数字写出来，评审能直接对。
+    """
+    history = payload.get("history") or {}
+    revenue = history.get("revenue") or {}
+    series: list[tuple[int, float]] = []
+    for year, value in revenue.items():
+        try:
+            series.append((int(year), float(value)))
+        except (TypeError, ValueError):
+            continue
+    series.sort()
+    if len(series) < 2:
+        return None, ""
+    (prior_year, prior_value), (now_year, now_value) = series[-2], series[-1]
+    if not prior_value:
+        return None, ""
+    raw = now_value / prior_value - 1.0
+    applied = min(max(raw, 0.0), 0.03)
+    return applied, (
+        f"年报多年列示：{prior_year} 年收入 {prior_value:,.0f} → {now_year} 年 "
+        f"{now_value:,.0f}，同比 {raw:+.1%}；规则取「不超过 3%、不为负」"
+        f"→ 预测期按 {applied:.1%} 平推（保守）"
+    )
+
+
 def build_draft(
     company_dir: str | Path,
     *,
@@ -553,19 +613,38 @@ def build_draft(
         "company.name",
         Field(
             key="company.name",
+            # 上一版优先：人可能在 assumptions.toml 里把简称补成了工商全称，
+            # 那属于「人写的东西」，不能被这次取到的简称冲掉（有测试盯着这条）。
             value=prev_company.get("name") or target.get("name") or target.get("code"),
             status=KEPT if prev_company.get("name") else DERIVED,
-            source="沿用上一版文件里的公司全称" if prev_company.get("name") else "巨潮检索到的简称",
+            source=(
+                "沿用上一版文件里的公司全称"
+                if prev_company.get("name")
+                else "公司清单 company.json 里的名称（巨潮检索或年报入库时填的）"
+            ),
         ),
     )
     put("company.code", Field("company.code", target.get("code"), DERIVED, "巨潮检索"))
+    # 数据来源要说实话：从巨潮下的、和队友/使用者给的本地 PDF，是两件不同的事
+    report_entry = manifest_entry(
+        base, str(latest.get("code") or ""), int(latest.get("year") or 0)
+    )
+    imported = str(report_entry.get("method") or "") == "imported"
     put(
         "company.source",
         Field(
             "company.source",
-            f"cninfo/{title}（披露年份 {latest.get('year')}）",
+            (
+                f"本地年报 PDF/{title}（披露年份 {latest.get('year')}）"
+                if imported
+                else f"cninfo/{title}（披露年份 {latest.get('year')}）"
+            ),
             DERIVED,
-            "下载清单 manifest.json 里记着的公告标题",
+            (
+                "工作台的年报入库：文件由使用者提供，sha256 记在 manifest.json"
+                if imported
+                else "下载清单 manifest.json 里记着的公告标题"
+            ),
         ),
     )
 
@@ -612,6 +691,9 @@ def build_draft(
                 f"上一财报年度收入同比 {raw_growth:+.1%}，规则取「不超过 3%、不为负」"
                 f"→ 预测期按 {growth:.1%} 平推（保守）"
             )
+    if growth is None:
+        # 没有上一年的抽取记录时，看同一份年报的多年列示（取数层从报表的年份列取出来的）
+        growth, growth_source = history_growth(payload)
     put(
         "drivers.revenue_growth",
         _field(
@@ -620,7 +702,7 @@ def build_draft(
             derived_source=growth_source,
             previous=prev_drivers.get("revenue_growth"),
             default=0.03,
-            default_source="保守取 3%：只有一份年报，没有同比可算",
+            default_source="保守取 3%：年报里没有上一年的列（也没下上一年的年报），算不出同比",
         ),
     )
     # 费用明细（销售/管理/研发费用）从 2026-10 起进了科目表；更早抽的记录里没有，

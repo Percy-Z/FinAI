@@ -1192,7 +1192,12 @@
      ══════════════════════════════════════════════════════════════════ */
   var WIZ = {
     target: null, peers: [], candidates: [], peerCandidates: [],
-    company: '', draft: null, asOf: '', busy: '', error: '', note: '', companies: []
+    company: '', draft: null, asOf: '', busy: '', error: '', note: '', companies: [],
+    /* 年报 PDF 那条路（不联网检索）：reports 里每一条是
+       {filename, code, year, name, role, title, data} —— data 是浏览器读出来的 base64 */
+    reports: [], reportNote: '', fromReports: false,
+    /* 手填行情：断网或现场演示时用，给了就不联网取价 */
+    prices: false, priceAsOf: '', priceRows: {}
   };
 
   var FIELD_STATUS = {
@@ -1322,6 +1327,116 @@
     return out.join('');
   }
 
+  /* ── 年报 PDF 入库：给工作台年报，程序负责读 ─────────────────────────
+
+     为什么要有这条路：年报的阅读由取数层做，但年报本身不一定从网上下 ——
+     队友给的 PDF、要验证码才能下的交易所文件、现场发的样例，都得能直接喂进来。
+     入库之后走的还是同一条链路（抽取 → 汇总 → 取价 → 假设草稿 → 估值），
+     PDF 的 sha256 会进 manifest，报告里的出处照样说得清。 */
+
+  /* 从文件名猜代码与年份：`600519_2025.pdf`、`贵州茅台2025年年度报告.pdf` 都认。
+     披露年份默认取「财报年度 + 1」—— A 股年报都在次年披露（表里那一格可以改）。 */
+  function guessReport(filename) {
+    var text = String(filename || '');
+    var code = (text.match(/(\d{6})/) || [])[1] || (text.match(/(\d{5})/) || [])[1] || '';
+    var fiscal = (text.match(/(20\d{2})/) || [])[1];
+    return {
+      filename: text,
+      code: code,
+      year: fiscal ? String(Number(fiscal) + 1) : '',
+      name: '', role: WIZ.reports.length ? 'peer' : 'target', title: '', data: ''
+    };
+  }
+
+  function reportRoleLabel(row) {
+    return row.role === 'target' ? '目标公司' : '可比公司';
+  }
+
+  function wizardReportRows() {
+    if (!WIZ.reports.length) {
+      return '<div class="tbl-note">还没有年报。选好 PDF 之后，每一条要填「公司代码」与' +
+        '「披露年份」（2025 年年报在 2026 年披露，就填 2026）—— 抽取那一步靠这两项命名文件。</div>';
+    }
+    return '<div class="tbl-wrap"><table class="tbl responsive"><thead><tr>' +
+      '<th>文件</th><th>公司代码</th><th>披露年份</th><th>身份</th><th>公司名称（可留空）</th><th></th>' +
+      '</tr></thead><tbody>' +
+      WIZ.reports.map(function (row, index) {
+        return '<tr>' +
+          '<td class="small" data-label="文件">' + esc(row.filename) +
+          (row.data ? '' : ' <span class="badge warn">未读取到内容</span>') + '</td>' +
+          '<td data-label="代码"><input class="input mono" data-report="code" data-index="' + index +
+          '" value="' + esc(row.code) + '" placeholder="600519"></td>' +
+          '<td data-label="年份"><input class="input mono" data-report="year" data-index="' + index +
+          '" value="' + esc(row.year) + '" placeholder="2026"></td>' +
+          '<td data-label="身份"><select class="input" data-report="role" data-index="' + index + '">' +
+          '<option value="target"' + (row.role === 'target' ? ' selected' : '') + '>目标公司</option>' +
+          '<option value="peer"' + (row.role === 'peer' ? ' selected' : '') + '>可比公司</option>' +
+          '</select></td>' +
+          '<td data-label="名称"><input class="input" data-report="name" data-index="' + index +
+          '" value="' + esc(row.name) + '" placeholder="' + esc(reportRoleLabel(row)) + '名称"></td>' +
+          '<td><button class="ghost" type="button" data-wiz="remove-report" data-code="' + index +
+          '">' + Icons.svg('close') + '</button></td>' +
+          '</tr>';
+      }).join('') +
+      '</tbody></table></div>' +
+      '<div class="row wrap mt10" style="gap:8px;align-items:center">' +
+      '<button class="ghost" type="button" data-wiz="add-report-row">' +
+      Icons.svg('plus') + '再加一家（没有 PDF 的会联网下载）</button>' +
+      '<span class="muted small">可比公司也要有年报：没有 PDF 时填代码 + 披露年份，程序去下载</span></div>';
+  }
+
+  function wizardReportBlock() {
+    return '<input type="file" multiple accept="application/pdf,.pdf" data-wiz-file="reports" ' +
+      'style="display:none">' +
+      '<div class="row wrap" style="gap:10px;align-items:center">' +
+      '<button class="ghost" type="button" data-wiz="pick-reports">' +
+      Icons.svg('file') + '选择年报 PDF（可多选）</button>' +
+      '<button class="primary" type="button" data-wiz="import-reports"' +
+      (WIZ.reports.length ? '' : ' disabled') + '>' + Icons.svg('folder') + '入库并写清单</button>' +
+      (WIZ.fromReports
+        ? '<span class="badge pass">清单已写好：' + esc((WIZ.target && (WIZ.target.name || WIZ.target.code)) || '') +
+        '</span><span class="muted small">下一步直接在「③ 取数并生成假设」点开始取数</span>'
+        : '<span class="muted small">入库不联网：PDF 存进 data/companies/&lt;代码&gt;/raw_pdf/，' +
+        '清单从这些文件写出</span>') +
+      '</div>' +
+      '<div class="mt10">' + wizardReportRows() + '</div>' +
+      (WIZ.reportNote ? '<div class="tbl-note mt10">' + esc(WIZ.reportNote) + '</div>' : '');
+  }
+
+  /* ── 手填行情：断网也能把流程跑完 ───────────────────────────────────
+     价格是唯一必须来自市场的数据（股数、负债、现金都在年报里）。
+     没有网络时由人填，但流水线会把它明确标成「人工填写、没有交叉核对」。 */
+  function wizardPriceBlock() {
+    var refs = [];
+    if (WIZ.target) refs.push({ code: WIZ.target.code, name: WIZ.target.name });
+    WIZ.peers.forEach(function (peer) { refs.push({ code: peer.code, name: peer.name }); });
+    if (!WIZ.prices) {
+      return '<button class="ghost mt10" type="button" data-wiz="toggle-prices">' +
+        Icons.svg('percent') + '没有网络？手填股价</button>';
+    }
+    if (!refs.length) {
+      return '<div class="tbl-note mt10">先定好目标公司与可比公司，再手填股价。</div>';
+    }
+    return '<div class="tbl-note mt10">手填股价（不下网取价）。所有行必须同一天，' +
+      '报告里会写明这一列是人工填写、没有交叉核对。</div>' +
+      '<div class="row wrap mt10" style="gap:8px;align-items:center">' +
+      '<span class="muted small">基准日</span>' +
+      '<input class="input mono" style="max-width:160px" data-price-input="as_of" value="' +
+      esc(WIZ.priceAsOf) + '" placeholder="2026-10-15"></div>' +
+      '<div class="tbl-wrap mt10"><table class="tbl responsive"><thead><tr>' +
+      '<th>公司</th><th>收盘价（元）</th></tr></thead><tbody>' +
+      refs.map(function (ref) {
+        var value = WIZ.priceRows[ref.code] == null ? '' : WIZ.priceRows[ref.code];
+        return '<tr><td data-label="公司">' + esc(ref.name || ref.code) +
+          ' <span class="mono small dim">' + esc(ref.code) + '</span></td>' +
+          '<td data-label="收盘价"><input class="input mono" data-price-code="' + esc(ref.code) +
+          '" value="' + esc(value) + '" placeholder="例如 1286.00"></td></tr>';
+      }).join('') +
+      '</tbody></table></div>' +
+      '<button class="ghost mt10" type="button" data-wiz="toggle-prices">' +
+      Icons.svg('close') + '改回联网取价</button>';
+  }
+
   function wizardHtml(c) {
     var st = (c && c.status) || {};
     var running = !!st.running;
@@ -1355,6 +1470,13 @@
         }).join('') + '</div></div>');
     }
 
+    out.push('<div class="mt14">' + card('⓪ 有现成的年报 PDF 吗（可选，不联网）', 'file',
+      wizardReportBlock() +
+      '<div class="tbl-note mt10">这一条路把「年报从哪来」和「怎么读年报」分开：' +
+      '你把 PDF 给工作台，读取交给取数层（本地解析，含多年列示），PDF 的 sha256 进下载清单。' +
+      '目标公司与可比公司都给 PDF 时，整条链路可以完全不碰网络（价格见 ③ 的手填行情）。</div>',
+      {}) + '</div>');
+
     out.push('<div class="mt14">' + card('① 要估哪家公司', 'target',
       wizardTargetBlock() +
       '<div class="tbl-note mt10">输入名称后程序去巨潮资讯网检索：代码、交易所板块、机构号都会自动填好，' +
@@ -1364,26 +1486,76 @@
       '<div class="tbl-note mt10">相对估值要用它们的市值与倍数的，所以要跟目标公司是同一门生意、同一套口径。</div>', {}));
 
     var missingPeer = !WIZ.peers.length;
+    var fromReports = !!WIZ.fromReports;
+    var canPlan = !!WIZ.target && !running;
     out.push(card('③ 取数并生成假设', 'database',
       '<div class="row wrap" style="gap:10px;align-items:center">' +
       '<button class="primary" type="button" data-wiz="start-plan"' +
-      (!WIZ.target || running ? ' disabled' : '') + '>' + Icons.svg('download') + '开始取数</button>' +
+      (canPlan ? '' : ' disabled') + '>' + Icons.svg('download') + '开始取数</button>' +
       '<span class="muted small">' +
-      '会依次做六件事：解析公司 → 下载年报 → 抽取科目 → 汇总 → 取股价 → 生成假设草稿' +
-      '（首次约两分钟，要联网；已经下过的年报不会重复下）</span></div>' +
+      (fromReports
+        ? '会依次做六件事：读清单 → 找年报 PDF → 抽取科目 → 汇总 → 取股价 → 生成假设草稿' +
+          '（PDF 已在本地，跳过下载；只有取价要联网，除非在下面手填了价格）'
+        : '会依次做六件事：解析公司 → 下载年报 → 抽取科目 → 汇总 → 取股价 → 生成假设草稿' +
+          '（首次约两分钟，要联网；已经下过的年报不会重复下）') +
+      '</span></div>' +
       (WIZ.error ? '<div class="alert mt10">' + esc(WIZ.error) + '</div>' : '') +
       (WIZ.note ? '<div class="tbl-note mt10">' + esc(WIZ.note) + '</div>' : '') +
       (running
         ? '<div class="mt14 tbl-note">正在跑：' + esc(phase === 'plan' ? '取数' : '估值') +
         '（任务号 ' + esc(st.job_id || st.run_id || '') + '）。页面会自动刷新。</div>'
         : '') +
-      (missingPeer ? '<div class="tbl-note mt10">提示：没有可比公司相对估值做不了，取数会在汇总那一步停下。</div>' : ''),
+      (missingPeer ? '<div class="tbl-note mt10">提示：没有可比公司相对估值做不了，取数会在汇总那一步停下。</div>' : '') +
+      (fromReports
+        ? '<div class="tbl-note mt10">目标公司与可比公司来自本地年报（清单已写好）—— 这一步不会再检索公司名。</div>'
+        : '') +
+      wizardPriceBlock(),
       {}));
 
     if (WIZ.draft) {
       out.push(card('④ 复核假设（这一步是给人看的）', 'listChecks', wizardDraftBlock(), {}));
     }
     return out.join('');
+  }
+
+  /* 年报卡上的输入框：重画之前先把人改过的值收回状态里（不然一重画就丢）。 */
+  function syncReportRowsFromDom(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('[data-report]'), function (el) {
+      var row = WIZ.reports[Number(el.getAttribute('data-index'))];
+      if (row) row[el.getAttribute('data-report')] = el.value;
+    });
+  }
+
+  function syncPriceRowsFromDom(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('[data-price-code]'), function (el) {
+      WIZ.priceRows[el.getAttribute('data-price-code')] = el.value;
+    });
+    var day = root.querySelector('[data-price-input="as_of"]');
+    if (day) WIZ.priceAsOf = day.value;
+  }
+
+  function readReportFiles(files, root, c) {
+    var list = Array.prototype.slice.call(files || []);
+    if (!list.length) return;
+    var pending = list.length;
+    list.forEach(function (file) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var text = String(reader.result || '');
+        var comma = text.indexOf(',');
+        var row = guessReport(file.name);
+        row.role = WIZ.reports.length ? 'peer' : 'target';
+        row.data = comma >= 0 ? text.slice(comma + 1) : '';
+        WIZ.reports.push(row);
+        pending -= 1;
+        if (!pending) repaintWizard(root, c);
+      };
+      reader.onerror = function () {
+        pending -= 1;
+        if (!pending) repaintWizard(root, c);
+      };
+      reader.readAsDataURL(file);
+    });
   }
 
   function draftFieldsFromDom(root) {
@@ -1476,12 +1648,90 @@
         repaintWizard(root, c);
       } else if (action === 'load-company') {
         loadDraft(code).then(function () { repaintWizard(root, c); });
+      } else if (action === 'pick-reports') {
+        var picker = root.querySelector('[data-wiz-file="reports"]');
+        if (picker) picker.click();
+      } else if (action === 'add-report-row') {
+        syncReportRowsFromDom(root);
+        WIZ.reports.push({
+          filename: '（联网下载）', code: '', year: '', name: '', role: 'peer', title: '', data: ''
+        });
+        repaintWizard(root, c);
+      } else if (action === 'remove-report') {
+        syncReportRowsFromDom(root);
+        WIZ.reports.splice(Number(code), 1);
+        repaintWizard(root, c);
+      } else if (action === 'toggle-prices') {
+        if (WIZ.prices) {
+          syncPriceRowsFromDom(root);
+          WIZ.prices = false;
+        } else {
+          WIZ.prices = true;
+          if (!WIZ.priceAsOf) WIZ.priceAsOf = new Date().toISOString().slice(0, 10);
+        }
+        repaintWizard(root, c);
+      } else if (action === 'import-reports') {
+        syncReportRowsFromDom(root);
+        var rows = WIZ.reports.filter(function (row) { return row.code && row.year; });
+        if (!rows.length) {
+          WIZ.error = '每条年报都要有公司代码与披露年份（2025 年年报在 2026 年披露，年份就填 2026）';
+          repaintWizard(root, c);
+          return;
+        }
+        var targetRow = rows.filter(function (row) { return row.role === 'target'; })[0] || rows[0];
+        rows.forEach(function (row) {
+          row.role = row === targetRow ? 'target' : (row.role === 'target' ? 'peer' : row.role);
+        });
+        WIZ.busy = 'reports'; WIZ.error = ''; WIZ.reportNote = '';
+        API.importReports({
+          company: targetRow.code,
+          reports: rows.map(function (row) {
+            return {
+              code: row.code, year: row.year, name: row.name, role: row.role,
+              title: row.title, data: row.data || ''
+            };
+          })
+        }).then(function (r) {
+          WIZ.busy = '';
+          if (!r.ok) {
+            WIZ.error = (r.body && r.body.error) || '年报入库失败';
+            repaintWizard(root, c);
+            return;
+          }
+          WIZ.company = r.body.target.code;
+          WIZ.target = {
+            code: r.body.target.code, name: r.body.target.name || r.body.target.code,
+            years: (r.body.target.years || []).slice()
+          };
+          WIZ.peers = (r.body.peers || []).map(function (item) {
+            return { code: item.code, name: item.name || item.code };
+          });
+          WIZ.fromReports = true;
+          WIZ.draft = null;
+          var warns = (r.body.warnings || []);
+          WIZ.reportNote = '已入库 ' + ((r.body.files || []).length) + ' 份年报 → ' +
+            (r.body.company_dir || '') + (warns.length ? '；提示：' + warns.join('；') : '');
+          WIZ.note = '清单已写好（company.json + targets.csv）。点「③ 开始取数」继续。';
+          repaintWizard(root, c);
+        });
       } else if (action === 'start-plan') {
         WIZ.error = ''; WIZ.note = '';
-        API.startPlan({
-          target_code: WIZ.target.code, keyword: WIZ.target.name || WIZ.target.code,
-          peers: WIZ.peers.map(function (peer) { return peer.code; })
-        }).then(function (r) {
+        if (WIZ.prices) syncPriceRowsFromDom(root);
+        var spec = { company: WIZ.target.code };
+        if (!WIZ.fromReports) {
+          // 联网那条路：按名称/代码重新检索定标（会顺带刷新最近披露年份）
+          spec.target_code = WIZ.target.code;
+          spec.keyword = WIZ.target.name || WIZ.target.code;
+          spec.peers = WIZ.peers.map(function (peer) { return peer.code; });
+        }
+        if (WIZ.prices) {
+          spec.price_as_of = WIZ.priceAsOf;
+          spec.prices = [{ code: WIZ.target.code, price: WIZ.priceRows[WIZ.target.code] }]
+            .concat(WIZ.peers.map(function (peer) {
+              return { code: peer.code, price: WIZ.priceRows[peer.code] };
+            }));
+        }
+        API.startPlan(spec).then(function (r) {
           if (!r.ok) { WIZ.error = (r.body && r.body.error) || '起取数任务失败'; repaintWizard(root, c); return; }
           WIZ.company = WIZ.target.code;
           WIZ.note = '取数任务已开始（' + r.body.job_id + '）。跑完会自动载入假设草稿。';
@@ -1503,6 +1753,14 @@
           });
         });
       }
+    });
+
+    /* 选年报 PDF：浏览器读成 base64（读文件内容最省事，也省得让人手抄路径），
+       读完只重画向导那一块。 */
+    root.addEventListener('change', function (event) {
+      var el = event.target.closest('[data-wiz-file]');
+      if (!el) return;
+      readReportFiles(el.files, root, c);
     });
 
     /* 取数跑完自动载入草稿：状态从「运行中」变成「结束」时载一次 */

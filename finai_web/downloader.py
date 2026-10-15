@@ -377,7 +377,21 @@ def save_manifest(outcomes: Sequence[FetchOutcome], path: Path | None = None) ->
     for outcome in outcomes:
         if not outcome.code or not outcome.year:
             continue
-        entries[f"{outcome.code}_{outcome.year}"] = outcome.to_dict()
+        key = f"{outcome.code}_{outcome.year}"
+        existing = entries.get(key)
+        # 「手工入库」的记录带着**谁给的这份年报**、公告标题与 sha256；
+        # 「本地已有同名文件，跳过下载」只是当时的状态。取数时的那次跳过
+        # 不该把前者冲掉 —— 报告里的出处（本地 PDF 还是 cninfo）就靠它。
+        if (
+            isinstance(existing, dict)
+            and existing.get("method") == "imported"
+            and outcome.method == "cached"
+        ):
+            existing["sha256"] = outcome.sha256 or existing.get("sha256")
+            existing["bytes"] = outcome.bytes or existing.get("bytes")
+            existing["path"] = outcome.path or existing.get("path")
+            continue
+        entries[key] = outcome.to_dict()
     data["updated_at"] = _now()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

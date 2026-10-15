@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -174,6 +175,206 @@ def _pick_candidate(found: Sequence[Any], wanted: str, module: Mapping[str, Any]
     )
 
 
+def _market_of(code: str, raw_market: str = "") -> str:
+    """板块：手填优先；没填就按代码形状猜（五位数字是港股，其余按 A 股）。"""
+    text = str(raw_market or "").strip().upper()
+    if text:
+        return text
+    digits = str(code or "").strip()
+    if len(digits) == 5 and digits.isdigit():
+        return "HK"
+    return "CN"
+
+
+def import_reports(
+    company_dir: str | Path,
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    target_code: str = "",
+    resolved_from: str = "本地年报入库（不联网检索）",
+    replace: bool = True,
+) -> dict[str, Any]:
+    """把使用者手上的年报 PDF 收进公司目录，并按它们写出一份清单（不联网）。
+
+    为什么需要这条路：年报的**读取**是取数层的活，但年报本身不一定从网上下 ——
+    队友给的 PDF、要验证码才能下的交易所文件、比赛现场发的样例，都得能直接喂进来。
+    入库之后整条链路与联网下载**完全一样**：抽取 → 汇总 → 取价 → 假设草稿 → 估值，
+    而且 PDF 的 sha256 会进 manifest，报告里的出处照样说得清。
+
+    entries 的每一项：
+        {"path": "E:/年报/600519_2025.pdf", "code": "600519", "year": 2026,
+         "name": "贵州茅台", "role": "target", "market": "CN"}
+
+        path   本地 PDF；留空表示这一家没有 PDF（取数时会尝试联网下载）
+        year   披露年份（不是财报年度）：2025 年年报在 2026 年披露，就写 2026。
+               文件名要落成 <代码>_<年份>.pdf，抽取那一步靠它认年份，所以不能省。
+        role   "target" 表示这是被估值的公司；不写就把第一项当目标公司
+    """
+    module = _ingest()
+    company = module["company"]
+    base = Path(company_dir).expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+    raw_dir = base / "raw_pdf"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    prepared: list[dict[str, Any]] = []
+    for raw in entries:
+        if not isinstance(raw, Mapping):
+            raise JobError("年报入库的每一项都要是一个对象（path / code / year / role）")
+        code = str(raw.get("code") or "").strip()
+        if not code:
+            raise JobError("年报入库里有条目没写公司代码 —— <代码>_<年份>.pdf 这个命名要用它")
+        try:
+            year = int(raw.get("year") or 0)
+        except (TypeError, ValueError):
+            raise JobError(f"{code} 的披露年份不是数字：{raw.get('year')!r}") from None
+        prepared.append(
+            {
+                "code": code,
+                "name": str(raw.get("name") or "").strip(),
+                "year": year,
+                "role": str(raw.get("role") or "").strip().lower(),
+                "market": _market_of(code, str(raw.get("market") or "")),
+                "path": str(raw.get("path") or "").strip(),
+                # 公告标题（如「2025年年度报告」）：流水线靠它认**财报年度**。
+                # 不写也能跑 —— 会退回「披露年份 − 1」，A 股年报的常规节奏成立，
+                # 但美国的 10-K（财年与自然年错开）最好把标题写上。
+                "title": str(raw.get("title") or "").strip(),
+            }
+        )
+    if not prepared:
+        raise JobError("年报入库没有任何条目 —— 至少要给目标公司的那一份年报")
+
+    # 同一家公司可以给多年（上一年的那份用来把盈利归一到正常年份）→ 先按公司归并
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in prepared:
+        group = groups.get(item["code"])
+        if group is None:
+            group = {
+                "code": item["code"],
+                "name": item["name"],
+                "market": item["market"],
+                "role": item["role"],
+                "years": [],
+            }
+            groups[item["code"]] = group
+            order.append(item["code"])
+        group["name"] = group["name"] or item["name"]
+        if item["role"] == "target":
+            group["role"] = "target"
+        if item["year"] > 0:
+            group["years"].append(item["year"])
+
+    target_key = target_code.strip()
+    if target_key and target_key not in groups:
+        raise JobError(
+            f"年报入库里没有 {target_key} 这一家；已有：{'、'.join(order)}"
+        )
+    if not target_key:
+        target_key = next(
+            (code for code in order if groups[code]["role"] == "target"), order[0]
+        )
+    if not groups[target_key]["years"]:
+        raise JobError(
+            f"目标公司 {target_key} 没写披露年份 —— "
+            "文件名要落成 <代码>_<年份>.pdf，抽取那一步靠它认年份"
+        )
+    for code in order:
+        wanted = groups[code]
+        if not wanted["years"] and not any(
+            item["path"] for item in prepared if item["code"] == code
+        ):
+            raise JobError(
+                f"{code} 没有给 PDF，那就必须写披露年份 —— 否则不知道下哪一年的年报"
+            )
+
+    warnings: list[str] = []
+    outcomes: list[Any] = []
+    for item in prepared:
+        if not item["path"]:
+            if item["year"] <= 0:
+                raise JobError(
+                    f"{item['code']} 没有给 PDF，那就必须写披露年份 —— 否则不知道下哪一年的年报"
+                )
+            warnings.append(
+                f"{item['code']} 没有给 PDF —— 取数时会尝试联网下载它那一年的年报"
+            )
+            continue
+        source = Path(item["path"]).expanduser()
+        if not source.is_file():
+            raise JobError(f"年报文件不存在：{source}")
+        if item["year"] <= 0:
+            raise JobError(
+                f"{item['code']} 没写披露年份 —— 文件名要落成 <代码>_<年份>.pdf，年份不能省"
+            )
+        if not source.read_bytes()[:8].startswith(b"%PDF"):
+            raise JobError(
+                f"{source.name} 不是 PDF（前几个字节不是 %PDF）—— "
+                "年报正文请给 PDF；Word/Excel 的报表先导出成 PDF 再说"
+            )
+        destination = module["downloader"].pdf_path(item["code"], item["year"], raw_dir)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.resolve() != destination.resolve():
+            shutil.copy2(source, destination)
+        item["saved"] = str(destination)
+        # 入库登记交给下载层：它认文件名、验 PDF、算 sha256，清单与联网下载共用一套。
+        registered = module["downloader"].import_local(
+            [destination], out_dir=raw_dir, copy=False
+        )
+        for outcome in registered:
+            if item["title"] and getattr(outcome, "ok", False):
+                outcome.title = item["title"]
+        outcomes.extend(registered)
+
+    failed = [item for item in outcomes if not getattr(item, "ok", False)]
+    if failed:
+        raise JobError(failed[0].note or "年报入库失败")
+    if outcomes:
+        module["downloader"].save_manifest(outcomes, base / "manifest.json")
+
+    def ref_of(code: str) -> Any:
+        item = groups[code]
+        return company.CompanyRef(
+            code=code,
+            name=item["name"] or code,
+            market=item["market"],
+            years=tuple(sorted(set(item["years"]), reverse=True)),
+        )
+
+    target_ref = ref_of(target_key)
+    peers = [ref_of(code) for code in order if code != target_key]
+    company_json = base / "company.json"
+    if company_json.is_file() and not replace:
+        raise JobError(f"这家公司已经定标过：{company_json}（要覆盖请显式允许替换）")
+    profile = company.CompanyProfile(
+        target=target_ref,
+        peers=peers,
+        resolved_from=resolved_from,
+        resolved_at=company.now_iso(),
+        notes=[
+            "由工作台的「年报入库」写出：清单来自使用者给的 PDF，没有走巨潮检索。",
+            *(
+                ["清单里有的公司没有 PDF，取数时会尝试联网下载。"]
+                if warnings
+                else []
+            ),
+        ],
+    )
+    profile.save(company_json)
+    profile.write_targets_csv(base / "targets.csv")
+
+    return {
+        "company_dir": str(base),
+        "target": target_ref.to_dict(),
+        "peers": [ref.to_dict() for ref in peers],
+        "files": [item.to_dict() for item in outcomes],
+        "warnings": warnings,
+        "company_json": str(company_json),
+        "targets_csv": str(base / "targets.csv"),
+    }
+
+
 def build_profile(
     company_dir: str | Path,
     *,
@@ -296,8 +497,16 @@ def plan(
     job_id: str | None = None,
     transport: Any = None,
     force: bool = False,
+    fx_rate: float | None = None,
+    manual_prices: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """取数一把梭：定标 → 下载 → 抽取 → 汇总 → 取价 → 假设草稿。"""
+    """取数一把梭：定标 → 下载 → 抽取 → 汇总 → 取价 → 假设草稿。
+
+    fx_rate        报表不是人民币计价时的汇率（1 USD = 7.15 CNY 就写 7.15）
+    manual_prices  手填行情 {代码: {"price": 1286.0, "as_of": "2026-10-15"}}。
+                   给了就不联网取价 —— 断网也能把流程跑完，但那一列会明确标成
+                   「人工填写、没有交叉核对」。不给就走腾讯 + 东财双源核对。
+    """
     module = _ingest()
     company = module["company"]
     base = Path(company_dir).expanduser()
@@ -389,8 +598,11 @@ def plan(
     # ── ④ 汇总成流水线输入 ────────────────────────────────────────
     def stage_build() -> Path:
         records = module["extract"].load_records(extracted_dir)
+        # 报表不是人民币计价时必须给汇率（界面上的「汇率」输入框传进来）。
+        # 不给就报错、绝不按 1:1 硬算 —— 把「美元百万」当「人民币元」是最危险的
+        # 静默错误。错误消息由 adapter 给出，这里不重复造一套。
         payload = module["adapter"].build_pipeline_input(
-            records, target_code=profile.target.code
+            records, target_code=profile.target.code, fx_rate=fx_rate
         )
         path = module["adapter"].write_pipeline_input(
             payload, extracted_dir / "pipeline_input.json"
@@ -401,6 +613,9 @@ def plan(
         if not payload["peers"]:
             raise JobError("没有可比公司 —— 相对估值做不了，请在界面上至少选一家")
         summary["pipeline_input"] = str(path)
+        summary["fx"] = payload.get("fx")
+        # 多年列示：这份年报里有几年的数（界面上要能一眼看到「只取到一年」这种情况）
+        summary["history"] = payload.get("history")
         return path
 
     pipeline_input_path = _step(
@@ -419,20 +634,60 @@ def plan(
     def stage_market() -> Path:
         prices: dict[str, Any] = {}
         basis = as_of or ""
-        for index, ref in enumerate(profile.all_refs):
-            quote = module["quotes"].latest_close(
-                ref.code, market=ref.market, as_of=basis or None, transport=transport
-            )
-            if index == 0:
-                basis = quote.as_of  # 以目标公司的交易日为基准日，后面的都对齐到同一天
-            elif quote.as_of != basis:
-                raise JobError(
-                    f"{ref.code} 取到的交易日是 {quote.as_of}，与基准日 {basis} 不一致 —— "
-                    "停在这里：不同天的价格放进同一张表会让估值口径混乱"
+        if manual_prices:
+            # 断网/现场演示的降级路径：价格由人在界面上填。规则一条都不放松 ——
+            # 每家都要有价、所有行必须同一天，而且**明确标成「没有交叉核对」**，
+            # 免得手填的价与联网双源核对的价在下游看起来一模一样。
+            for ref in profile.all_refs:
+                raw = manual_prices.get(ref.code)
+                if not raw:
+                    raise JobError(
+                        f"手填行情里没有 {ref.code} 的价格。相对估值要用目标公司与"
+                        "全部可比公司的价格，缺一家就没法比。"
+                    )
+                try:
+                    price = float(raw.get("price"))
+                except (TypeError, ValueError):
+                    raise JobError(f"{ref.code} 手填的价格不是数字：{raw.get('price')!r}") from None
+                day = str(raw.get("as_of") or basis or "").strip()
+                if not day:
+                    raise JobError(
+                        f"{ref.code} 手填的行情没有基准日 —— 价格必须带上「哪一天的价格」"
+                    )
+                if not basis:
+                    basis = day  # 以第一家的基准日为基准日，后面的都对齐到同一天
+                elif day != basis:
+                    raise JobError(
+                        f"{ref.code} 手填的基准日是 {day}，与 {basis} 不一致 —— "
+                        "停在这里：不同天的价格放进同一张表会让估值口径混乱"
+                    )
+                prices[ref.code] = module["quotes"].Quote(
+                    code=ref.code,
+                    price=price,
+                    as_of=day,
+                    source="人工填写的行情（工作台输入）",
+                    cross_price=0.0,
+                    cross_source="",
+                    queried_at=datetime.now().isoformat(timespec="seconds"),
+                    market=ref.market,
+                    single_source=True,
                 )
-            prices[ref.code] = quote
+        else:
+            for index, ref in enumerate(profile.all_refs):
+                quote = module["quotes"].latest_close(
+                    ref.code, market=ref.market, as_of=basis or None, transport=transport
+                )
+                if index == 0:
+                    basis = quote.as_of  # 以目标公司的交易日为基准日，后面的都对齐到同一天
+                elif quote.as_of != basis:
+                    raise JobError(
+                        f"{ref.code} 取到的交易日是 {quote.as_of}，与基准日 {basis} 不一致 —— "
+                        "停在这里：不同天的价格放进同一张表会让估值口径混乱"
+                    )
+                prices[ref.code] = quote
         summary["prices"] = {code: quote.to_dict() for code, quote in prices.items()}
         summary["as_of"] = basis
+        summary["prices_manual"] = bool(manual_prices)
         rows = build_market_rows(profile, balances, prices)
         target_quote = prices[profile.target.code]
         single = [
@@ -446,13 +701,19 @@ def plan(
             rows=rows,
             as_of=basis,
             sources=[
-                f"股价    {basis} 收盘价，两个独立来源交叉核对："
-                f"{target_quote.source} 与 {target_quote.cross_source}"
-                f"（查询时间 {target_quote.queried_at}，两源相差 {target_quote.agreement:.4%}）"
-                + (
-                    f"；⚠️ {'、'.join(single)} 只取到一个源，没有交叉核对 —— 提交前建议用终端数据核一遍"
-                    if single
-                    else ""
+                (
+                    f"股价    {basis} 的收盘价，**人工填写**（工作台输入）—— "
+                    "没有做双源交叉核对，提交前建议用 Wind / Choice 核一遍"
+                    if manual_prices
+                    else f"股价    {basis} 收盘价，两个独立来源交叉核对："
+                    f"{target_quote.source} 与 {target_quote.cross_source}"
+                    f"（查询时间 {target_quote.queried_at}，两源相差 {target_quote.agreement:.4%}）"
+                    + (
+                        f"；⚠️ {'、'.join(single)} 只取到一个源，没有交叉核对 —— "
+                        "提交前建议用终端数据核一遍"
+                        if single
+                        else ""
+                    )
                 ),
                 "股数、有息负债、现金、少数股东权益    年报抽取结果（含页码与原文，"
                 "见 extracted/pipeline_input.json 的 provenance）",
@@ -561,6 +822,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--as-of", default="", help="估值基准日 YYYY-MM-DD，默认取最近交易日")
     p_plan.add_argument("--job-id", default=None, help="任务编号（界面传进来，用来对齐进度）")
     p_plan.add_argument("--force", action="store_true", help="重新下载与重新抽取")
+    p_plan.add_argument(
+        "--fx",
+        type=float,
+        default=None,
+        help="报表币种不是人民币时的汇率（1 USD = 7.15 CNY 就写 7.15）；人民币报表不用给",
+    )
+    p_plan.add_argument(
+        "--price",
+        action="append",
+        default=[],
+        metavar="代码=价格",
+        help="手填股价（可多次）：600519=1286.00。给了就不联网取价（断网时用）",
+    )
+    p_plan.add_argument("--price-as-of", default="", help="手填股价的基准日 YYYY-MM-DD")
     p_plan.set_defaults(func=_cmd_plan)
 
     p_run = sub.add_parser("run", help="按确认过的草稿跑流水线")
@@ -568,7 +843,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--run-id", default=None)
     p_run.set_defaults(func=_cmd_run)
 
+    p_import = sub.add_parser(
+        "import", help="把本地年报 PDF 收进公司目录并写出清单（不联网）"
+    )
+    p_import.add_argument("--company-dir", required=True, help="公司目录，例如 data/companies/600519")
+    p_import.add_argument(
+        "--report",
+        action="append",
+        default=[],
+        metavar="代码=年份=PDF路径",
+        help="一份年报：600519=2026=E:/年报/600519_2025.pdf（可多次；PDF 省略表示要走联网下载）",
+    )
+    p_import.add_argument("--target-code", default="", help="哪一家是被估值公司（默认第一份）")
+    p_import.add_argument(
+        "--name",
+        action="append",
+        default=[],
+        metavar="代码=公司名",
+        help="公司名（可多次）：600519=贵州茅台。报告里会用它，不写就只显示代码",
+    )
+    p_import.set_defaults(func=_cmd_import)
+
     return parser
+
+
+def _parse_price_args(items: Sequence[str], as_of: str = "") -> dict[str, dict[str, Any]]:
+    """`代码=价格` → {代码: {"price": ..., "as_of": ...}}。"""
+    out: dict[str, dict[str, Any]] = {}
+    for raw in items:
+        code, _, value = str(raw).partition("=")
+        code = code.strip()
+        if not code or not value.strip():
+            raise JobError(f"--price 要写成 代码=价格：{raw!r}")
+        try:
+            price = float(value.strip())
+        except ValueError:
+            raise JobError(f"--price 的价格不是数字：{raw!r}") from None
+        out[code] = {"price": price, "as_of": as_of}
+    return out
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
@@ -580,6 +892,8 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         as_of=args.as_of,
         job_id=args.job_id,
         force=args.force,
+        fx_rate=args.fx,
+        manual_prices=_parse_price_args(args.price, args.price_as_of),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -588,6 +902,40 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     run_id, output_dir = run(args.company_dir, run_id=args.run_id)
     print(f"运行编号：{run_id}\n产物目录：{output_dir}")
+    return 0
+
+
+def _parse_report_arg(raw: str) -> dict[str, Any]:
+    """`代码=年份=PDF路径` → 入库条目。年份与路径都可省（省了就是联网下载）。"""
+    parts = [piece.strip() for piece in str(raw).split("=", 2)]
+    if not parts or not parts[0]:
+        raise JobError(f"--report 要写成 代码=年份=PDF路径：{raw!r}")
+    item: dict[str, Any] = {"code": parts[0]}
+    if len(parts) > 1 and parts[1]:
+        try:
+            item["year"] = int(parts[1])
+        except ValueError:
+            raise JobError(f"--report 的年份不是数字：{raw!r}") from None
+    if len(parts) > 2 and parts[2]:
+        item["path"] = parts[2]
+    return item
+
+
+def _cmd_import(args: argparse.Namespace) -> int:
+    names: dict[str, str] = {}
+    for raw in args.name:
+        code, _, value = str(raw).partition("=")
+        if code.strip() and value.strip():
+            names[code.strip()] = value.strip()
+    entries = [_parse_report_arg(item) for item in args.report]
+    for item in entries:
+        # 名字按代码补上（一份年报一条命令的写法下，重复给也不会重复建目录）
+        if item["code"] in names and not item.get("name"):
+            item["name"] = names[item["code"]]
+    summary = import_reports(
+        args.company_dir, entries, target_code=args.target_code
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
