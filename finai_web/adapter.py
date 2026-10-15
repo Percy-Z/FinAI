@@ -61,37 +61,63 @@ def _resolve_fx(
     target_code: str,
     *,
     fx_rate: float | None,
+    fx_rates: Mapping[str, float] | None = None,
     base_currency: str,
 ) -> dict[str, Any]:
-    """确定要不要换算、按什么汇率换算，并把结果记下来。
+    """确定每个币种用什么汇率换算成本位币，并把结果记下来。
 
     规则：
         - 报表币种 == 目标币种（默认人民币）→ 不换算，rate = 1.0
-        - 报表币种 != 目标币种 → 必须显式给 fx_rate，否则报错（不猜汇率）
-        - 同一批记录币种不一致 → 报错（一半美元一半人民币，换出来的表没法用）
+        - 报表币种 != 目标币种 → 必须显式给这个币种的汇率，否则报错（不猜、不假设 1:1）
+        - **每个币种各用各的汇率**：目标公司是美元报表、可比公司是人民币报表时，
+          只要把两种汇率都给出来就能放在同一张表里比；缺哪一个币种的汇率，
+          那家公司单独跳过并写明原因（不拿两种货币的数字直接相减）
     """
-    # 以**目标公司**的币种为准。别的币种的记录不当竞争对手（会被跳过并写明原因），
-    # 因为把它们换算到一起需要各自的汇率，而汇率只能由使用者提供。
+    given: dict[str, float] = {}
+    for name, value in (fx_rates or {}).items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            given[str(name).strip().upper()] = number
     currency = str(
         (records.get(target_code) or {}).get("currency") or ""
     ).upper() or base_currency
-    if not currency:
-        currency = base_currency
-    if currency == base_currency:
-        return {"from": currency, "to": base_currency, "rate": 1.0, "converted": False}
-    if fx_rate is None or fx_rate <= 0:
+    if fx_rate is not None and fx_rate > 0:
+        # 单币种的老写法：只给一个数就是「目标公司那个币种」的汇率
+        given.setdefault(currency, float(fx_rate))
+    rates = {base_currency: 1.0, **given}
+
+    # 每个代码一份汇率：下游要用它把**价格**也换算过来 —— 价格是报价币种
+    # （美股美元、港股港币），只换财报不换价格，市值就会差一个汇率。
+    per_code: dict[str, dict[str, Any]] = {}
+    for code, record in records.items():
+        name = str(record.get("currency") or "").upper() or base_currency
+        rate = rates.get(name)
+        if rate:
+            per_code[str(code)] = {"currency": name, "rate": float(rate)}
+
+    if currency not in rates:
         raise AdapterError(
             f"这份报表以 {currency} 计价，而流水线的单位约定是 {base_currency}。\n"
             f"    必须显式给汇率（本模块不猜、也不假设 1:1）：\n"
-            f"        python -m finai_web build --target {target_code} --fx <1 {currency} 等于多少 {base_currency}>\n"
+            f"        工作台   在「③ 取数并生成假设」的「外币报表」一栏填（1 {currency} = ? {base_currency}），再点一次开始取数\n"
+            f"        命令行   python -m finai_web build --target {target_code} --fx <1 {currency} 等于多少 {base_currency}>\n"
             "    例如 1 USD = 7.15 CNY 就写 --fx 7.15。"
         )
     return {
         "from": currency,
         "to": base_currency,
-        "rate": float(fx_rate),
-        "converted": True,
-        "note": "金额已按该汇率换算；汇率由使用者提供，本模块不联网取汇率",
+        "rate": float(per_code[str(target_code)]["rate"]) if str(target_code) in per_code else 1.0,
+        "converted": currency != base_currency,
+        "rates_by_currency": {name: float(value) for name, value in rates.items()},
+        "rates": per_code,
+        "note": (
+            "金额与价格都按各自币种的汇率换算成本位币；汇率由使用者提供，"
+            "本模块不联网取汇率"
+            + ("" if currency == base_currency else f"（1 {currency} = {rates[currency]} {base_currency}）")
+        ),
     }
 
 
@@ -143,6 +169,7 @@ def build_pipeline_input(
     target_code: str | None = None,
     generated_at: str | None = None,
     fx_rate: float | None = None,
+    fx_rates: Mapping[str, float] | None = None,
     base_currency: str = "CNY",
 ) -> dict[str, Any]:
     """把逐条抽取记录汇总成流水线要的那一份输入。
@@ -157,6 +184,11 @@ def build_pipeline_input(
         美元百万），必须显式给汇率，这里会统一换算并在 `fx` 里留痕；
         不给汇率就报错 —— 把「美元百万」当成「人民币元」直接算进估值，
         数字看着正常，结论会差一个数量级，而且没人看得出来。
+
+        `fx_rates` 是**按币种**给汇率（{"USD": 7.15, "HKD": 0.92}）：这样目标公司是
+        美元报表、可比公司是港元/人民币报表时也能放在同一张表里比。缺哪个币种的
+        汇率，用那个币种的公司就单独跳过并写明原因。`fx` 里带出每个代码的汇率，
+        下游要拿它换算**价格**（价格是报价币种，不换会把市值算错一个汇率）。
     """
     if not records:
         raise AdapterError(
@@ -175,14 +207,26 @@ def build_pipeline_input(
 
     target_record = newest[target_code]
     _require_usable(target_record, role="目标公司")
-    fx = _resolve_fx(newest, target_code, fx_rate=fx_rate, base_currency=base_currency)
+    fx = _resolve_fx(
+        newest,
+        target_code,
+        fx_rate=fx_rate,
+        fx_rates=fx_rates,
+        base_currency=base_currency,
+    )
+    rates = fx.get("rates") or {}
+
+    def rate_of(code: Any) -> float:
+        entry = rates.get(str(code)) or {}
+        return float(entry.get("rate") or 1.0)
+
     payload: dict[str, Any] = {
         "version": 1,
         "generated_at": generated_at or _now(),
         "target_code": target_code,
         "fx": fx,
-        "opening_balance": _scale(opening_balance_from(target_record), fx["rate"]),
-        "target_actuals": _scale(peer_from(target_record), fx["rate"]),
+        "opening_balance": _scale(opening_balance_from(target_record), rate_of(target_code)),
+        "target_actuals": _scale(peer_from(target_record), rate_of(target_code)),
         "history": history_from(target_record),
         "peers": {},
         "provenance": {},
@@ -204,14 +248,16 @@ def build_pipeline_input(
         if str(code) == target_code:
             continue
         peer_currency = str(record.get("currency") or "").upper()
-        if peer_currency and peer_currency != str(fx["from"]):
+        if str(code) not in rates:
+            # 这个币种没给汇率：不换算、也不静默按 1:1 算 —— 单独跳过并说清怎么补
             payload["provenance"][str(code)]["skipped"] = (
-                f"币种不同（{peer_currency} vs 目标公司的 {fx['from']}）——"
-                "换算需要各自的汇率，本模块不猜；请分别建两份输入或先手工换算"
+                f"币种 {peer_currency or '未标注'} 没给汇率 —— 换算成 {base_currency} "
+                "需要它自己那一份汇率。工作台的「外币报表」里把 "
+                f"「1 {peer_currency or '外币'} = ? {base_currency}」也填上就能一起比"
             )
             continue
         try:
-            payload["peers"][str(code)] = _scale(peer_from(record), fx["rate"])
+            payload["peers"][str(code)] = _scale(peer_from(record), rate_of(code))
         except AdapterError as err:
             # 可比公司缺指标只跳过这一家：少一家可比不影响整条流水线，
             # 但必须写进 provenance，报告里要说得出「为什么这家没进表」。

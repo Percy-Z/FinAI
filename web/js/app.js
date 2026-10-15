@@ -187,12 +187,20 @@
       if (!byGroup[p.group]) { byGroup[p.group] = []; groups.push(p.group); }
       byGroup[p.group].push(p);
     });
+    /* 「最近一次没跑通」要在导航上看得见 —— 人可能正停在别的页面，
+       不该只有打开取数页才知道上一次失败了。 */
+    var s = State.status || {};
+    var failedPhase = (!s.running && s.phase && s.job_returncode != null && s.job_returncode !== 0)
+      ? s.phase : '';
     $('#nav').innerHTML = groups.map(function (g) {
       return '<div class="nav-group"><div class="nav-group-title">' + Charts.esc(g) + '</div>' +
         byGroup[g].map(function (p) {
+          var warn = (failedPhase === 'plan' && p.id === 'ingest') ||
+            (failedPhase === 'run' && p.id === 'run');
           return '<button class="nav-item' + (p.id === State.route ? ' active' : '') +
             '" data-nav="' + p.id + '" type="button">' +
-            '<span class="nav-ico">' + Icons.svg(p.icon) + '</span><span>' + Charts.esc(p.nav) + '</span></button>';
+            '<span class="nav-ico">' + Icons.svg(p.icon) + '</span><span>' + Charts.esc(p.nav) +
+            (warn ? ' <span class="badge warn" title="最近一次没跑通">⚠</span>' : '') + '</span></button>';
         }).join('') + '</div>';
     }).join('');
   }

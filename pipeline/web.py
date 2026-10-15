@@ -1253,6 +1253,25 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "汇率必须大于 0"}, 409)
                     return
                 extra += ["--fx", str(fx)]
+            # 按币种给汇率：目标公司与可比公司币种不同时，各用各的汇率
+            fx_rates = body.get("fx_rates") or {}
+            if isinstance(fx_rates, Mapping):
+                for name, value in fx_rates.items():
+                    if value in (None, ""):
+                        continue
+                    try:
+                        rate = float(value)
+                    except (TypeError, ValueError):
+                        self._json(
+                            {"ok": False, "error": f"{name} 的汇率不是数字"}, 409
+                        )
+                        return
+                    if rate <= 0:
+                        self._json(
+                            {"ok": False, "error": f"{name} 的汇率必须大于 0"}, 409
+                        )
+                        return
+                    extra += ["--fx-currency", f"{str(name).upper()}={rate}"]
             # 手填行情：给了就不联网取价（断网/现场演示用）
             prices = body.get("prices") or []
             price_day = str(body.get("price_as_of") or "")

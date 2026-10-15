@@ -335,6 +335,20 @@ def import_reports(
     if outcomes:
         module["downloader"].save_manifest(outcomes, base / "manifest.json")
 
+    # 同一份文件挂了两个公司代码，几乎一定是代码填错了（现场实例：华为的年报
+    # 被填成 600519，于是可比公司里混进一家「茅台」——数据全是华为的）。
+    by_hash: dict[str, list[str]] = {}
+    for outcome in outcomes:
+        digest = str(getattr(outcome, "sha256", "") or "")
+        if getattr(outcome, "ok", False) and digest:
+            by_hash.setdefault(digest, []).append(f"{outcome.code}_{outcome.year}")
+    for keys in by_hash.values():
+        if len(keys) > 1:
+            warnings.append(
+                "这几份年报的文件内容一模一样（sha256 相同）：" + "、".join(keys) +
+                " —— 是不是有两个的代码填错了？同一份文件不该同时挂在两家公司名下。"
+            )
+
     def ref_of(code: str) -> Any:
         item = groups[code]
         return company.CompanyRef(
@@ -449,6 +463,17 @@ def _latest_disclosure_year(target: Any, module: Mapping[str, Any], transport: A
     return year
 
 
+def _listing_currency(ref: Any, fallback: str) -> str:
+    """股价的币种看**上市地**，不看财报币种。
+
+    腾讯就是那个例子：财报以人民币编制，股价却是港币报价（600 HKD 不是 600 元）。
+    只按财报币种换算价格，市值会差一个汇率 —— A 股/美股的公司两者一致，
+    港股里这种「报表人民币、报价港币」很常见。
+    """
+    market = str(getattr(ref, "market", "") or "").upper()
+    return {"HK": "HKD", "US": "USD", "CN": "CNY"}.get(market, fallback)
+
+
 def _apply_manual_shares(
     balances: Mapping[str, Mapping[str, float]],
     refs: Sequence[Any],
@@ -483,6 +508,7 @@ def build_market_rows(
     profile: Any,
     balances: Mapping[str, Mapping[str, float]],
     prices: Mapping[str, Any],
+    rates: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """行情表的行：价格来自行情源，报表侧字段来自年报抽取结果。
 
@@ -492,10 +518,17 @@ def build_market_rows(
 
     可比公司也要填这几列（相对估值要用它们的市值与企业价值），
     所以传进来的是「每家公司一盘账」，不是只有目标公司那一份。
+
+    rates：每个代码的汇率（{"00700": {"rate": 0.92}}）。价格是**报价币种**
+    （美股美元、港股港币），而财报侧的数字已经换算成人民币了 —— 只换财报不换价格，
+    市值就会差一个汇率。这里按同一份汇率把价格也换算过来。
     """
     rows: list[dict[str, Any]] = []
     for ref in profile.all_refs:
         quote = prices[ref.code]
+        entry = (rates or {}).get(ref.code) or {}
+        rate = float(entry.get("rate") or 1.0)
+        currency = str(entry.get("currency") or "")
         opening = balances.get(ref.code) or {}
         shares = opening.get("share_capital")
         debt = opening.get("interest_bearing_debt")
@@ -506,7 +539,7 @@ def build_market_rows(
                 "code": ref.code,
                 "name": ref.name,
                 "role": "target" if ref.code == profile.target.code else "peer",
-                "price": f"{quote.price:.2f}",
+                "price": f"{quote.price * rate:.2f}",
                 "diluted_shares": "" if shares is None else int(shares),
                 "interest_bearing_debt": f"{float(debt or 0):.2f}",
                 "cash": f"{float(cash or 0):.2f}",
@@ -532,6 +565,7 @@ def plan(
     fx_rate: float | None = None,
     manual_prices: Mapping[str, Mapping[str, Any]] | None = None,
     manual_shares: Mapping[str, Any] | None = None,
+    fx_rates: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """取数一把梭：定标 → 下载 → 抽取 → 汇总 → 取价 → 假设草稿。
 
@@ -542,6 +576,9 @@ def plan(
     manual_shares  手填股数 {代码: 股数}。年报里抽不到股本时用（腾讯的股本只在附注里
                    披露、苹果的 10-K 把面值与股数拆成两行）—— 股数是每股价值的分母，
                    缺了估值那一步会直接报「diluted_shares 必须为正数」。
+    fx_rates       按**币种**给汇率 {"USD": 7.15, "HKD": 0.92}：目标公司与可比公司
+                   币种不同时，各用各的汇率也能量到同一张表里。缺哪个币种的汇率，
+                   用那个币种的公司就单独跳过并写明原因。
     """
     module = _ingest()
     company = module["company"]
@@ -638,7 +675,10 @@ def plan(
         # 不给就报错、绝不按 1:1 硬算 —— 把「美元百万」当「人民币元」是最危险的
         # 静默错误。错误消息由 adapter 给出，这里不重复造一套。
         payload = module["adapter"].build_pipeline_input(
-            records, target_code=profile.target.code, fx_rate=fx_rate
+            records,
+            target_code=profile.target.code,
+            fx_rate=fx_rate,
+            fx_rates=fx_rates,
         )
         path = module["adapter"].write_pipeline_input(
             payload, extracted_dir / "pipeline_input.json"
@@ -647,7 +687,22 @@ def plan(
             payload["peers"].values(), extracted_dir / "peers.csv"
         )
         if not payload["peers"]:
-            raise JobError("没有可比公司 —— 相对估值做不了，请在界面上至少选一家")
+            # 「选了可比公司却还是说没有」最常见的原因是**币种不同被跳过**：
+            # adapter 会把原因写进 provenance.skipped，这里原样搬出来，
+            # 否则人只会看到一句「至少选一家」，而清单里明明有。
+            skipped = [
+                f"{code}：{info.get('skipped')}"
+                for code, info in (payload.get("provenance") or {}).items()
+                if isinstance(info, Mapping) and info.get("skipped")
+            ]
+            raise JobError(
+                "没有可比公司 —— 相对估值做不了（要在同一门生意、同一套口径之间比）。"
+                + (
+                    "\n    清单里的这些被跳过了：\n    " + "\n    ".join(skipped)
+                    if skipped
+                    else "\n    请在界面上至少选一家（② 可比公司），最好也把它们的年报给上。"
+                )
+            )
         summary["pipeline_input"] = str(path)
         summary["fx"] = payload.get("fx")
         # 多年列示：这份年报里有几年的数（界面上要能一眼看到「只取到一年」这种情况）
@@ -683,8 +738,12 @@ def plan(
                 raw = manual_prices.get(ref.code)
                 if not raw:
                     raise JobError(
-                        f"手填行情里没有 {ref.code} 的价格。相对估值要用目标公司与"
-                        "全部可比公司的价格，缺一家就没法比。"
+                        f"取不到 {ref.code} 的股价。相对估值要用目标公司与全部可比公司的"
+                        "价格，缺一家就没法比。\n"
+                        "    两条路：① 这家本来就没上市（例如华为投资控股）—— 那它不该"
+                        "出现在可比公司里，回 ② 去掉它；\n"
+                        "    ② 有上市但行情接口取不到 —— 在 ③ 的「手填股价」里给它填一个"
+                        "（填报价币种的原价即可，汇率那栏会替你换算）。"
                     )
                 try:
                     price = float(raw.get("price"))
@@ -729,7 +788,26 @@ def plan(
         summary["prices"] = {code: quote.to_dict() for code, quote in prices.items()}
         summary["as_of"] = basis
         summary["prices_manual"] = bool(manual_prices)
-        rows = build_market_rows(profile, balances, prices)
+        fx_info = payload.get("fx") or {}
+        fx_entry = dict(fx_info) if isinstance(fx_info, Mapping) else {}
+        # 价格的汇率按上市地取（港股港币、美股美元），财报的汇率按报表币种取 ——
+        # 两者不是一回事：腾讯的报表是人民币、股价是港币。
+        base_currency = str(fx_entry.get("to") or "CNY")
+        by_currency = fx_entry.get("rates_by_currency") or {}
+        price_rates: dict[str, dict[str, Any]] = {}
+        for ref in profile.all_refs:
+            report_currency = str((fx_entry.get("rates") or {}).get(ref.code, {}).get("currency") or base_currency)
+            currency = _listing_currency(ref, report_currency)
+            rate = by_currency.get(currency)
+            if currency != base_currency and not rate:
+                raise JobError(
+                    f"{ref.code} 的股价是 {currency} 报价（{ref.market} 市场），而流水线的"
+                    f"单位约定是 {base_currency}。\n"
+                    f"    在「外币报表」里把 {currency}=? 也填上（例如 HKD=0.92）—— "
+                    "财报与价格会各按自己的币种换算，否则市值会差一个汇率。"
+                )
+            price_rates[ref.code] = {"currency": currency, "rate": float(rate or 1.0)}
+        rows = build_market_rows(profile, balances, prices, price_rates)
         target_quote = prices[profile.target.code]
         single = [
             ref.code
@@ -759,6 +837,38 @@ def plan(
                 "股数、有息负债、现金、少数股东权益    年报抽取结果（含页码与原文，"
                 "见 extracted/pipeline_input.json 的 provenance）",
                 "优先股、非经营性资产    年报没有可归入此类的披露，填 0（报告第 9 节说明这一点）",
+                *(
+                    [
+                        "币种换算    财报按报表币种、股价按上市地币种，各自换成人民币："
+                        + "；".join(
+                            f"{code} 财报 1 {item.get('currency')} = {item.get('rate')}"
+                            for code, item in (fx_info.get("rates") or {}).items()
+                            if float(item.get("rate") or 1.0) != 1.0
+                        )
+                        + (
+                            "；"
+                            + "；".join(
+                                f"{code} 股价 1 {item.get('currency')} = {item.get('rate')}"
+                                for code, item in price_rates.items()
+                                if float(item.get("rate") or 1.0) != 1.0
+                            )
+                            if any(
+                                float(item.get("rate") or 1.0) != 1.0
+                                for item in price_rates.values()
+                            )
+                            else ""
+                        )
+                    ]
+                    if any(
+                        float(item.get("rate") or 1.0) != 1.0
+                        for item in (fx_info.get("rates") or {}).values()
+                    )
+                    or any(
+                        float(item.get("rate") or 1.0) != 1.0
+                        for item in price_rates.values()
+                    )
+                    else []
+                ),
             ],
         )
 
@@ -870,6 +980,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="报表币种不是人民币时的汇率（1 USD = 7.15 CNY 就写 7.15）；人民币报表不用给",
     )
     p_plan.add_argument(
+        "--fx-currency",
+        action="append",
+        default=[],
+        metavar="币种=汇率",
+        help="按币种给汇率（可多次）：USD=7.15 HKD=0.92。目标公司与可比公司币种不同时，"
+        "各用各的汇率也能量到同一张表里",
+    )
+    p_plan.add_argument(
         "--price",
         action="append",
         default=[],
@@ -932,6 +1050,24 @@ def _parse_price_args(items: Sequence[str], as_of: str = "") -> dict[str, dict[s
     return out
 
 
+def _parse_fx_args(items: Sequence[str]) -> dict[str, float]:
+    """`币种=汇率` → {"USD": 7.15}。"""
+    out: dict[str, float] = {}
+    for raw in items:
+        name, _, value = str(raw).partition("=")
+        name = name.strip().upper()
+        if not name or not value.strip():
+            raise JobError(f"--fx-currency 要写成 币种=汇率：{raw!r}")
+        try:
+            rate = float(value.strip())
+        except ValueError:
+            raise JobError(f"--fx-currency 的汇率不是数字：{raw!r}") from None
+        if rate <= 0:
+            raise JobError(f"--fx-currency 的汇率必须为正数：{raw!r}")
+        out[name] = rate
+    return out
+
+
 def _parse_shares_args(items: Sequence[str]) -> dict[str, str]:
     """`代码=股数` → {代码: 股数}（股数保持字符串，由 plan 校验与换算）。"""
     out: dict[str, str] = {}
@@ -955,6 +1091,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         job_id=args.job_id,
         force=args.force,
         fx_rate=args.fx,
+        fx_rates=_parse_fx_args(args.fx_currency),
         manual_prices=_parse_price_args(args.price, args.price_as_of),
         manual_shares=_parse_shares_args(args.shares),
     )

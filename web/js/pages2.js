@@ -1199,7 +1199,9 @@
     /* 手填行情：断网或现场演示时用，给了就不联网取价 */
     prices: false, priceAsOf: '', priceRows: {}, shareRows: {},
     /* 公司目录里已经有清单（company.json）：取数时直接读它，不再按名字联网检索 */
-    hasProfile: false
+    hasProfile: false,
+    /* 外币报表的汇率（1 外币 = ? 元）：年报以美元/港币计价时必填，人民币报表留空 */
+    fx: ''
   };
 
   var FIELD_STATUS = {
@@ -1453,12 +1455,76 @@
       Icons.svg('close') + '改回联网取价</button>';
   }
 
+  /* 取数六步的中文名：失败时要说得出「卡在哪一步」，只说任务号没用。 */
+  var STEP_LABEL = {
+    ingest_resolve: '解析公司',
+    ingest_fetch: '下载年报',
+    ingest_extract: '抽取科目',
+    ingest_build: '汇总成流水线输入',
+    ingest_market: '取价 + 行情表',
+    ingest_assumptions: '生成假设草稿'
+  };
+
+  function failedStepOf(st) {
+    var rows = (st && st.steps) || [];
+    for (var i = rows.length - 1; i >= 0; i -= 1) {
+      if (rows[i] && rows[i].status === 'failed') {
+        return STEP_LABEL[rows[i].step] || rows[i].step || '';
+      }
+    }
+    return '';
+  }
+
+  /* 最近一次取数有没有跑通。失败时给一句「下一步做什么」——
+     光是抛出报错原文，人往往不知道该改哪里（2026-10-15 现场）。 */
+  function planOutcome(st) {
+    st = st || {};
+    if (st.running || st.phase !== 'plan' || !st.job_id ||
+      st.job_returncode === null || st.job_returncode === undefined) {
+      return null;
+    }
+    var reason = String(st.error || '').trim();
+    var first = reason.split('\n').filter(function (line) { return line.trim(); }).pop() || '';
+    var outcome = {
+      ok: st.job_returncode === 0,
+      job: String(st.job_id),
+      step: failedStepOf(st),
+      detail: reason,
+      firstLine: first.trim(),
+      log: String(st.job_log || ''),
+      fix: ''
+    };
+    if (!outcome.ok) {
+      if (/汇率|\bUSD\b|\bHKD\b|\bCNY\b/.test(reason)) {
+        outcome.fix = '这份年报不是以人民币计价 —— 在 ③ 卡的「外币报表」里填上汇率（例如 1 USD = 7.15 元）再点一次开始取数。';
+      } else if (/没有可比公司/.test(reason)) {
+        outcome.fix = '相对估值要有可比公司。在 ② 里加 2–4 家同行业公司（最好也给它们年报，或让程序联网下载）。';
+      } else if (/文字层不可用|cid/i.test(reason)) {
+        outcome.fix = '这份 PDF 的文字层读不出来（字体缺映射表）—— 换一份带文字层的版本，或先 OCR 再入库。';
+      }
+    }
+    return outcome;
+  }
+
   function wizardHtml(c) {
     var st = (c && c.status) || {};
     var running = !!st.running;
     var phase = st.phase || '';
     var steps = (st.steps || []).length;
+    var outcome = planOutcome(st);
     var out = [];
+    // 最近一次取数没跑通：摆到最上面，说清卡在哪一步、下一步改什么。
+    // 提示只放在第 ③ 卡里不够 —— 人翻到这一页第一眼看到的是顶部。
+    if (outcome && !outcome.ok) {
+      out.push('<div class="alert">' +
+        '<b>最近一次取数没跑通</b>（任务号 ' + esc(outcome.job) + '）' +
+        (outcome.step ? '，卡在「' + esc(outcome.step) + '」这一步' : '') + '。<br>' +
+        esc(outcome.firstLine || '原因见下面的日志末尾。') +
+        (outcome.fix ? '<br><b>怎么改：</b>' + esc(outcome.fix) : '') +
+        (outcome.log ? '<br>完整日志：<a class="hash" href="/' + esc(outcome.log) +
+          '" target="_blank">' + esc(outcome.log) + '</a>' : '') +
+        '</div>');
+    }
     out.push('<div class="grid g-4">' +
       kpi('目标公司', WIZ.target ? esc(WIZ.target.name || WIZ.target.code) : '—', '',
         WIZ.target ? '<span class="muted">' + esc(WIZ.target.code) + '</span>'
@@ -1506,6 +1572,7 @@
     var missingPeer = !WIZ.peers.length;
     var fromReports = !!WIZ.fromReports;
     var canPlan = !!WIZ.target && !running;
+    var fxFocus = !!(outcome && !outcome.ok && /外币报表/.test(outcome.fix || ''));
     out.push(card('③ 取数并生成假设', 'database',
       '<div class="row wrap" style="gap:10px;align-items:center">' +
       '<button class="primary" type="button" data-wiz="start-plan"' +
@@ -1517,6 +1584,17 @@
         : '会依次做六件事：解析公司 → 下载年报 → 抽取科目 → 汇总 → 取股价 → 生成假设草稿' +
           '（首次约两分钟，要联网；已经下过的年报不会重复下）') +
       '</span></div>' +
+      // 汇率就摆在按钮下面：外币报表（苹果、腾讯这类）在「汇总」那一步会因为
+      // 「必须显式给汇率」停下 —— 以前只能改命令行，界面上没处填。
+      '<div class="row wrap mt10" style="gap:8px;align-items:center">' +
+      '<span class="muted small">外币报表</span>' +
+      '<input class="input mono" style="max-width:190px" data-wiz-input="fx" value="' +
+      esc(WIZ.fx) + '" placeholder="7.15 或 USD=7.15 HKD=0.92"' +
+      (fxFocus ? ' style="border-color:var(--warn,#c98a00)"' : '') + '>' +
+      '<span class="muted small">年报不是以人民币计价时填汇率（1 USD = 7.15 元 就填 7.15）；' +
+      '人民币报表留空。目标公司与可比公司币种不同时，把各币种的汇率都写上' +
+      '（USD=7.15 HKD=0.92），每家公司按自己的币种换算 —— 价格也一起换算。</span>' +
+      '</div>' +
       (WIZ.error ? '<div class="alert mt10">' + esc(WIZ.error) + '</div>' : '') +
       (WIZ.note ? '<div class="tbl-note mt10">' + esc(WIZ.note) + '</div>' : '') +
       (running
@@ -1795,6 +1873,39 @@
         WIZ.error = ''; WIZ.note = '';
         if (WIZ.prices) syncPriceRowsFromDom(root);
         var spec = { company: WIZ.target.code };
+        // 外币报表的汇率：填了就传下去（后端会在「汇总」那一步用它换算并留痕）
+        var fxInput = root.querySelector('[data-wiz-input="fx"]');
+        if (fxInput) {
+          WIZ.fx = fxInput.value.trim();
+          if (WIZ.fx) {
+            // 两种写法都认：只填一个数 = 目标公司那个币种的汇率；
+            // `USD=7.15 HKD=0.92` = 每个币种各给一份（目标与可比公司币种不同时用得上）
+            var rates = {}, single = null, bad = '';
+            WIZ.fx.split(/[,，、;\s]+/).filter(Boolean).forEach(function (piece) {
+              var parts = piece.split('=');
+              if (parts.length === 2) {
+                var name = (parts[0] || '').trim().toUpperCase();
+                var rate = Number((parts[1] || '').trim());
+                if (!name || !isFinite(rate) || rate <= 0) { bad = piece; return; }
+                rates[name] = rate;
+              } else if (parts.length === 1) {
+                var one = Number(piece);
+                if (!isFinite(one) || one <= 0) { bad = piece; return; }
+                single = one;
+              } else {
+                bad = piece;
+              }
+            });
+            if (bad) {
+              WIZ.error = '汇率看不懂：「' + bad + '」。1 USD = 7.15 元 就填 7.15；' +
+                '要给多个币种就写 USD=7.15 HKD=0.92。';
+              repaintWizard(root, c);
+              return;
+            }
+            if (Object.keys(rates).length) spec.fx_rates = rates;
+            if (single !== null) spec.fx = single;
+          }
+        }
         if (!WIZ.fromReports && !WIZ.hasProfile) {
           // 联网那条路：按名称/代码重新检索定标（会顺带刷新最近披露年份）
           spec.target_code = WIZ.target.code;

@@ -480,6 +480,131 @@ class ImportReportsTest(unittest.TestCase):
             self.assertIn("必须为正数", str(caught.exception))
 
 
+class CrossCurrencyTest(unittest.TestCase):
+    """跨币种：目标公司与可比公司币种不同，也要能放在同一张表里比。
+
+    现场撞上的例子：目标公司是苹果（10-K 以美元计价），可比公司是腾讯/华为/茅台
+    （人民币报表）。原先这种组合在「汇总」那一步就会停下（美元报表要汇率），
+    给了汇率之后又会把人民币的可比公司整个跳过 —— 「给工作台年报 → 跑流程」
+    于是走不完。这里的规矩是：**每个币种各用各的汇率**，价格按上市地币种换算。
+    """
+
+    def _dir(
+        self,
+        tmp: Path,
+        *,
+        target_code: str,
+        target_market: str,
+        target_currency: str | None,
+        peer_code: str = "600519",
+    ) -> Path:
+        base = Path(tmp) / "companies" / target_code
+        (base / "raw_pdf").mkdir(parents=True)
+        (base / "extracted").mkdir(parents=True)
+        target = full_record(target_code, 2026, revenue=416161.0)
+        if target_currency:
+            target["currency"] = target_currency
+        peer = full_record(peer_code, 2026, revenue=172054.0)
+        for item in (target, peer):
+            (base / "raw_pdf" / f"{item['code']}_2026.pdf").write_bytes(
+                b"%PDF-1.4" + b"0" * 2048
+            )
+            (base / "extracted" / f"{item['code']}_2026.json").write_text(
+                json.dumps(item, ensure_ascii=False), encoding="utf-8"
+            )
+        (base / "company.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "target": {
+                        "code": target_code,
+                        "name": "Apple" if target_code == "AAPL" else "腾讯控股",
+                        "market": target_market,
+                        "years": [2026],
+                    },
+                    "peers": [
+                        {
+                            "code": peer_code,
+                            "name": "贵州茅台",
+                            "market": "CN",
+                            "years": [2026],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (base / "manifest.json").write_text(
+            json.dumps({"entries": {}}, ensure_ascii=False), encoding="utf-8"
+        )
+        return base
+
+    def test_美元目标公司配人民币可比公司(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._dir(
+                Path(tmp), target_code="AAPL", target_market="US", target_currency="USD"
+            )
+            with mock.patch.dict(os.environ):
+                summary = job.plan(
+                    base,
+                    job_id="test-cross-currency",
+                    transport=fake_transport,
+                    fx_rates={"USD": 7.15},
+                    manual_prices={
+                        "AAPL": {"price": 250.0, "as_of": "2026-10-15"},
+                        "600519": {"price": 1286.0, "as_of": "2026-10-15"},
+                    },
+                )
+            self.assertEqual(summary["fx"]["from"], "USD")
+            self.assertAlmostEqual(summary["fx"]["rates"]["AAPL"]["rate"], 7.15)
+            # 人民币那份**没被跳过**：它自己有汇率（1.0）
+            self.assertIn("600519", summary["fx"]["rates"])
+            market = (base / "market.csv").read_text(encoding="utf-8")
+            self.assertIn("AAPL,Apple,target,1787.50,", market)   # 250 USD × 7.15
+            self.assertIn("600519,贵州茅台,peer,1286.00,", market)  # 人民币原样
+            payload = json.loads(
+                (base / "extracted" / "pipeline_input.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("600519", payload["peers"])
+            self.assertAlmostEqual(
+                payload["opening_balance"]["cash"], 55.0 * 7.15, places=2
+            )
+
+    def test_港股的价格按上市地币种换算(self) -> None:
+        """腾讯这类：财报以人民币编制，股价却是港币报价 —— 价格要按 HKD 换，
+        否则市值差一个汇率；没给 HKD 汇率时必须停下并说清。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._dir(
+                Path(tmp), target_code="00700", target_market="HK", target_currency=None
+            )
+            with mock.patch.dict(os.environ):
+                with self.assertRaises(job.JobError) as caught:
+                    job.plan(
+                        base,
+                        job_id="test-hk-price-no-rate",
+                        transport=fake_transport,
+                        manual_prices={
+                            "00700": {"price": 600.0, "as_of": "2026-10-15"},
+                            "600519": {"price": 1286.0, "as_of": "2026-10-15"},
+                        },
+                    )
+            self.assertIn("HKD", str(caught.exception))
+            with mock.patch.dict(os.environ):
+                job.plan(
+                    base,
+                    job_id="test-hk-price",
+                    transport=fake_transport,
+                    fx_rates={"HKD": 0.92},
+                    manual_prices={
+                        "00700": {"price": 600.0, "as_of": "2026-10-15"},
+                        "600519": {"price": 1286.0, "as_of": "2026-10-15"},
+                    },
+                )
+            market = (base / "market.csv").read_text(encoding="utf-8")
+            self.assertIn("00700,腾讯控股,target,552.00,", market)  # 600 HKD × 0.92
+
+
 class RunTest(unittest.TestCase):
     def setUp(self) -> None:
         patcher = mock.patch.dict(os.environ)
