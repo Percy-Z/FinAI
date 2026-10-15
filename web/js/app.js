@@ -272,7 +272,10 @@
     var ctx = {
       data: State.data, status: State.status, runId: State.runId,
       go: go, setRun: setRun, triggerRun: triggerRun, lightbox: showLightbox,
-      toast: toast, copy: copy
+      toast: toast, copy: copy,
+      /* 工作台起的取数/估值任务（/api/plan、/api/ingest/run）也要有人盯着 ——
+         以前只有上面那颗「运行」按钮会启动轮询，于是子进程跑完了页面根本不知道。 */
+      watch: refreshStatus
     };
     var page = BY_ID[State.route];
     State.page = page;
@@ -329,13 +332,37 @@
       State.status = s;
       State.lastRunning = !!s.running;
       if (s.running) {
+        // 另一个标签页/上一次操作留下的任务：标题上也写一句，切出去也能看见
+        document.title = (s.phase === 'plan' ? '⏳ 取数中… · ' : '⏳ 估值中… · ') +
+          pageTitleOf(State.route);
         schedulePoll(1500);
       } else if (was) {
         /* 运行结束：让缓存失效并切到新运行 */
         API.clearCache();
         if (s.last_run) { State.runId = s.last_run; State.dataRun = undefined; }
-        toast('估值运行已完成');
-        paint();
+        // 提示要按**是哪条任务**说：取数（plan）与估值（run）是两件事，
+        // 一句写死的「估值运行已完成」会让人以为报告已经出来了。
+        var mark = '';
+        if (s.job_returncode === 0) {
+          toast(
+            s.phase === 'plan'
+              ? '取数完成：年报读完了，假设草稿已生成 —— 到「④ 复核假设」确认后再估值'
+              : '估值运行已完成：报告在 runs/ 里，页面顶部可一键打开'
+          );
+          mark = '✅ ' + (s.phase === 'plan' ? '取数完成' : '估值完成');
+        } else {
+          mark = '⚠️ ' + (s.phase === 'plan' ? '取数失败' : '估值失败');
+          toast(
+            (s.phase === 'plan' ? '取数没跑通：' : '估值没跑通：') +
+              (firstLine(s.error) || '展开运行日志看最后几行'),
+            'err'
+          );
+        }
+        // 先把页面重画完再写标题 —— renderPage 会按页面名重设 document.title，
+        // 写早了就被它盖掉（切到别的标签页时就看不到「跑完了」）。
+        paint().then(function () {
+          document.title = mark + ' · ' + pageTitleOf(State.route);
+        });
       } else {
         renderTop(); renderSideFoot();
       }
@@ -344,6 +371,16 @@
       /* 服务不可用时保持演示数据，不打断浏览 */
       return null;
     });
+  }
+
+  function pageTitleOf(route) {
+    var page = BY_ID[route];
+    return (page && page.title ? page.title : '工作台') + ' · FinAI 自动化估值工作台';
+  }
+
+  function firstLine(text) {
+    var rows = String(text || '').split('\n').filter(function (line) { return line.trim(); });
+    return rows.length ? rows[rows.length - 1].trim().slice(0, 160) : '';
   }
   function schedulePoll(ms) {
     clearTimeout(State.timer);

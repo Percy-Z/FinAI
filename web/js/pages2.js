@@ -1523,6 +1523,28 @@
         ? '<div class="mt14 tbl-note">正在跑：' + esc(phase === 'plan' ? '取数' : '估值') +
         '（任务号 ' + esc(st.job_id || st.run_id || '') + '）。页面会自动刷新。</div>'
         : '') +
+      // 上次取数的结论要留下来：刷新页面、或者过一会儿回头看，都该看得见
+      // 「跑完了没有、跑了几步、草稿在哪」——以前这三样只有成功时那张 ④ 卡能暗示。
+      (!running && st.phase === 'plan' && st.job_id
+        ? '<div class="mt14 tbl-note">上次取数（任务号 ' + esc(st.job_id) + '）：' +
+          (st.job_returncode === 0
+            ? '✅ 完成 · 跑了 ' + (st.steps || []).length + ' 步' +
+              (st.elapsed_s ? '，用时 ' + Math.round(st.elapsed_s) + ' 秒' : '') +
+              (WIZ.draft ? ' → 假设草稿已生成，请在 ④ 复核' : '')
+            : '⚠️ 没跑通（退出码 ' + (st.job_returncode == null ? '—' : st.job_returncode) +
+              '）—— 原因见下面日志末尾') +
+          '</div>'
+        : '') +
+      (!running && st.phase === 'plan' && st.job_returncode !== null &&
+        st.job_returncode !== undefined && st.job_returncode !== 0
+        // 失败原因在 status.error 里（就是子进程日志的末尾几行），
+        // st.job_log 是那份日志文件的相对路径 —— 点开能看全部。
+        ? '<pre class="code mt10">' + esc(String(st.error || '（日志是空的）')) + '</pre>' +
+          (st.job_log
+            ? '<div class="tbl-note mt10">完整日志：<a class="hash" href="/' + esc(st.job_log) +
+              '" target="_blank">' + esc(st.job_log) + '</a></div>'
+            : '')
+        : '') +
       (!WIZ.target
         ? '<div class="tbl-note mt10">这一步需要先定好目标公司：在上面 ① 按名称检索选一家，' +
           '或者用 ⓪ 把年报 PDF 入库（入库会顺带写出公司清单）。两种情况都没做时，' +
@@ -1799,6 +1821,9 @@
           WIZ.company = WIZ.target.code;
           WIZ.note = '取数任务已开始（' + r.body.job_id + '）。跑完会自动载入假设草稿。';
           repaintWizard(root, c);
+          // 起任务之后要有人轮询状态 —— 否则子进程跑完了页面根本不知道，
+          // 「跑完会自动载入草稿」这句承诺也就落空了（2026-10-15 现场问题）。
+          if (c.watch) c.watch();
         });
       } else if (action === 'save-draft') {
         API.saveDraft(WIZ.company, draftFieldsFromDom(root)).then(function (r) {
@@ -1813,6 +1838,7 @@
             if (!r.ok) { WIZ.error = (r.body && r.body.error) || '起估值任务失败'; repaintWizard(root, c); return; }
             WIZ.note = '估值已开始（运行编号 ' + r.body.run_id + '）。';
             repaintWizard(root, c);
+            if (c.watch) c.watch();
           });
         });
       }
@@ -1826,16 +1852,31 @@
       readReportFiles(el.files, root, c);
     });
 
-    /* 取数跑完自动载入草稿：状态从「运行中」变成「结束」时载一次 */
+    /* 取数跑完自动载入草稿：按**任务号**认这一次，而不是按「刚才还在跑」。
+
+       原先判断的是「上一帧在跑、这一帧不跑了」—— 但轮询期间页面不会整页重绘，
+       那个条件永远不成立，于是「跑完会自动载入假设草稿」这句承诺一直没兑现
+       （2026-10-15 现场问「跑完有没有提示」时查出来的）。改成：只要当前状态是
+       「某个取数任务的退出码 0、还没为它载入过草稿」，就载一次。 */
     var status = (c && c.status) || {};
-    var stopped = WIZ.wasRunning && !status.running;
     WIZ.wasRunning = !!status.running;
-    if (stopped && status.phase === 'plan') {
-      if (status.job_returncode === 0 && WIZ.target) {
-        loadDraft(WIZ.target.code).then(function () { repaintWizard(root, c); });
-      } else if (status.error) {
-        WIZ.error = status.error;
-        repaintWizard(root, c);
+    var jobId = String(status.job_id || '');
+    if (!status.running && status.phase === 'plan' && jobId) {
+      if (status.job_returncode === 0) {
+        if (WIZ.loadedJob !== jobId && (WIZ.company || (WIZ.target && WIZ.target.code))) {
+          WIZ.loadedJob = jobId;
+          WIZ.note = '取数完成：假设草稿已生成，请在 ④ 复核后再估值。';
+          loadDraft(WIZ.company || WIZ.target.code, true).then(function () {
+            repaintWizard(root, c);
+          });
+        }
+      } else if (status.job_returncode !== null && status.job_returncode !== undefined) {
+        if (WIZ.failedJob !== jobId) {
+          WIZ.failedJob = jobId;
+          WIZ.note = '';
+          WIZ.error = '取数没跑通（任务号 ' + jobId + '）—— 日志末尾见 ③ 卡下面。';
+          repaintWizard(root, c);
+        }
       }
     }
   }

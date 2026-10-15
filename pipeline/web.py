@@ -946,9 +946,21 @@ def _draft_payload(code: str) -> dict[str, Any]:
 def _tail(path: Path, lines: int = 25) -> str:
     """子进程日志的末尾几行。失败时界面要能说清原因，而不是只报一个退出码。"""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
     except OSError:
         return ""
+    # 编码要说一下：子进程的 stdout/stderr 被重定向到文件，中文 Windows 上
+    # Python 按 **GBK** 写（不是 UTF-8）。只按 UTF-8 解会得到一串乱码 ——
+    # 最需要看的那句失败原因反而看不清（2026-10-15 现场）。
+    text = ""
+    for encoding in ("utf-8", "gbk"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not text:
+        text = raw.decode("utf-8", errors="replace")
     rows = [line for line in text.splitlines() if line.strip()]
     return "\n".join(rows[-lines:])
 
