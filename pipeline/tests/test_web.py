@@ -319,6 +319,28 @@ class TestCompanyWorkbench(WebTestBase):
         self.assertEqual(saved["fields"]["drivers.dividend_payout_ratio"]["value"], 0.415)
         self.assertEqual(saved["fields"]["drivers.dividend_payout_ratio"]["status"], "human")
 
+    def test_整数类字段不会被存成小数(self) -> None:
+        """确认屏只给字符串；`drivers.years` 这类必须收成整数。
+
+        存成 5.0 的话，算法层的数据类拿它乘列表会抛
+        「can't multiply sequence by non-int of type 'float'」（2026-10-15 现场）。"""
+        draft = gen.Draft(
+            company={"name": "长春高新", "code": "000661"},
+            fields={"drivers.years": gen.Field("drivers.years", 5, gen.DERIVED, "规则默认")},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture(tmp)
+            draft.save(base / gen.DRAFT_NAME)
+            body = json.dumps(
+                {"company": "000661", "fields": {"drivers.years": "6"}}
+            ).encode()
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                _, _, raw = self.post("/api/plan/draft", body)
+            saved = json.loads((base / gen.DRAFT_NAME).read_text(encoding="utf-8"))
+        self.assertTrue(json.loads(raw)["ok"])
+        self.assertEqual(saved["fields"]["drivers.years"]["value"], 6)
+        self.assertIsInstance(saved["fields"]["drivers.years"]["value"], int)
+
     def test_人写的依据也一起存进草稿(self) -> None:
         """人填的值必须带着「凭什么」—— 竞赛要的就是这套假设依据台账。
 

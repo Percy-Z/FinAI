@@ -362,7 +362,7 @@
           mark = '⚠️ ' + (s.phase === 'plan' ? '取数失败' : '估值失败');
           toast(
             (s.phase === 'plan' ? '取数没跑通：' : '估值没跑通：') +
-              (firstLine(s.error) || '展开运行日志看最后几行'),
+              (errorHeadline(s.error) || '展开运行日志看最后几行'),
             'err'
           );
         }
@@ -386,9 +386,21 @@
     return (page && page.title ? page.title : '工作台') + ' · FinAI 自动化估值工作台';
   }
 
-  function firstLine(text) {
-    var rows = String(text || '').split('\n').filter(function (line) { return line.trim(); });
-    return rows.length ? rows[rows.length - 1].trim().slice(0, 160) : '';
+  /* 报错里最该看的那一行。
+
+     子进程失败时 status.error 往往是「日志末尾几行」：配置类错误的关键信息在**第一行**
+     （哪一节、哪个字段），而通用提示在最后一行；Python 的 traceback 反过来 ——
+     最后一行才是真正的异常。以前一律取最后一行，于是弹出的提示只剩
+     「提示：字段名必须与算法模块的数据类一致…」，看不出到底哪里错了（2026-10-15 现场）。 */
+  function errorHeadline(text) {
+    var rows = String(text || '').split('\n').map(function (line) {
+      return line.trim();
+    }).filter(Boolean);
+    if (!rows.length) return '';
+    if (/Traceback \(most recent call last\)/.test(text)) {
+      return rows[rows.length - 1].slice(0, 200);
+    }
+    return rows.slice(0, 2).join(' ').slice(0, 200);
   }
   function schedulePoll(ms) {
     clearTimeout(State.timer);

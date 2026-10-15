@@ -885,8 +885,13 @@ def _stage_reports(items: Sequence[Any], *, folder: Path) -> tuple[list[dict[str
     return entries, warnings
 
 
-def _coerce(value: Any) -> Any:
-    """确认屏传回来的值：空串就是「没填」，数字串变数字，其余原样。"""
+def _coerce(value: Any, *, key: str = "") -> Any:
+    """确认屏传回来的值：空串就是「没填」，数字串变数字，其余原样。
+
+    `key` 是草稿里的字段名（`drivers.years` 这样的），用来判断该不该收成整数 ——
+    一律按 float 收会写出 `years = 5.0`，算法层的数据类随后拿它去乘列表，
+    报的是「can't multiply sequence by non-int of type 'float'」（2026-10-15 现场）。
+    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -894,14 +899,21 @@ def _coerce(value: Any) -> Any:
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, list):
-        return [_coerce(item) for item in value]
+        return [_coerce(item, key=key) for item in value]
     text = str(value).strip()
     if not text:
         return None
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         return text
+    if key and "." in key:
+        from . import config as config_mod
+
+        section, name = key.split(".", 1)
+        if name in config_mod.int_fields(section) and float(number).is_integer():
+            return int(number)
+    return number
 
 
 def _draft_payload(code: str) -> dict[str, Any]:
@@ -1389,7 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
             for key, raw_value in (body.get("fields") or {}).items():
                 if key not in draft.fields:
                     continue
-                value = _coerce(raw_value)
+                value = _coerce(raw_value, key=str(key))
                 note = str(sources.get(key) or "").strip()
                 if value is None:
                     draft.fields[key] = gen.Field(

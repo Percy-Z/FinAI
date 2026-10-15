@@ -260,6 +260,50 @@ class TestPathOverrides(unittest.TestCase):
         )
 
 
+class TestIntFieldNarrowing(unittest.TestCase):
+    """配置文件里「浮点写法的整数」要能收窄，真正的小数则点名字段报错。
+
+    现场报错（2026-10-15）：确认屏把 years 存成了 5.0，算法层的数据类拿它去乘列表，
+    抛出来的是「can't multiply sequence by non-int of type 'float'」——
+    既看不出哪个字段，也不知道该改哪儿。界面上只有字符串，一律转 float 就会这样。
+    """
+
+    def _toml(self, tmp: str, *, years: str) -> Path:
+        path = Path(tmp) / "assumptions.toml"
+        path.write_text(
+            "[company]\nname = \"T\"\ncode = \"T\"\n\n"
+            "[drivers]\n"
+            "revenue_base = 1000.0\n"
+            "base_year = 2025.0\n"
+            f"years = {years}\n"
+            "revenue_growth = 0.03\n"
+            "gross_margin = 0.9\nopex_pct_revenue = 0.1\nda_pct_revenue = 0.03\n"
+            "capex_pct_revenue = 0.03\nar_pct_revenue = 0.2\n"
+            "inventory_pct_revenue = 0.1\nap_pct_revenue = 0.05\n"
+            "interest_rate_on_debt = 0.05\ntax_rate = 0.25\n"
+            "dividend_payout_ratio = 0.3\nnet_debt_repayment = 0.0\n"
+            "minority_share_of_profit = 0.0\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_浮点写法的整数会被收窄(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = config.load_drivers(self._toml(tmp, years="5.0"))
+        self.assertEqual(drivers.years, 5)
+        self.assertIsInstance(drivers.years, int)
+        self.assertEqual(drivers.base_year, 2025)
+        self.assertIsInstance(drivers.base_year, int)
+
+    def test_真正的小数要点名字段报错(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(config.ConfigError) as caught:
+                config.load_drivers(self._toml(tmp, years="5.7"))
+        message = str(caught.exception)
+        self.assertIn("[drivers].years", message)
+        self.assertIn("必须是整数", message)
+
+
 class TestConfigLoads(unittest.TestCase):
     """下面这一组断言的是仓库里的演示夹具 —— 换真实数据请用环境变量指过去。"""
 

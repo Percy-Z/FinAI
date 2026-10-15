@@ -315,6 +315,64 @@ def read_toml(path: str | Path) -> dict[str, Any]:
         return tomllib.load(handle)
 
 
+# 每个小节背后的数据类。放在这里是为了让「哪些字段是整数」这类问题有唯一出处 ——
+# 界面上回传的值、手写的配置文件都要按同一张表核对，不各写一份清单。
+SECTION_TYPES: dict[str, type] = {
+    "company": CompanyInfo,
+    "drivers": ForecastDrivers,
+    "wacc": WaccParams,
+    "terminal": TerminalParams,
+    "sensitivity": SensitivityParams,
+    "report": NarrativeRequest,
+    "opening_balance": BalanceSheetState,
+}
+
+
+def int_fields(section: str) -> frozenset[str]:
+    """这一节里哪些字段必须是整数（名字就是数据类里的字段名）。
+
+    用途：界面上的输入框只给字符串，一律按 float 收就会写出 `years = 5.0`，
+    而算法层的数据类随后拿它去乘列表 —— 抛出来的是
+    「can't multiply sequence by non-int of type 'float'」，既看不出哪个字段，
+    也不知道该改哪儿（2026-10-15 现场就是这么卡住的）。
+    """
+    cls = SECTION_TYPES.get(section)
+    if cls is None:
+        return frozenset()
+    return frozenset(
+        name
+        for name, field in getattr(cls, "__dataclass_fields__", {}).items()
+        if field.type in (int, "int")
+    )
+
+
+def _narrow_ints(
+    payload: dict[str, Any], path: str | Path, section: str
+) -> dict[str, Any]:
+    """把「浮点写法的整数」收窄（years = 5.0 → 5）；真正的小数则点名字段报错。
+
+    收窄是无损的（5.0 就是 5），拒掉的是**有损**的那种：`years = 5.7` 不许悄悄
+    截成 5 —— 那才是真正看不出错的地方。
+    """
+    if not payload:
+        return payload
+    out = dict(payload)
+    for name in int_fields(section):
+        if name not in payload:
+            continue
+        value = payload[name]
+        if isinstance(value, bool) or not isinstance(value, float):
+            continue
+        if value.is_integer():
+            out[name] = int(value)
+        else:
+            raise ConfigError(
+                f"{path} 的 [{section}].{name} 必须是整数，收到 {value} —— "
+                "这一项不接受小数。"
+            )
+    return out
+
+
 def _section(cfg: dict[str, Any], name: str, path: str | Path) -> dict[str, Any]:
     """取出一个小节。缺了就说清楚缺哪个，而不是让 KeyError 冒出去。"""
     if name not in cfg:
@@ -330,6 +388,7 @@ def _build(cls: type, payload: dict[str, Any], path: str | Path, section: str):
     TypeError  —— 字段名拼错、或者漏了必填字段
     ValueError —— 字段名对，但取值不合法（数据类自己的校验拦下来的）
     """
+    payload = _narrow_ints(payload, path, section)
     try:
         return cls(**payload)
     except TypeError as err:
