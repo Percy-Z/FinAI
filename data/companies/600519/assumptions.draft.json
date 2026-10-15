@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-10-15T00:49:37+08:00",
+  "generated_at": "2026-10-15T22:35:12+08:00",
   "company": {
     "name": "贵州茅台",
     "code": "600519",
@@ -14,14 +14,13 @@
   "notes": [
     "报表年度 2025 年，披露年份 2026；共取到 4 份年报（含上一份，可用于归一）",
     "最近一年与上一年相比没有出现盈利塌陷，按最近一年的实际盈利能力建模",
-    "这些字段需要人工填：drivers.interest_rate_on_debt、drivers.dividend_payout_ratio、wacc.cost_of_debt",
     "股价只取到一个行情源（600519、000858、000568），没有交叉核对 —— 报告里的价格属于未核对项"
   ],
   "fields": {
     "company.name": {
       "value": "贵州茅台",
-      "status": "derived",
-      "source": "巨潮检索到的简称"
+      "status": "kept",
+      "source": "沿用上一版文件里的公司全称"
     },
     "company.code": {
       "value": "600519",
@@ -45,8 +44,8 @@
     },
     "drivers.years": {
       "value": 5,
-      "status": "default",
-      "source": "默认五年显式预测期（可以在确认屏上改）"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "drivers.revenue_growth": {
       "value": 0.0,
@@ -70,8 +69,8 @@
     },
     "drivers.capex_pct_revenue": {
       "value": 0.018178,
-      "status": "human",
-      "source": "人工核对年报现金流量表第 65 页：购建固定资产、无形资产和其他长期资产支付的现金 3,127,594,916.41 ÷ 营业总收入 = 1.82%（规则默认的折旧摊销口径偏低，因为固定资产折旧那一行没抽到）"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "drivers.ar_pct_revenue": {
       "value": 1.5164110589856856e-05,
@@ -90,63 +89,63 @@
     },
     "drivers.interest_rate_on_debt": {
       "value": 0.0168,
-      "status": "human",
-      "source": "人工填：公司没有有息负债，用无风险利率作债务成本代理"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "drivers.tax_rate": {
       "value": 0.25,
-      "status": "default",
-      "source": "法定税率 25%（《企业所得税法》第四条）"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "drivers.dividend_payout_ratio": {
       "value": 0.8197,
-      "status": "human",
-      "source": "人工核对年报现金流量表第 66 页：分配股利、利润或偿付利息支付的现金 67,241,733,345.45 ÷ 归母净利润 = 81.97%"
+      "status": "kept",
+      "source": "沿用上一版：分红预案不在抽取的科目表里，需要人工核对年报「每 10 股派 X 元」"
     },
     "drivers.net_debt_repayment": {
       "value": 0.0,
-      "status": "default",
-      "source": "默认为 0：假设不额外还债（可在确认屏上改）"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "drivers.minority_share_of_profit": {
       "value": 0.0,
-      "status": "default",
-      "source": "默认为 0：少数股东损益不参与预测分配"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "wacc.risk_free": {
       "value": 0.0168,
-      "status": "default",
-      "source": "沿用 2026-10-12 查证值（10 年期国债到期收益率 1.683%；Damodaran 中国总股权风险溢价 5.14%），⚠️ 基准日变了要重新查一次"
+      "status": "kept",
+      "source": "沿用上一版文件里查证过的无风险利率（这次没有重新查）"
     },
     "wacc.beta": {
-      "value": 0.903739482782361,
+      "value": 0.8919835064965733,
       "status": "derived",
-      "source": "60 个月月度收益率对沪深300 回归 = 0.9037"
+      "source": "60 个月月度收益率对沪深300 回归 = 0.8920"
     },
     "wacc.equity_risk_premium": {
       "value": 0.0514,
-      "status": "default",
-      "source": "沿用 2026-10-12 查证值（10 年期国债到期收益率 1.683%；Damodaran 中国总股权风险溢价 5.14%），⚠️ 基准日变了要重新查一次"
+      "status": "kept",
+      "source": "沿用上一版文件里查证过的股权风险溢价（这次没有重新查）"
     },
     "wacc.cost_of_debt": {
       "value": 0.0168,
-      "status": "human",
-      "source": "人工填：无有息负债，按无风险利率作债务成本代理"
+      "status": "kept",
+      "source": "沿用上一版文件里的值"
     },
     "terminal.terminal_method": {
       "value": "perpetuity",
-      "status": "default",
-      "source": "默认永续增长法（另一种是退出倍数法）"
+      "status": "kept",
+      "source": "沿用上一版选择的终值算法"
     },
     "terminal.terminal_growth": {
       "value": 0.025,
-      "status": "default",
-      "source": "保守取 2.5%：低于 IMF 对中国的中期增速预测，并留出向长期名义 GDP 收敛的空间"
+      "status": "kept",
+      "source": "沿用上一版确认过的永续增长率"
     },
     "terminal.mid_year": {
       "value": false,
-      "status": "default",
-      "source": "默认不采用年中折现惯例（更保守；True 更贴近现实）"
+      "status": "kept",
+      "source": "沿用上一版选择的折现惯例"
     },
     "opening_balance.cash": {
       "value": 51690610946.5,

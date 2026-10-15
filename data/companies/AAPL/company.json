@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "resolved_from": "工作台年报入库（不联网检索）",
+  "resolved_at": "2026-10-15T22:50:20+08:00",
+  "as_of": "",
+  "target": {
+    "code": "AAPL",
+    "name": "AAPL",
+    "org_id": "",
+    "market": "US",
+    "column": "",
+    "years": [
+      2026
+    ],
+    "annual_report_url": ""
+  },
+  "peers": [
+    {
+      "code": "00700",
+      "name": "00700",
+      "org_id": "",
+      "market": "HK",
+      "column": "",
+      "years": [
+        2026
+      ],
+      "annual_report_url": ""
+    }
+  ],
+  "notes": [
+    "由工作台的「年报入库」写出：清单来自使用者给的 PDF，没有走巨潮检索。"
+  ]
+}

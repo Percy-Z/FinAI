@@ -1,7 +1,7 @@
 {
   "version": 1,
   "resolved_from": "长春高新",
-  "resolved_at": "2026-10-14T23:33:35+08:00",
+  "resolved_at": "2026-10-15T20:56:00+08:00",
   "as_of": "",
   "target": {
     "code": "000661",
@@ -10,7 +10,8 @@
     "market": "CN",
     "column": "",
     "years": [
-      2026
+      2026,
+      2025
     ],
     "annual_report_url": ""
   },
@@ -49,7 +50,5 @@
       "annual_report_url": ""
     }
   ],
-  "notes": [
-    "由 finai_web company --migrate 从平铺数据集迁移而来"
-  ]
+  "notes": []
 }

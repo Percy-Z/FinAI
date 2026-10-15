@@ -1,0 +1,12 @@
+# FinAI 市场快照（**由工作台自动生成，不要手改** —— 重跑取数会覆盖它）
+#
+# 各字段来源：
+#   股价    2026-10-15 收盘价，两个独立来源交叉核对：腾讯证券历史行情接口 与 备源不可用：东财行情取失败：request failed: https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=105.AAPL&fields1=f1,f2,f3,f4&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&beg=20260905&end=20261015&lmt=200 (Remote end closed connection without response)（查询时间 2026-10-15T22:56:11+08:00，两源相差 0.0000%）；⚠️ AAPL、00700 只取到一个源，没有交叉核对 —— 提交前建议用终端数据核一遍
+#   股数、有息负债、现金、少数股东权益    年报抽取结果（含页码与原文，见 extracted/pipeline_input.json 的 provenance）
+#   优先股、非经营性资产    年报没有可归入此类的披露，填 0（报告第 9 节说明这一点）
+#   币种换算    财报按报表币种、股价按上市地币种，各自换成人民币：AAPL 财报 1 USD = 7.0；AAPL 股价 1 USD = 7.0；00700 股价 1 HKD = 0.92
+#
+# 单位约定：金额元，股数股，比率小数。所有行的 as_of 必须是同一天。
+code,name,role,price,diluted_shares,interest_bearing_debt,cash,minority_interest,preferred_stock,non_operating_assets,as_of
+AAPL,AAPL,target,2413.32,0,98657000000.00,35934000000.00,0.00,0,0,2026-10-15
+00700,00700,peer,384.38,0,269653000000.00,141041000000.00,86913000000.00,0,0,2026-10-15
