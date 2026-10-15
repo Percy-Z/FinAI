@@ -1201,7 +1201,9 @@
     /* 公司目录里已经有清单（company.json）：取数时直接读它，不再按名字联网检索 */
     hasProfile: false,
     /* 外币报表的汇率（1 外币 = ? 元）：年报以美元/港币计价时必填，人民币报表留空 */
-    fx: ''
+    fx: '',
+    /* 重新抽取科目（科目表新增条目时用；不会重新下载年报） */
+    reextract: false
   };
 
   var FIELD_STATUS = {
@@ -1282,11 +1284,15 @@
       control = '<input class="input mono" data-draft="' + esc(key) + '" data-type="text" value="' + esc(value) + '">';
     }
     var short = key.indexOf('.') > 0 ? key.split('.')[1] : key;
+    // 「依据」是**可编辑**的：人填的值要能写清凭什么（评审按这条查台账）。
+    // 原来这一栏只是显示，改了值之后出处会被统一写成「在确认屏上改的」，
+    // 把最该留下的那句话盖掉了。
     return '<tr>' +
       '<td class="mono small" data-label="字段">' + esc(short) + '<div class="small dim">' + esc(key) + '</div></td>' +
       '<td data-label="取值">' + control + '</td>' +
       '<td data-label="状态">' + statusChip(item.status) + '</td>' +
-      '<td class="small dim" data-label="出处">' + esc(item.source || '') + '</td>' +
+      '<td class="small" data-label="出处/依据"><input class="input" style="min-width:220px" data-draft-source="' +
+      esc(key) + '" value="' + esc(item.source || '') + '" placeholder="凭什么这么填（数据出处 / 判断理由）"></td>' +
       '</tr>';
   }
 
@@ -1595,6 +1601,10 @@
       '人民币报表留空。目标公司与可比公司币种不同时，把各币种的汇率都写上' +
       '（USD=7.15 HKD=0.92），每家公司按自己的币种换算 —— 价格也一起换算。</span>' +
       '</div>' +
+      '<label class="row wrap mt10" style="gap:8px;align-items:center;cursor:pointer">' +
+      '<input type="checkbox" data-wiz-input="reextract"' + (WIZ.reextract ? ' checked' : '') + '>' +
+      '<span class="muted small">重新抽取科目（科目表新增了条目时勾一下，例如刚加了「分配股利支付的现金」；' +
+      '只重读已有的 PDF，不会重新下载年报）</span></label>' +
       (WIZ.error ? '<div class="alert mt10">' + esc(WIZ.error) + '</div>' : '') +
       (WIZ.note ? '<div class="tbl-note mt10">' + esc(WIZ.note) + '</div>' : '') +
       (running
@@ -1703,6 +1713,14 @@
       fields[key] = raw;
     });
     return fields;
+  }
+
+  function draftSourcesFromDom(root) {
+    var sources = {};
+    Array.prototype.forEach.call(root.querySelectorAll('[data-draft-source]'), function (el) {
+      sources[el.getAttribute('data-draft-source')] = el.value;
+    });
+    return sources;
   }
 
   /* 只重画向导那块，不惊动整页 —— 整页重绘归 app.js 的 paint 管，
@@ -1912,6 +1930,11 @@
           spec.keyword = WIZ.target.name || WIZ.target.code;
           spec.peers = WIZ.peers.map(function (peer) { return peer.code; });
         }
+        var reextractBox = root.querySelector('[data-wiz-input="reextract"]');
+        if (reextractBox) {
+          WIZ.reextract = !!reextractBox.checked;
+          if (WIZ.reextract) spec.reextract = true;
+        }
         if (WIZ.prices) {
           spec.price_as_of = WIZ.priceAsOf;
           spec.prices = [{
@@ -1937,13 +1960,13 @@
           if (c.watch) c.watch();
         });
       } else if (action === 'save-draft') {
-        API.saveDraft(WIZ.company, draftFieldsFromDom(root)).then(function (r) {
+        API.saveDraft(WIZ.company, draftFieldsFromDom(root), draftSourcesFromDom(root)).then(function (r) {
           if (!r.ok) { WIZ.error = (r.body && r.body.error) || '保存失败'; repaintWizard(root, c); return; }
           WIZ.note = '已保存到假设草稿。';
           loadDraft(WIZ.company).then(function () { repaintWizard(root, c); });
         });
       } else if (action === 'run-valuation') {
-        API.saveDraft(WIZ.company, draftFieldsFromDom(root)).then(function (saved) {
+        API.saveDraft(WIZ.company, draftFieldsFromDom(root), draftSourcesFromDom(root)).then(function (saved) {
           if (!saved.ok) { WIZ.error = (saved.body && saved.body.error) || '保存失败'; repaintWizard(root, c); return; }
           API.startIngestRun(WIZ.company).then(function (r) {
             if (!r.ok) { WIZ.error = (r.body && r.body.error) || '起估值任务失败'; repaintWizard(root, c); return; }

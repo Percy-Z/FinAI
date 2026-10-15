@@ -147,6 +147,58 @@ def make_company_dir(tmp: Path, *, records) -> Path:
     return base
 
 
+class MissingFieldDerivationTest(unittest.TestCase):
+    """四个「需人工填」的字段里，能自动化的那几个。
+
+    现场（苹果 10-K）的草稿要求人工填四项：分红比例、债务利率、债务成本、beta。
+    前两个能算出来、第三个能给有依据的规则默认 —— 都不该甩给人；
+    只剩 beta 因为「不联网」而缺，而且美股/港股本来也不能用沪深300 那条口径。
+    """
+
+    def test_分红比例从现金流量表算出来(self) -> None:
+        """分红比例 = 「分配股利、利润或偿付利息支付的现金」÷ 归母净利润。
+
+        000661 数据集的依据条目就是人手算的这个数（现金流量表第 66 页），
+        现在抽取层有了这一行，就该自动算。"""
+        item = record(year=2026, revenue=1000.0, operating_cost=100.0, net_profit=80.0)
+        item["accounts"]["dividends_paid"] = account(65.6, 66)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp), records=[item])
+            draft = gen.build_draft(base)
+        self.assertAlmostEqual(draft.value("drivers.dividend_payout_ratio"), 0.82, places=4)
+        source = draft.fields["drivers.dividend_payout_ratio"].source
+        self.assertIn("现金流量表", source)
+        self.assertIn("第 66 页", source)
+
+    def test_拿不到利息费用时利率与债务成本给规则默认(self) -> None:
+        """美国 10-K 常把利息并进 Other income，反推不出实际利率。
+        这时给一个**写得清依据**的默认值（无风险利率 + 信用利差），标成「规则默认」，
+        而不是把字段留空让人自己想办法。"""
+        item = record(year=2026, revenue=1000.0, operating_cost=100.0, net_profit=80.0)
+        item["accounts"]["interest_expense"] = None
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp), records=[item])
+            draft = gen.build_draft(base)
+        expected = gen.DEFAULT_MARKET_PARAMS["risk_free"] + gen.DEFAULT_CREDIT_SPREAD
+        for key in ("drivers.interest_rate_on_debt", "wacc.cost_of_debt"):
+            self.assertAlmostEqual(draft.value(key), expected, places=6)
+            self.assertEqual(draft.fields[key].status, gen.DEFAULT)
+            self.assertIn("请用年报附注里的加权平均利率复核", draft.fields[key].source)
+
+    def test_分红比例离谱时留空而不是给错数(self) -> None:
+        """抽到的数超过 1.5 倍净利润时多半抽错了行（例如把筹资活动的其他流出
+        当成分红）—— 宁可留空让人核对，也不要给一个看着像样的错数。"""
+        item = record(year=2026, revenue=1000.0, operating_cost=100.0, net_profit=80.0)
+        item["accounts"]["dividends_paid"] = account(900.0, 66)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp), records=[item])
+            draft = gen.build_draft(base)
+        self.assertIsNone(draft.value("drivers.dividend_payout_ratio"))
+        self.assertEqual(
+            draft.fields["drivers.dividend_payout_ratio"].status, gen.MISSING
+        )
+
+
 class YearFactsTest(unittest.TestCase):
     def test_从记录里算出比例(self) -> None:
         facts = gen.year_facts(record(year=2026, revenue=1000.0, operating_cost=100.0, net_profit=80.0))

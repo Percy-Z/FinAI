@@ -319,6 +319,35 @@ class TestCompanyWorkbench(WebTestBase):
         self.assertEqual(saved["fields"]["drivers.dividend_payout_ratio"]["value"], 0.415)
         self.assertEqual(saved["fields"]["drivers.dividend_payout_ratio"]["status"], "human")
 
+    def test_人写的依据也一起存进草稿(self) -> None:
+        """人填的值必须带着「凭什么」—— 竞赛要的就是这套假设依据台账。
+
+        以前确认屏只回传值，出处被统一写成「在确认屏上改的」，评审按这一栏核不了。
+        """
+        draft = gen.Draft(
+            company={"name": "Apple", "code": "AAPL"},
+            fields={
+                "wacc.beta": gen.Field("wacc.beta", None, gen.MISSING, "这次没算出 beta")
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture(tmp)
+            draft.save(base / gen.DRAFT_NAME)
+            body = json.dumps(
+                {
+                    "company": "000661",
+                    "fields": {"wacc.beta": "1.19"},
+                    "sources": {"wacc.beta": "Wind：5 年月度 beta（对比标普500）= 1.19"},
+                }
+            ).encode()
+            with mock.patch.object(web, "COMPANIES_ROOT", Path(tmp) / "companies"):
+                _, _, raw = self.post("/api/plan/draft", body)
+            payload = json.loads(raw)
+            saved = json.loads((base / gen.DRAFT_NAME).read_text(encoding="utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(saved["fields"]["wacc.beta"]["value"], 1.19)
+        self.assertIn("对比标普500", saved["fields"]["wacc.beta"]["source"])
+
     def test_清空一个字段会被标成没填(self) -> None:
         draft = gen.Draft(
             company={"name": "长春高新", "code": "000661"},

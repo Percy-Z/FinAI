@@ -1242,6 +1242,9 @@ class Handler(BaseHTTPRequestHandler):
                 extra += ["--as-of", str(body["as_of"])]
             if body.get("force"):
                 extra += ["--force"]
+            # 只重抽、不重下：科目表加了新条目（例如「分配股利支付的现金」）时用
+            if body.get("reextract"):
+                extra += ["--reextract"]
             # 报表不是人民币计价时必须给汇率（不给会在汇总那一步停下并说清原因）
             if body.get("fx") not in (None, ""):
                 try:
@@ -1380,14 +1383,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
             draft = gen.Draft.load(draft_path)
             changed: list[str] = []
+            # 「依据」也一起收：竞赛要求九条假设都答得出凭什么，而人填的值
+            # 如果只记成「在确认屏上改的」，评审就没法核 —— 表里那一栏可以写。
+            sources = body.get("sources") or {}
             for key, raw_value in (body.get("fields") or {}).items():
                 if key not in draft.fields:
                     continue
                 value = _coerce(raw_value)
+                note = str(sources.get(key) or "").strip()
                 if value is None:
-                    draft.fields[key] = gen.Field(key, None, gen.MISSING, "清空了，需要填")
+                    draft.fields[key] = gen.Field(
+                        key, None, gen.MISSING, note or "清空了，需要填"
+                    )
                 else:
-                    draft.set_value(key, value, source="在确认屏上改的")
+                    draft.set_value(key, value, source=note or "在确认屏上改的")
                 changed.append(str(key))
             draft.save(draft_path)
             self._json(

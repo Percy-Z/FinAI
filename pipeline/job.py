@@ -566,6 +566,7 @@ def plan(
     manual_prices: Mapping[str, Mapping[str, Any]] | None = None,
     manual_shares: Mapping[str, Any] | None = None,
     fx_rates: Mapping[str, Any] | None = None,
+    reextract: bool = False,
 ) -> dict[str, Any]:
     """取数一把梭：定标 → 下载 → 抽取 → 汇总 → 取价 → 假设草稿。
 
@@ -579,6 +580,9 @@ def plan(
     fx_rates       按**币种**给汇率 {"USD": 7.15, "HKD": 0.92}：目标公司与可比公司
                    币种不同时，各用各的汇率也能量到同一张表里。缺哪个币种的汇率，
                    用那个币种的公司就单独跳过并写明原因。
+    reextract      重新抽取已有的 PDF（科目表新增了条目时用它）。
+                   注意别用 --force 代替：--force 会连年报一起重下，而本地入库的
+                   PDF（队友给的、交易所下的）根本没地方重下。
     """
     module = _ingest()
     company = module["company"]
@@ -654,7 +658,7 @@ def plan(
                 raise JobError(f"文件名不符合 <代码>_<年份>.pdf：{pdf.name}")
             code, year = stem_parts[0], int(stem_parts[1])
             target_path = extracted_dir / f"{code}_{year}.json"
-            if target_path.is_file() and not force:
+            if target_path.is_file() and not force and not reextract:
                 written.append(target_path)
                 continue
             record = module["extract"].extract_pdf(
@@ -974,6 +978,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--job-id", default=None, help="任务编号（界面传进来，用来对齐进度）")
     p_plan.add_argument("--force", action="store_true", help="重新下载与重新抽取")
     p_plan.add_argument(
+        "--reextract",
+        action="store_true",
+        help="只重新抽取已有的 PDF（科目表更新后用；不会碰年报文件本身）",
+    )
+    p_plan.add_argument(
         "--fx",
         type=float,
         default=None,
@@ -1094,6 +1103,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         fx_rates=_parse_fx_args(args.fx_currency),
         manual_prices=_parse_price_args(args.price, args.price_as_of),
         manual_shares=_parse_shares_args(args.shares),
+        reextract=args.reextract,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

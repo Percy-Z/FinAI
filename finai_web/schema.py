@@ -345,6 +345,25 @@ ACCOUNTS: tuple[Account, ...] = (
         ),
         "cashflow",
     ),
+    Account(
+        "dividends_paid",
+        (
+            # A 股现金流量表：这一行把「偿付利息」也算进去了，分母用净利润时略有偏差
+            "分配股利、利润或偿付利息支付的现金",
+            "分配股利、利润或偿付利息所支付的现金",
+            # 美国 10-K：只含股息，是分母（分红比例）最干净的口径
+            "Payments for dividends and dividend equivalents",
+            "Payments of dividends",
+            "Dividends paid",
+            # 港交所口径
+            "已付股息",
+            "已付股利",
+            "派付股息",
+        ),
+        "cashflow",
+        "用来算分红比例：这个数 ÷ 归母净利润（现金流量表里的流出通常写成正数或括号负数，取绝对值）",
+        allow_notes=True,
+    ),
 )
 
 ACCOUNT_NAMES: tuple[str, ...] = tuple(account.name for account in ACCOUNTS)

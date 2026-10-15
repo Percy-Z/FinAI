@@ -54,6 +54,11 @@ MARKET_PARAMS_SOURCE = (
 DEFAULT_TERMINAL_GROWTH = 0.025
 DEFAULT_YEARS = 5
 STATUTORY_TAX_RATE = 0.25
+# 债务成本：抽不到利息费用时的兜底（标成「规则默认」，并要求按年报附注复核）。
+# 取无风险利率 + 1.5% 的信用利差 —— 给「报表上不单独披露利息费用」的公司
+# （美国 10-K 常把利息并进 Other income）一个可解释的起点。依据写在 source 里，
+# 评审看得出这是规则而不是数据。
+DEFAULT_CREDIT_SPREAD = 0.015
 
 DERIVED = "derived"
 DEFAULT = "default"
@@ -307,6 +312,43 @@ def _page(record: Mapping[str, Any], name: str) -> str:
     return f"（年报第 {page} 页）" if page else ""
 
 
+def payout_ratio_from_record(
+    record: Mapping[str, Any], facts: Mapping[str, Any]
+) -> tuple[float | None, str]:
+    """分红比例 = 现金流量表的「分配股利、利润或偿付利息支付的现金」÷ 归母净利润。
+
+    这一格以前只能靠人手算（000661 数据集的依据条目就是这么写的：「人工核对年报
+    现金流量表第 66 页：分配股利、利润或偿付利息支付的现金 67,241,733,345.45 ÷
+    归母净利润 = 81.97%」）。口径差异要写在说明里，别让人以为它等于分红预案：
+
+        A 股     「分配股利、利润或偿付利息支付的现金」—— 把偿付利息也算进去了，
+                 有息负债大的公司会偏高
+        港交所   「已付股息」
+        美股     10-K 的 Payments for dividends and dividend equivalents —— 最干净
+
+    比例超过 1.5 倍净利润时不当它是分红：那种数多半是抽错了行（例如把筹资活动的
+    其他流出当成了分红），宁可留空让人核对，也不要给一个看着像样的错数。
+    """
+    paid = _account(record, "dividends_paid")
+    profit = facts.get("net_profit")
+    which = f"归母净利润"
+    if profit is None:
+        # 美国 10-K 通常只写「Net income」，没有「归属于母公司」那一行 ——
+        # 那边多数公司没有少数股东权益，两者本来就是同一个数（adapter 也这么兜）。
+        profit = _account(record, "net_profit")
+        which = "合并净利润（年报没有单独披露归母净利润）"
+    if paid is None or not profit or float(profit) <= 0:
+        return None, ""
+    ratio = abs(float(paid)) / float(profit)
+    if ratio > 1.5:
+        return None, ""
+    return ratio, (
+        f"现金流量表「分配股利」{abs(float(paid)):,.0f} 元 ÷ {which} "
+        f"{float(profit):,.0f} 元 = {ratio:.2%}{_page(record, 'dividends_paid')}"
+        "（这一行含偿付利息，口径会略高于分红预案；年报有预案时以预案为准）"
+    )
+
+
 def year_facts(
     record: Mapping[str, Any], *, fiscal_year: int | None = None
 ) -> dict[str, Any]:
@@ -469,6 +511,7 @@ def _field(
     keep_source: str = "沿用上一版文件里的值",
     default: Any = None,
     default_source: str = "",
+    missing_source: str = "",
 ) -> Field:
     """按优先级定一个字段：能算就算 → 沿用上一版 → 规则默认 → 真的没有（missing）。
 
@@ -485,7 +528,12 @@ def _field(
         return Field(key=key, value=previous, status=KEPT, source=keep_source)
     if default is not None:
         return Field(key=key, value=default, status=DEFAULT, source=default_source)
-    return Field(key=key, value=None, status=MISSING, source="年报里没有这个数，需要人填")
+    return Field(
+        key=key,
+        value=None,
+        status=MISSING,
+        source=missing_source or "年报里没有这个数，需要人填",
+    )
 
 
 def _ratio(numerator: Any, denominator: Any) -> float | None:
@@ -780,6 +828,12 @@ def build_draft(
     interest = facts["interest_expense"]
     debt = opening.get("interest_bearing_debt")
     cost_of_debt = _ratio(interest, debt)
+    debt_rate_default = float(DEFAULT_MARKET_PARAMS["risk_free"]) + DEFAULT_CREDIT_SPREAD
+    debt_rate_default_source = (
+        f"规则默认：无风险利率 {DEFAULT_MARKET_PARAMS['risk_free']:.2%} + 信用利差 "
+        f"{DEFAULT_CREDIT_SPREAD:.1%} = {debt_rate_default:.2%} —— 年报里没有单独的利息费用，"
+        "反推不出实际利率。请用年报附注里的加权平均利率复核（或直接改成实际利率）"
+    )
     put(
         "drivers.interest_rate_on_debt",
         _field(
@@ -791,6 +845,12 @@ def build_draft(
                 else ""
             ),
             previous=prev_drivers.get("interest_rate_on_debt"),
+            default=debt_rate_default,
+            default_source=debt_rate_default_source,
+            missing_source=(
+                "有息负债为 0（或没抽到），算不出债务利率。没有有息负债时填 0 即可；"
+                "有债但报表没单独披露利息费用时，用年报附注的加权平均利率。"
+            ),
         ),
     )
     put(
@@ -802,12 +862,20 @@ def build_draft(
             previous=prev_drivers.get("tax_rate"),
         ),
     )
+    payout, payout_source = payout_ratio_from_record(latest, facts)
     put(
         "drivers.dividend_payout_ratio",
         _field(
             "drivers.dividend_payout_ratio",
+            derived=payout,
+            derived_source=payout_source,
             previous=prev_drivers.get("dividend_payout_ratio"),
             keep_source="沿用上一版：分红预案不在抽取的科目表里，需要人工核对年报「每 10 股派 X 元」",
+            missing_source=(
+                "年报里没有能直接算出分红比例的数。两条路：看「利润分配预案」"
+                "（每 10 股派 X 元 × 股数 ÷ 归母净利润），或用现金流量表里"
+                "「分配股利、利润或偿付利息支付的现金」÷ 归母净利润（这一行含利息，会略偏高）。"
+            ),
         ),
     )
     put(
@@ -852,6 +920,11 @@ def build_draft(
             ),
             previous=prev_wacc.get("beta"),
             keep_source="沿用上一版：这次没算 beta（需要联网取行情）",
+            missing_source=(
+                "这次没算出 beta（要联网取行情）。A 股公司重跑一次取数就能回归出来；"
+                "港股/美股的公司**不要**用沪深300 那条口径 —— 请填你在 Wind / Choice / "
+                "官网查到的 5 年月度 beta（对比本地市场指数），并把出处写进「依据」一栏。"
+            ),
         ),
     )
     put(
@@ -875,6 +948,11 @@ def build_draft(
                 else ""
             ),
             previous=prev_wacc.get("cost_of_debt"),
+            default=debt_rate_default,
+            default_source=debt_rate_default_source,
+            missing_source=(
+                "有息负债为 0（或没抽到），算不出债务成本。没有有息负债时填 0 即可。"
+            ),
         ),
     )
 

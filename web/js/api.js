@@ -153,8 +153,10 @@
   function planDraft(company) {
     return request('GET', '/api/plan/draft?company=' + encodeURIComponent(company));
   }
-  function saveDraft(company, fields) {
-    return request('POST', '/api/plan/draft', { company: company, fields: fields });
+  function saveDraft(company, fields, sources) {
+    return request('POST', '/api/plan/draft', {
+      company: company, fields: fields, sources: sources || {}
+    });
   }
   function startPlan(spec) { return request('POST', '/api/plan', spec); }
   function startIngestRun(company) { return request('POST', '/api/ingest/run', { company: company }); }
