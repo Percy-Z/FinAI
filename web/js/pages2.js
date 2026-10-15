@@ -1195,9 +1195,11 @@
     company: '', draft: null, asOf: '', busy: '', error: '', note: '', companies: [],
     /* 年报 PDF 那条路（不联网检索）：reports 里每一条是
        {filename, code, year, name, role, title, data} —— data 是浏览器读出来的 base64 */
-    reports: [], reportNote: '', fromReports: false,
+    reports: [], reportNote: '', reportError: '', fromReports: false,
     /* 手填行情：断网或现场演示时用，给了就不联网取价 */
-    prices: false, priceAsOf: '', priceRows: {}
+    prices: false, priceAsOf: '', priceRows: {}, shareRows: {},
+    /* 公司目录里已经有清单（company.json）：取数时直接读它，不再按名字联网检索 */
+    hasProfile: false
   };
 
   var FIELD_STATUS = {
@@ -1355,19 +1357,28 @@
   function wizardReportRows() {
     if (!WIZ.reports.length) {
       return '<div class="tbl-note">还没有年报。选好 PDF 之后，每一条要填「公司代码」与' +
-        '「披露年份」（2025 年年报在 2026 年披露，就填 2026）—— 抽取那一步靠这两项命名文件。</div>';
+        '「披露年份」（2025 年年报在 2026 年披露，就填 2026）—— 抽取那一步靠这两项命名文件。' +
+        '代码：A 股六位（600519）、港股五位（00700）、美股用字母（AAPL）。文件名里没有代码时' +
+        '（例如「腾讯年报.pdf」），必须手填这两格。</div>';
     }
     return '<div class="tbl-wrap"><table class="tbl responsive"><thead><tr>' +
       '<th>文件</th><th>公司代码</th><th>披露年份</th><th>身份</th><th>公司名称（可留空）</th><th></th>' +
       '</tr></thead><tbody>' +
       WIZ.reports.map(function (row, index) {
+        // 从文件名认不出代码/年份时，把这一格标出来 —— 缺的这两项会让入库整条断掉，
+        // 而「灰按钮不告诉我为什么」是最难查的一类问题。
+        var badCode = !String(row.code || '').trim();
+        var badYear = !String(row.year || '').trim();
         return '<tr>' +
           '<td class="small" data-label="文件">' + esc(row.filename) +
-          (row.data ? '' : ' <span class="badge warn">未读取到内容</span>') + '</td>' +
+          (row.data ? '' : ' <span class="badge warn">未读取到内容</span>') +
+          (badCode || badYear ? ' <span class="badge warn">代码/年份待填</span>' : '') + '</td>' +
           '<td data-label="代码"><input class="input mono" data-report="code" data-index="' + index +
-          '" value="' + esc(row.code) + '" placeholder="600519"></td>' +
+          '" value="' + esc(row.code) + '" placeholder="600519 / 00700 / AAPL"' +
+          (badCode ? ' style="border-color:var(--warn,#c98a00)"' : '') + '></td>' +
           '<td data-label="年份"><input class="input mono" data-report="year" data-index="' + index +
-          '" value="' + esc(row.year) + '" placeholder="2026"></td>' +
+          '" value="' + esc(row.year) + '" placeholder="2026"' +
+          (badYear ? ' style="border-color:var(--warn,#c98a00)"' : '') + '></td>' +
           '<td data-label="身份"><select class="input" data-report="role" data-index="' + index + '">' +
           '<option value="target"' + (row.role === 'target' ? ' selected' : '') + '>目标公司</option>' +
           '<option value="peer"' + (row.role === 'peer' ? ' selected' : '') + '>可比公司</option>' +
@@ -1382,7 +1393,8 @@
       '<div class="row wrap mt10" style="gap:8px;align-items:center">' +
       '<button class="ghost" type="button" data-wiz="add-report-row">' +
       Icons.svg('plus') + '再加一家（没有 PDF 的会联网下载）</button>' +
-      '<span class="muted small">可比公司也要有年报：没有 PDF 时填代码 + 披露年份，程序去下载</span></div>';
+      '<span class="muted small">可比公司也要有年报：没有 PDF 时填代码 + 披露年份，程序去下载</span></div>' +
+      (WIZ.reportError ? '<div class="alert mt10">' + esc(WIZ.reportError) + '</div>' : '');
   }
 
   function wizardReportBlock() {
@@ -1397,7 +1409,7 @@
         ? '<span class="badge pass">清单已写好：' + esc((WIZ.target && (WIZ.target.name || WIZ.target.code)) || '') +
         '</span><span class="muted small">下一步直接在「③ 取数并生成假设」点开始取数</span>'
         : '<span class="muted small">入库不联网：PDF 存进 data/companies/&lt;代码&gt;/raw_pdf/，' +
-        '清单从这些文件写出</span>') +
+        '清单从这些文件写出。文件名里认不出代码时，请在表里手填六位代码</span>') +
       '</div>' +
       '<div class="mt10">' + wizardReportRows() + '</div>' +
       (WIZ.reportNote ? '<div class="tbl-note mt10">' + esc(WIZ.reportNote) + '</div>' : '');
@@ -1412,25 +1424,29 @@
     WIZ.peers.forEach(function (peer) { refs.push({ code: peer.code, name: peer.name }); });
     if (!WIZ.prices) {
       return '<button class="ghost mt10" type="button" data-wiz="toggle-prices">' +
-        Icons.svg('percent') + '没有网络？手填股价</button>';
+        Icons.svg('percent') + '手填股价 / 股数（断网，或年报里没抽到股本时用）</button>';
     }
     if (!refs.length) {
       return '<div class="tbl-note mt10">先定好目标公司与可比公司，再手填股价。</div>';
     }
     return '<div class="tbl-note mt10">手填股价（不下网取价）。所有行必须同一天，' +
-      '报告里会写明这一列是人工填写、没有交叉核对。</div>' +
+      '报告里会写明这一列是人工填写、没有交叉核对。股数可以单独填：年报里没抽到股本时' +
+      '（腾讯只在附注披露、苹果 10-K 把面值与股数拆成两行）就靠它，填了就不影响取价。</div>' +
       '<div class="row wrap mt10" style="gap:8px;align-items:center">' +
       '<span class="muted small">基准日</span>' +
       '<input class="input mono" style="max-width:160px" data-price-input="as_of" value="' +
       esc(WIZ.priceAsOf) + '" placeholder="2026-10-15"></div>' +
       '<div class="tbl-wrap mt10"><table class="tbl responsive"><thead><tr>' +
-      '<th>公司</th><th>收盘价（元）</th></tr></thead><tbody>' +
+      '<th>公司</th><th>收盘价（元）</th><th>股数（留空=用年报抽到的）</th></tr></thead><tbody>' +
       refs.map(function (ref) {
         var value = WIZ.priceRows[ref.code] == null ? '' : WIZ.priceRows[ref.code];
+        var shares = WIZ.shareRows[ref.code] == null ? '' : WIZ.shareRows[ref.code];
         return '<tr><td data-label="公司">' + esc(ref.name || ref.code) +
           ' <span class="mono small dim">' + esc(ref.code) + '</span></td>' +
           '<td data-label="收盘价"><input class="input mono" data-price-code="' + esc(ref.code) +
-          '" value="' + esc(value) + '" placeholder="例如 1286.00"></td></tr>';
+          '" value="' + esc(value) + '" placeholder="例如 1286.00"></td>' +
+          '<td data-label="股数"><input class="input mono" data-shares-code="' + esc(ref.code) +
+          '" value="' + esc(shares) + '" placeholder="例如 1252270215"></td></tr>';
       }).join('') +
       '</tbody></table></div>' +
       '<button class="ghost mt10" type="button" data-wiz="toggle-prices">' +
@@ -1465,7 +1481,9 @@
         '<div class="row wrap mt10" style="gap:8px">' +
         WIZ.companies.map(function (item) {
           return '<button class="badge ' + (item.has_draft ? 'code' : 'neutral') + '" type="button" data-wiz="load-company" data-code="' +
-            esc(item.code) + '">' + esc(item.name || item.code) + ' <span class="mono small dim">' + esc(item.code) +
+            esc(item.code) + '" data-name="' + esc(item.name || '') + '" data-draft="' + (item.has_draft ? '1' : '') +
+            '" data-profile="' + (item.has_profile ? '1' : '') + '">' + esc(item.name || item.code) +
+            ' <span class="mono small dim">' + esc(item.code) +
             '</span>' + (item.has_draft ? '' : ' <span class="dim">（还没取数）</span>') + '</button>';
         }).join('') + '</div></div>');
     }
@@ -1505,6 +1523,11 @@
         ? '<div class="mt14 tbl-note">正在跑：' + esc(phase === 'plan' ? '取数' : '估值') +
         '（任务号 ' + esc(st.job_id || st.run_id || '') + '）。页面会自动刷新。</div>'
         : '') +
+      (!WIZ.target
+        ? '<div class="tbl-note mt10">这一步需要先定好目标公司：在上面 ① 按名称检索选一家，' +
+          '或者用 ⓪ 把年报 PDF 入库（入库会顺带写出公司清单）。两种情况都没做时，' +
+          '按钮是灰的。</div>'
+        : '') +
       (missingPeer ? '<div class="tbl-note mt10">提示：没有可比公司相对估值做不了，取数会在汇总那一步停下。</div>' : '') +
       (fromReports
         ? '<div class="tbl-note mt10">目标公司与可比公司来自本地年报（清单已写好）—— 这一步不会再检索公司名。</div>'
@@ -1530,6 +1553,9 @@
     Array.prototype.forEach.call(root.querySelectorAll('[data-price-code]'), function (el) {
       WIZ.priceRows[el.getAttribute('data-price-code')] = el.value;
     });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-shares-code]'), function (el) {
+      WIZ.shareRows[el.getAttribute('data-shares-code')] = el.value;
+    });
     var day = root.querySelector('[data-price-input="as_of"]');
     if (day) WIZ.priceAsOf = day.value;
   }
@@ -1545,6 +1571,11 @@
         var comma = text.indexOf(',');
         var row = guessReport(file.name);
         row.role = WIZ.reports.length ? 'peer' : 'target';
+        // 文件名里认不出代码，但 ① 已经选好了目标公司时，直接借用它 —— 少一个手填
+        if (!row.code && row.role === 'target' && WIZ.target) {
+          row.code = WIZ.target.code;
+          row.name = row.name || WIZ.target.name || '';
+        }
         row.data = comma >= 0 ? text.slice(comma + 1) : '';
         WIZ.reports.push(row);
         pending -= 1;
@@ -1581,10 +1612,16 @@
     if (box) box.innerHTML = wizardHtml(c);
   }
 
-  function loadDraft(code) {
+  function loadDraft(code, quiet) {
     WIZ.company = code;
     return API.planDraft(code).then(function (r) {
-      if (!r.ok) { WIZ.draft = null; WIZ.error = (r.body && r.body.error) || '读不到假设草稿'; return; }
+      if (!r.ok) {
+        // 「清单已写好、但还没取数」是正常状态（例如刚从 ⓪ 入库完）——
+        // 这时不该报错，只把草稿清空，让人接着点「开始取数」。
+        WIZ.draft = null;
+        if (!quiet) WIZ.error = (r.body && r.body.error) || '读不到假设草稿';
+        return;
+      }
       WIZ.draft = r.body;
       if (r.body.company_info) WIZ.target = { code: r.body.company_info.code, name: r.body.company_info.name };
       if (r.body.company && r.body.company.peers) {
@@ -1647,7 +1684,18 @@
         WIZ.peers = WIZ.peers.filter(function (peer) { return peer.code !== code; });
         repaintWizard(root, c);
       } else if (action === 'load-company') {
-        loadDraft(code).then(function () { repaintWizard(root, c); });
+        var hasProfile = el.getAttribute('data-profile') === '1';
+        var hasDraft = el.getAttribute('data-draft') === '1';
+        if (hasProfile) {
+          // 清单已经在公司目录里（早先取的数、或从 ⓪ 入库进来的）→ 取数时直接读它，
+          // 不再按名字联网检索。没有这一步，只有 PDF 的公司就永远点不动「开始取数」。
+          WIZ.company = code;
+          WIZ.target = { code: code, name: name || code };
+          WIZ.hasProfile = true;
+          WIZ.fromReports = WIZ.fromReports || false;
+          WIZ.error = '';
+        }
+        loadDraft(code, !hasDraft).then(function () { repaintWizard(root, c); });
       } else if (action === 'pick-reports') {
         var picker = root.querySelector('[data-wiz-file="reports"]');
         if (picker) picker.click();
@@ -1672,17 +1720,24 @@
         repaintWizard(root, c);
       } else if (action === 'import-reports') {
         syncReportRowsFromDom(root);
-        var rows = WIZ.reports.filter(function (row) { return row.code && row.year; });
-        if (!rows.length) {
-          WIZ.error = '每条年报都要有公司代码与披露年份（2025 年年报在 2026 年披露，年份就填 2026）';
+        // 缺项的**逐条点出来**，不再静默过滤：过滤掉之后只剩一个灰按钮，
+        // 谁也看不出为什么点了没用（2026-10-15 现场就是这么卡住的）。
+        var incomplete = WIZ.reports.filter(function (row) {
+          return !String(row.code || '').trim() || !String(row.year || '').trim();
+        });
+        if (incomplete.length) {
+          WIZ.reportError = '这些年报还缺公司代码或披露年份：' +
+            incomplete.map(function (row) { return row.filename; }).join('、') +
+            '。文件名里认不出时请手填（六位代码，例如 600519；2025 年年报在 2026 年披露，年份填 2026）。';
           repaintWizard(root, c);
           return;
         }
+        var rows = WIZ.reports.slice();
         var targetRow = rows.filter(function (row) { return row.role === 'target'; })[0] || rows[0];
         rows.forEach(function (row) {
           row.role = row === targetRow ? 'target' : (row.role === 'target' ? 'peer' : row.role);
         });
-        WIZ.busy = 'reports'; WIZ.error = ''; WIZ.reportNote = '';
+        WIZ.busy = 'reports'; WIZ.error = ''; WIZ.reportNote = ''; WIZ.reportError = '';
         API.importReports({
           company: targetRow.code,
           reports: rows.map(function (row) {
@@ -1694,7 +1749,7 @@
         }).then(function (r) {
           WIZ.busy = '';
           if (!r.ok) {
-            WIZ.error = (r.body && r.body.error) || '年报入库失败';
+            WIZ.reportError = (r.body && r.body.error) || '年报入库失败';
             repaintWizard(root, c);
             return;
           }
@@ -1718,7 +1773,7 @@
         WIZ.error = ''; WIZ.note = '';
         if (WIZ.prices) syncPriceRowsFromDom(root);
         var spec = { company: WIZ.target.code };
-        if (!WIZ.fromReports) {
+        if (!WIZ.fromReports && !WIZ.hasProfile) {
           // 联网那条路：按名称/代码重新检索定标（会顺带刷新最近披露年份）
           spec.target_code = WIZ.target.code;
           spec.keyword = WIZ.target.name || WIZ.target.code;
@@ -1726,9 +1781,17 @@
         }
         if (WIZ.prices) {
           spec.price_as_of = WIZ.priceAsOf;
-          spec.prices = [{ code: WIZ.target.code, price: WIZ.priceRows[WIZ.target.code] }]
+          spec.prices = [{
+            code: WIZ.target.code,
+            price: WIZ.priceRows[WIZ.target.code],
+            shares: WIZ.shareRows[WIZ.target.code]
+          }]
             .concat(WIZ.peers.map(function (peer) {
-              return { code: peer.code, price: WIZ.priceRows[peer.code] };
+              return {
+                code: peer.code,
+                price: WIZ.priceRows[peer.code],
+                shares: WIZ.shareRows[peer.code]
+              };
             }));
         }
         API.startPlan(spec).then(function (r) {

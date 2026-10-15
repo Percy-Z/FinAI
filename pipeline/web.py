@@ -1250,6 +1250,23 @@ class Handler(BaseHTTPRequestHandler):
                 for item in prices:
                     raw_code = str((item or {}).get("code") or "").strip()
                     raw_price = (item or {}).get("price")
+                    raw_shares = (item or {}).get("shares")
+                    # 股数（每股价值的分母）单独传：年报抽不到股本的公司靠它补上，
+                    # 而且它不影响「要不要联网取价」这件事。
+                    if raw_code and raw_shares not in (None, ""):
+                        try:
+                            shares_value = float(raw_shares)
+                        except (TypeError, ValueError):
+                            self._json(
+                                {"ok": False, "error": f"{raw_code} 的股数不是数字"}, 409
+                            )
+                            return
+                        if shares_value <= 0:
+                            self._json(
+                                {"ok": False, "error": f"{raw_code} 的股数必须为正数"}, 409
+                            )
+                            return
+                        extra += ["--shares", f"{raw_code}={shares_value}"]
                     if not raw_code or raw_price in (None, ""):
                         continue
                     try:

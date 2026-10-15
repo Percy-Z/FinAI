@@ -439,6 +439,47 @@ class ImportReportsTest(unittest.TestCase):
             self.assertIn("不一致", str(caught.exception))
 
 
+    def test_手填股数补上抽不到的股本(self) -> None:
+        """股数是每股价值的分母。有些年报就是抽不到这一行 —— 腾讯的股本在报表上
+        用破折号占位（真数在附注）、苹果 10-K 把面值与股数拆成两行、非股份公司
+        压根没有「股本」。没有这一格，这些公司会在估值那一步报
+        「diluted_shares 必须为正数」，而人查得到的数字却没处填。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp))
+            with mock.patch.dict(os.environ):
+                summary = job.plan(
+                    base,
+                    job_id="test-plan-manual-shares",
+                    transport=fake_transport,
+                    manual_prices={
+                        "000661": {"price": 71.83, "as_of": "2026-09-30"},
+                        "300009": {"price": 8.61, "as_of": "2026-09-30"},
+                    },
+                    manual_shares={"000661": 500, "300009": "800"},
+                )
+            market = (base / "market.csv").read_text(encoding="utf-8")
+            self.assertIn("000661,长春高新,target,71.83,500,", market)
+            self.assertIn("300009,安科生物,peer,8.61,800,", market)
+            self.assertEqual(summary["shares_manual"], {"000661": 500.0, "300009": 800.0})
+
+    def test_手填股数必须为正数(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_company_dir(Path(tmp))
+            with mock.patch.dict(os.environ):
+                with self.assertRaises(job.JobError) as caught:
+                    job.plan(
+                        base,
+                        job_id="test-plan-bad-shares",
+                        transport=fake_transport,
+                        manual_prices={
+                            "000661": {"price": 71.83, "as_of": "2026-09-30"},
+                            "300009": {"price": 8.61, "as_of": "2026-09-30"},
+                        },
+                        manual_shares={"000661": 0},
+                    )
+            self.assertIn("必须为正数", str(caught.exception))
+
+
 class RunTest(unittest.TestCase):
     def setUp(self) -> None:
         patcher = mock.patch.dict(os.environ)

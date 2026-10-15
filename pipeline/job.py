@@ -176,13 +176,15 @@ def _pick_candidate(found: Sequence[Any], wanted: str, module: Mapping[str, Any]
 
 
 def _market_of(code: str, raw_market: str = "") -> str:
-    """板块：手填优先；没填就按代码形状猜（五位数字是港股，其余按 A 股）。"""
+    """板块：手填优先；没填就按代码形状猜（五位数字是港股、纯字母是美股，其余按 A 股）。"""
     text = str(raw_market or "").strip().upper()
     if text:
         return text
     digits = str(code or "").strip()
     if len(digits) == 5 and digits.isdigit():
         return "HK"
+    if digits.isalpha():
+        return "US"
     return "CN"
 
 
@@ -447,6 +449,36 @@ def _latest_disclosure_year(target: Any, module: Mapping[str, Any], transport: A
     return year
 
 
+def _apply_manual_shares(
+    balances: Mapping[str, Mapping[str, float]],
+    refs: Sequence[Any],
+    manual_shares: Mapping[str, Any],
+    summary: dict[str, Any],
+) -> dict[str, dict[str, float]]:
+    """手填股数覆盖年报抽到的股本，返回新的「每家公司一盘账」。
+
+    为什么需要它：股数是每股价值的分母，而有些年报根本抽不到这一行 ——
+    腾讯的股本在报表上用破折号占位（真数在附注里）、苹果的 10-K 把面值与
+    股数拆成两行、非股份公司（华为投资控股）压根没有「股本」。
+    没有这一格，这些公司会在估值那一步报「diluted_shares 必须为正数」，
+    而人能查到的数字却没处填。
+    """
+    overridden = {code: dict(values) for code, values in balances.items()}
+    for ref in refs:
+        raw = manual_shares.get(ref.code)
+        if raw in (None, ""):
+            continue
+        try:
+            shares = float(raw)
+        except (TypeError, ValueError):
+            raise JobError(f"{ref.code} 手填的股数不是数字：{raw!r}") from None
+        if shares <= 0:
+            raise JobError(f"{ref.code} 手填的股数必须为正数：{raw!r}")
+        overridden.setdefault(ref.code, {})["share_capital"] = shares
+        summary.setdefault("shares_manual", {})[ref.code] = shares
+    return overridden
+
+
 def build_market_rows(
     profile: Any,
     balances: Mapping[str, Mapping[str, float]],
@@ -499,6 +531,7 @@ def plan(
     force: bool = False,
     fx_rate: float | None = None,
     manual_prices: Mapping[str, Mapping[str, Any]] | None = None,
+    manual_shares: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """取数一把梭：定标 → 下载 → 抽取 → 汇总 → 取价 → 假设草稿。
 
@@ -506,6 +539,9 @@ def plan(
     manual_prices  手填行情 {代码: {"price": 1286.0, "as_of": "2026-10-15"}}。
                    给了就不联网取价 —— 断网也能把流程跑完，但那一列会明确标成
                    「人工填写、没有交叉核对」。不给就走腾讯 + 东财双源核对。
+    manual_shares  手填股数 {代码: 股数}。年报里抽不到股本时用（腾讯的股本只在附注里
+                   披露、苹果的 10-K 把面值与股数拆成两行）—— 股数是每股价值的分母，
+                   缺了估值那一步会直接报「diluted_shares 必须为正数」。
     """
     module = _ingest()
     company = module["company"]
@@ -629,6 +665,11 @@ def plan(
         for record in module["extract"].load_records(extracted_dir)
         if record.get("code")
     }
+    # 手填股数：覆盖年报里抽到的股本。股数是每股价值的分母 —— 年报里没有这一行
+    # （腾讯只在附注里披露、苹果 10-K 把面值与股数拆成两行）时，估值那一步会直接
+    # 报「diluted_shares 必须为正数」，所以这一格要能由人补上。
+    if manual_shares:
+        balances = _apply_manual_shares(balances, profile.all_refs, manual_shares, summary)
 
     # ── ⑤ 取价 + 行情表 ──────────────────────────────────────────
     def stage_market() -> Path:
@@ -836,6 +877,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="手填股价（可多次）：600519=1286.00。给了就不联网取价（断网时用）",
     )
     p_plan.add_argument("--price-as-of", default="", help="手填股价的基准日 YYYY-MM-DD")
+    p_plan.add_argument(
+        "--shares",
+        action="append",
+        default=[],
+        metavar="代码=股数",
+        help="手填股数（可多次）：00700=9100000000。年报里抽不到股本时用（腾讯只在附注披露、"
+        "苹果 10-K 拆行、非股份公司没有这一行）",
+    )
     p_plan.set_defaults(func=_cmd_plan)
 
     p_run = sub.add_parser("run", help="按确认过的草稿跑流水线")
@@ -883,6 +932,19 @@ def _parse_price_args(items: Sequence[str], as_of: str = "") -> dict[str, dict[s
     return out
 
 
+def _parse_shares_args(items: Sequence[str]) -> dict[str, str]:
+    """`代码=股数` → {代码: 股数}（股数保持字符串，由 plan 校验与换算）。"""
+    out: dict[str, str] = {}
+    for raw in items:
+        code, _, value = str(raw).partition("=")
+        code = code.strip()
+        value = value.strip()
+        if not code or not value:
+            raise JobError(f"--shares 要写成 代码=股数：{raw!r}")
+        out[code] = value
+    return out
+
+
 def _cmd_plan(args: argparse.Namespace) -> int:
     summary = plan(
         args.company_dir,
@@ -894,6 +956,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         force=args.force,
         fx_rate=args.fx,
         manual_prices=_parse_price_args(args.price, args.price_as_of),
+        manual_shares=_parse_shares_args(args.shares),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

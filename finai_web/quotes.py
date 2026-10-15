@@ -47,10 +47,14 @@ class QuoteError(RuntimeError):
 
 
 def tencent_symbol(code: str, market: str = "CN") -> str:
-    """腾讯的证券标识：沪 sh、深 sz、北 bj、港 hk，后面接代码。"""
+    """腾讯的证券标识：沪 sh、深 sz、北 bj、港 hk、美 us，后面接代码。"""
     text = str(code or "").strip()
-    if str(market).upper() == "HK":
+    upper = str(market).upper()
+    if upper == "HK":
         return f"hk{text.zfill(5)}"
+    if upper == "US":
+        # 美股用字母代码：腾讯接口写 usAAPL（大小写不敏感，统一大写更稳）
+        return f"us{text.upper()}"
     if text.startswith(("4", "8")) or text.startswith("92"):
         return f"bj{text}"
     if text.startswith(("6", "9")):
@@ -59,10 +63,16 @@ def tencent_symbol(code: str, market: str = "CN") -> str:
 
 
 def eastmoney_secid(code: str, market: str = "CN") -> str:
-    """东财的 secid：1 开头是沪市，0 是深市与北交所，116 是港股。"""
+    """东财的 secid：1 开头是沪市，0 是深市与北交所，116 是港股，105/106 是美股。"""
     text = str(code or "").strip()
-    if str(market).upper() == "HK":
+    upper = str(market).upper()
+    if upper == "HK":
         return f"116.{text.zfill(5)}"
+    if upper == "US":
+        # 105 = 纳斯达克，106 = 纽交所。猜错交易所时接口返回空，
+        # 取价会降级成「单源、没有交叉核对」并把这个事实写进 market.csv ——
+        # 不会静默拿一个别的标的的价格。真要严谨，破网时手填价格。
+        return f"105.{text.upper()}"
     if text.startswith("92"):  # 北交所新号段：属于 0 那一侧，不能当成沪市
         return f"0.{text}"
     if text.startswith(("6", "9")):
