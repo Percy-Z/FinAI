@@ -46,6 +46,55 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def _scale(values: Mapping[str, Any], rate: float) -> dict[str, Any]:
+    """把金额按汇率换算；非数字字段（code / as_of）原样保留。"""
+    if rate == 1.0:
+        return dict(values)
+    return {
+        key: (float(value) * rate if isinstance(value, (int, float)) else value)
+        for key, value in values.items()
+    }
+
+
+def _resolve_fx(
+    records: Mapping[str, Mapping[str, Any]],
+    target_code: str,
+    *,
+    fx_rate: float | None,
+    base_currency: str,
+) -> dict[str, Any]:
+    """确定要不要换算、按什么汇率换算，并把结果记下来。
+
+    规则：
+        - 报表币种 == 目标币种（默认人民币）→ 不换算，rate = 1.0
+        - 报表币种 != 目标币种 → 必须显式给 fx_rate，否则报错（不猜汇率）
+        - 同一批记录币种不一致 → 报错（一半美元一半人民币，换出来的表没法用）
+    """
+    # 以**目标公司**的币种为准。别的币种的记录不当竞争对手（会被跳过并写明原因），
+    # 因为把它们换算到一起需要各自的汇率，而汇率只能由使用者提供。
+    currency = str(
+        (records.get(target_code) or {}).get("currency") or ""
+    ).upper() or base_currency
+    if not currency:
+        currency = base_currency
+    if currency == base_currency:
+        return {"from": currency, "to": base_currency, "rate": 1.0, "converted": False}
+    if fx_rate is None or fx_rate <= 0:
+        raise AdapterError(
+            f"这份报表以 {currency} 计价，而流水线的单位约定是 {base_currency}。\n"
+            f"    必须显式给汇率（本模块不猜、也不假设 1:1）：\n"
+            f"        python -m finai_web build --target {target_code} --fx <1 {currency} 等于多少 {base_currency}>\n"
+            "    例如 1 USD = 7.15 CNY 就写 --fx 7.15。"
+        )
+    return {
+        "from": currency,
+        "to": base_currency,
+        "rate": float(fx_rate),
+        "converted": True,
+        "note": "金额已按该汇率换算；汇率由使用者提供，本模块不联网取汇率",
+    }
+
+
 def opening_balance_from(record: Mapping[str, Any]) -> dict[str, float]:
     """一条抽取记录 → `BalanceSheetState` 的构造参数。"""
     block = record.get("opening_balance")
@@ -78,7 +127,13 @@ def peer_from(record: Mapping[str, Any], *, as_of: str | None = None) -> dict[st
     row: dict[str, Any] = {"code": str(record.get("code") or "")}
     for name in schema.PEER_FIELDS:
         row[name] = float(values[name])
-    row["as_of"] = as_of or str(record.get("period") or f"{record.get('year')}A")
+    # 期间口径：优先写报表期末的确切日期（美国财年不是自然年，
+    # 「2025A」会让人以为是 2025-12-31）；没有期末日期时退回「2025A」这种写法。
+    row["as_of"] = (
+        as_of
+        or str(record.get("period_end") or "")
+        or str(record.get("period") or f"{record.get('year')}A")
+    )
     return row
 
 
@@ -87,6 +142,8 @@ def build_pipeline_input(
     *,
     target_code: str | None = None,
     generated_at: str | None = None,
+    fx_rate: float | None = None,
+    base_currency: str = "CNY",
 ) -> dict[str, Any]:
     """把逐条抽取记录汇总成流水线要的那一份输入。
 
@@ -94,6 +151,12 @@ def build_pipeline_input(
     其余进 peers。目标公司同时给出 `target_actuals`，
     供相对估值把目标公司的利润指标也换成**最近一个完整年度的实际数** ——
     这样目标与可比才是同一个口径（明细见 pipeline/adapters.py 的说明）。
+
+    币种（fx_rate）
+        流水线的单位约定是人民币元。如果年报用别的货币计价（例如美国 10-K 的
+        美元百万），必须显式给汇率，这里会统一换算并在 `fx` 里留痕；
+        不给汇率就报错 —— 把「美元百万」当成「人民币元」直接算进估值，
+        数字看着正常，结论会差一个数量级，而且没人看得出来。
     """
     if not records:
         raise AdapterError(
@@ -111,11 +174,16 @@ def build_pipeline_input(
         target_code = str(next(iter(newest)))
 
     target_record = newest[target_code]
+    _require_usable(target_record, role="目标公司")
+    fx = _resolve_fx(newest, target_code, fx_rate=fx_rate, base_currency=base_currency)
     payload: dict[str, Any] = {
         "version": 1,
         "generated_at": generated_at or _now(),
-        "opening_balance": opening_balance_from(target_record),
-        "target_actuals": peer_from(target_record),
+        "target_code": target_code,
+        "fx": fx,
+        "opening_balance": _scale(opening_balance_from(target_record), fx["rate"]),
+        "target_actuals": _scale(peer_from(target_record), fx["rate"]),
+        "history": history_from(target_record),
         "peers": {},
         "provenance": {},
     }
@@ -135,14 +203,41 @@ def build_pipeline_input(
         }
         if str(code) == target_code:
             continue
+        peer_currency = str(record.get("currency") or "").upper()
+        if peer_currency and peer_currency != str(fx["from"]):
+            payload["provenance"][str(code)]["skipped"] = (
+                f"币种不同（{peer_currency} vs 目标公司的 {fx['from']}）——"
+                "换算需要各自的汇率，本模块不猜；请分别建两份输入或先手工换算"
+            )
+            continue
         try:
-            payload["peers"][str(code)] = peer_from(record)
+            payload["peers"][str(code)] = _scale(peer_from(record), fx["rate"])
         except AdapterError as err:
             # 可比公司缺指标只跳过这一家：少一家可比不影响整条流水线，
             # 但必须写进 provenance，报告里要说得出「为什么这家没进表」。
             payload["provenance"][code]["skipped"] = str(err)
 
+    # 可比公司里若有「文字层不可用」的记录，跳过它并写清原因（它本来也抽不出指标）
+    for code, record in newest.items():
+        if str(code) == target_code or record.get("text_layer_usable") is not False:
+            continue
+        payload["provenance"][str(code)]["skipped"] = _unusable_reason(record)
+
     return payload
+
+
+def _unusable_reason(record: Mapping[str, Any]) -> str:
+    return (
+        f"{record.get('code')} 的 PDF 文字层不可用（字体缺 ToUnicode 映射，抽出来是 cid 码）——"
+        "本地解析救不回来。三条出路：① 换一份带文字层的 PDF（例如英文版，或用阅读器"
+        "「打印成 PDF」重新导出）；② 先 OCR 再抽；③ 用 Firecrawl 之类的云端解析。"
+    )
+
+
+def _require_usable(record: Mapping[str, Any], *, role: str) -> None:
+    """目标公司的记录如果文字层不可用，直接停下 —— 不让下游拿到残缺的基期数据。"""
+    if record.get("text_layer_usable") is False:
+        raise AdapterError(_unusable_reason(record).replace("的 PDF", f"（{role}）的 PDF", 1))
 
 
 def write_pipeline_input(payload: Mapping[str, Any], path: Path | None = None) -> Path:
@@ -217,6 +312,39 @@ def placeholders_from(payload: Mapping[str, Any]) -> dict[str, float]:
         mapping[str(name)] = float(value)
     mapping["book_equity_attributable"] = float(target.get("book_equity_attributable", 0.0) or 0.0)
     return mapping
+
+
+def history_from(record: Mapping[str, Any]) -> dict[str, Any]:
+    """把多年序列整理成「历史增速」——流水线里 drivers.revenue_growth 的现成来源。
+
+    流水线原先要求手填逐年收入增速。有了多年列示，这件事可以直接从年报算出来：
+
+        {"years": [2023, 2024, 2025],
+         "revenue": {"2023": ..., "2024": ..., "2025": ...},
+         "revenue_growth": {"2024": 0.0202, "2025": 0.0643}}
+
+    这里只做**算术**，不做判断：历史增速能不能直接当预测增速用，是另一回事
+    （要结合行业、管理层指引），报告里要说明。缺失年份不猜、不插值。
+    """
+    series = record.get("series") or {}
+    revenue = {
+        int(year): float(item["value_yuan"])
+        for year, item in (series.get("revenue") or {}).items()
+    }
+    growth: dict[int, float] = {}
+    years = sorted(revenue)
+    for previous, current in zip(years, years[1:]):
+        base = revenue[previous]
+        if base:
+            growth[current] = revenue[current] / base - 1.0
+    return {
+        "years": years,
+        "revenue": {str(year): revenue[year] for year in years},
+        "revenue_growth": {str(year): round(value, 6) for year, value in growth.items()},
+        "unit": "金额单位与年报一致（见记录里的 currency）；增速是小数",
+        "note": "历史增速由年报多年列示算出，供 [drivers].revenue_growth 参考；"
+        "是否直接用作预测增速需要另行判断",
+    }
 
 
 def render_placeholders(

@@ -96,6 +96,8 @@ apikey*.txt
 # ---------------------------------------------------------------------------
 /data/raw_pdf/
 /data/extracted/
+# 按币种/按批次分出来的旁路目录（例如演示带汇率换算时用的 data/extracted_aapl/）
+/data/extracted_*/
 /data/cache/
 /data/manifest.json
 # 每家公司一个目录：产出（PDF、抽取结果、缓存、下载清单）不进仓库，
@@ -106,6 +108,8 @@ apikey*.txt
 /data/companies/*/manifest.json
 # 覆盖假设文件前留的备份（本地留痕用，不进仓库）
 /data/companies/*/assumptions.*.bak
+# 假设草稿是取数那一步的中间产物（人确认后的结果落在 assumptions.toml 里）
+/data/companies/*/assumptions.draft.json
 
 # 定标公司清单是**本地工作文件**：写的是你要估哪几家、哪几年，
 # 属于个人工作状态而不是作品内容（模板 targets.example.csv 才是提交物）。
